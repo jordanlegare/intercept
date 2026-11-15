@@ -16,7 +16,7 @@ Install a recent stable Rust toolchain, then run:
 
 Open http://127.0.0.1:5000, enter an upstream URL such as https://example.com/, and choose **Open through Intercept**. The upstream page is served through the local relay. A fixed controller bar is injected at the bottom of the page:
 
-1. Enter the delay in whole seconds (1–86400).
+1. Enter a delay in seconds; fractional values are supported (from 0.000000001 to 86400 seconds).
 2. Press **[START]**.
 3. The Rust server owns the deadline. When it expires, queued link/form navigation is released and state-changing upstream requests are allowed.
 
