@@ -550,7 +550,11 @@ async fn proxy(
     let headers = response.headers_mut().expect("fresh response builder");
     for (name, value) in upstream_headers.iter() {
         if should_skip_response_header(name)
-            || (transformed && matches!(name, &header::CONTENT_LENGTH | &header::CONTENT_ENCODING | &header::ETAG))
+            || (transformed && (
+                name == header::CONTENT_LENGTH
+                    || name == header::CONTENT_ENCODING
+                    || name == header::ETAG
+            ))
         {
             continue;
         }
@@ -739,7 +743,7 @@ fn rewrite_html(
     let session_base_for_attrs = session_base.clone();
     let id_for_attrs = session_id.to_owned();
     settings = settings.append_element_content_handler(element!(
-        "a[href],area[href],link[href],script[src],img[src],source[src],iframe[src],video[src],audio[src],input[src],form[action],button[formaction],base[href],object[data],embed[src],track[src],[srcset],[style]",
+        "a[href],area[href],link[href],script[src],img[src],source[src],iframe[src],video[src],video[poster],audio[src],input[src],form[action],button[formaction],base[href],object[data],embed[src],track[src],[srcset],[style]",
         move |el| {
             for attribute in ["href", "src", "action", "formaction", "poster", "data", "cite", "background"] {
                 if let Some(value) = el.get_attribute(attribute) {
