@@ -1346,7 +1346,7 @@ mod tests {
             "session123",
         ).unwrap();
 
-        assert!(output.contains(r#"import("/p/session123/_intercept_session123/https/cdn.example/shared/chunk.js")"#), "rewritten output: {output}");
+        assert!(output.contains(r#"import "/p/session123/_intercept_session123/https/cdn.example/shared/chunk.js""#), "rewritten output: {output}");
         assert!(output.contains(r#"import("/p/session123/_intercept_session123/https/cdn.example/assets/js/chunk.js")"#));
         assert!(output.contains(r#"from "/p/session123/_intercept_session123/https/cdn.example/assets/shared/value.js""#));
         assert!(output.contains(r#"import("react")"#));
