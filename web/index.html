@@ -21,7 +21,7 @@
 <main>
   <div class="mark">LOCAL HTTP RELAY · 127.0.0.1:5000</div>
   <h1>INTERCEPT<span style="color:#73d1ff">_</span></h1>
-  <p>Open one HTTP or HTTPS origin through the local relay. Intercept rewrites same-origin links and resources, observes browser events, and holds state-changing HTTP requests until the Rust timer authorizes them.</p>
+  <p>Open one HTTP or HTTPS origin through the local relay. The website is served with its normal appearance and behavior, with only a bottom Intercept authority banner added. Rust holds state-changing HTTP requests until the timer authorizes them.</p>
   <form id="launch">
     <label for="target">UPSTREAM WEBSITE</label>
     <input id="target" name="url" type="url" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://example.com/" value="https://example.com/" required>
