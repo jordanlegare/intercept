@@ -45,7 +45,7 @@
 
   function routeSrcset(value) {
     return String(value).split(",").map(candidate => {
-      const pieces = candidate.trim().split(/\\s+/);
+      const pieces = candidate.trim().split(/\s+/);
       if (!pieces[0]) return candidate;
       pieces[0] = routeToProxy(pieces[0]) || pieces[0];
       return pieces.join(" ");
@@ -99,7 +99,7 @@
   const nativeSetProperty = window.CSSStyleDeclaration && CSSStyleDeclaration.prototype.setProperty;
   if (nativeSetProperty) {
     CSSStyleDeclaration.prototype.setProperty = function(property, value, priority) {
-      const rewritten = String(value).replace(/url\\(\\s*["']?(.*?)["']?\\s*\\)/gi, (match, url) => {
+      const rewritten = String(value).replace(/url\(\s*["']?(.*?)["']?\s*\)/gi, (match, url) => {
         const routed = routeToProxy(url.trim());
         return routed ? 'url("' + routed + '")' : match;
       });
