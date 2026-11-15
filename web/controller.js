@@ -75,6 +75,20 @@
     }
   }
 
+  function routeRequestUrl(value) {
+    try {
+      const url = new URL(value, location.href);
+      if (url.origin !== location.origin) return null;
+      const prefix = "/p/" + sessionId;
+      if (url.pathname !== prefix && !url.pathname.startsWith(prefix + "/")) {
+        url.pathname = prefix + (url.pathname.startsWith("/") ? url.pathname : "/" + url.pathname);
+      }
+      return url.href;
+    } catch (_) {
+      return null;
+    }
+  }
+
   function sameLocalOrigin(value) {
     try { return new URL(value, location.href).origin === location.origin; }
     catch (_) { return false; }
@@ -147,20 +161,36 @@
     const rawUrl = input instanceof Request ? input.url : String(input);
     const method = String((init && init.method) || (input instanceof Request && input.method) || "GET").toUpperCase();
     record("fetch", rawUrl, method);
-    if (!sameLocalOrigin(rawUrl)) {
+    const routedUrl = routeRequestUrl(rawUrl);
+    if (!routedUrl) {
       return Promise.reject(new TypeError("Intercept blocks cross-origin fetch; open the destination in its own session."));
     }
-    return nativeFetch.call(this, input, init);
+    const routedInput = input instanceof Request ? new Request(routedUrl, input) : routedUrl;
+    return nativeFetch.call(this, routedInput, init);
   };
 
   const xhrMeta = new WeakMap();
   const nativeOpen = XMLHttpRequest.prototype.open;
   const nativeSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-    const absolute = new URL(String(url), location.href).href;
-    xhrMeta.set(this, {method: String(method).toUpperCase(), url: absolute});
-    return nativeOpen.call(this, method, url, ...rest);
+    const routedUrl = routeRequestUrl(String(url));
+    if (!routedUrl) throw new DOMException("Intercept blocks cross-origin XHR", "SecurityError");
+    xhrMeta.set(this, {method: String(method).toUpperCase(), url: routedUrl});
+    return nativeOpen.call(this, method, routedUrl, ...rest);
   };
+  if (navigator.sendBeacon) {
+    const nativeSendBeacon = navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon = function(url, data) {
+      const routedUrl = routeRequestUrl(String(url));
+      if (!routedUrl) {
+        record("beacon_blocked", String(url), "Cross-origin sendBeacon blocked");
+        return false;
+      }
+      record("send_beacon", routedUrl, "POST");
+      return nativeSendBeacon(routedUrl, data);
+    };
+  }
+
   XMLHttpRequest.prototype.send = function(...args) {
     const meta = xhrMeta.get(this);
     if (meta) {
