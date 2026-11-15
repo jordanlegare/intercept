@@ -43,8 +43,7 @@ One reqwest Client is created per upstream origin and reused. Each new origin is
 
 - The proxied page is left visually intact. Intercept adds only a fixed authority banner at the bottom with a decimal-seconds input, **[START]**, state, and countdown.
 - HTML links, forms, scripts, images, media, srcset, inline CSS, and style blocks are rewritten to local session paths. External CSS url() and @import references are rewritten too.
-- Network URLs created at runtime through fetch, XHR, sendBeacon, EventSource, workers, window.open, dynamic URL attributes, and CSS setters are routed through the same local server. Static and dynamic JavaScript module imports (including root-relative and relative specifiers) and classic-worker `importScripts()` URLs are rewritten as well.
-- If a browser navigation or resource request still reaches an unprefixed localhost path (for example, a root-relative `location.assign()`), the fallback route recovers its session and upstream origin from the local `Referer` and forwards it through the session. Requests without a valid session `Referer` receive a diagnostic 404.
+- Network URLs created at runtime through fetch, XHR, sendBeacon, EventSource, workers, window.open, dynamic URL attributes, and CSS setters are routed through the same local server. Static JavaScript module imports and dynamic imports are rewritten as well.
 - Each upstream origin has its own pooled, DNS-pinned client. Cookies are scoped to that origin's local proxy path so cookies from different hosts do not collide.
 - Static assets are cached per session in memory (64 MiB total; 8 MiB per entry; five-minute default TTL). HTML and API responses are fetched live so login state and application data are not served stale.
 - Rust holds POST, PUT, PATCH, and DELETE requests from every proxied origin until the timer expires. Request bodies are buffered up to 8 MiB; responses are limited to 32 MiB. GET, HEAD, and OPTIONS requests are allowed while the timer is pending.
@@ -69,9 +68,6 @@ The rewrites/ directory contains the authority-banner stylesheet and the extensi
 ## Configuration
 
 The default listener is intentionally fixed to 127.0.0.1:5000. Restarting the process clears sessions and timers. Logs use the RUST_LOG environment variable (default: intercept=info).
-
-
-For routing diagnostics, run with `RUST_LOG=intercept=debug cargo run`. Debug logs show each localhost session URI translated to its upstream URL. Unprefixed requests recovered through the Referer are logged as `Recovered an unprefixed browser request`; upstream non-success responses are logged separately with the resolved upstream URL. Requests that cannot be associated with a session are logged with the missing or unrecognized Referer.
 
 ## Tests
 
