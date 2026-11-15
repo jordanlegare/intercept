@@ -18,8 +18,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Format
+      - name: Format source
+        run: cargo fmt --all
+      - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Check browser controller syntax
+        run: node --check web/controller.js
       - name: Test
         run: cargo test --all-targets
       - name: Clippy
