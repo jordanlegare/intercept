@@ -26,7 +26,7 @@ use tokio::{
     sync::{watch, Mutex, RwLock},
     time::{sleep_until, Instant},
 };
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use url::Url;
 use uuid::Uuid;
 
@@ -38,7 +38,6 @@ const MIN_DELAY_NANOS: f64 = 0.000_000_001;
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHE_ENTRY_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_ASSET_CACHE_SECONDS: u64 = 300;
-
 
 #[derive(Clone)]
 struct AppState {
@@ -119,7 +118,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/status", get(session_status))
         .route("/p/{id}", any(proxy))
         .route("/p/{id}/{*path}", any(proxy))
-        .fallback(unmatched)
         .with_state(state);
 
     let address: SocketAddr = LISTEN.parse()?;
@@ -150,74 +148,6 @@ async fn intercept_css() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         include_str!("../rewrites/intercept.css"),
     )
-}
-
-async fn unmatched(
-    State(state): State<AppState>,
-    OriginalUri(uri): OriginalUri,
-    request: Request<Body>,
-) -> Response<Body> {
-    let Some(referer) = request.headers().get(header::REFERER) else {
-        warn!(method = %request.method(), local_uri = %uri, "Unmatched localhost request has no Referer; cannot identify its Intercept session");
-        return plain(StatusCode::NOT_FOUND, "No Intercept session could be identified for this request (missing Referer).");
-    };
-    let Some(id) = session_id_from_referer(referer) else {
-        warn!(method = %request.method(), local_uri = %uri, referer = ?referer, "Unmatched localhost request did not originate from an Intercept session");
-        return plain(StatusCode::NOT_FOUND, "No Intercept session could be identified from the request Referer.");
-    };
-    let session = match find_session(&state, &id).await {
-        Ok(session) => session,
-        Err((status, message)) => {
-            warn!(method = %request.method(), local_uri = %uri, session = %id, "Unmatched request refers to an unknown Intercept session");
-            return plain(status, &message);
-        }
-    };
-    let upstream_uri = match fallback_upstream_uri(&uri, referer, &session) {
-        Ok(uri) => uri,
-        Err(error) => {
-            warn!(method = %request.method(), local_uri = %uri, session = %id, %error, "Could not route unmatched request from Referer");
-            return plain(StatusCode::BAD_REQUEST, &error);
-        }
-    };
-
-    info!(
-        method = %request.method(),
-        local_uri = %uri,
-        upstream_uri = %upstream_uri,
-        session = %id,
-        "Recovered an unprefixed browser request from its Intercept Referer"
-    );
-    proxy(
-        State(state),
-        Path(HashMap::from([("id".to_owned(), id)])),
-        OriginalUri(upstream_uri),
-        request,
-    ).await
-}
-
-fn session_id_from_referer(value: &HeaderValue) -> Option<String> {
-    let referer = Url::parse(value.to_str().ok()?).ok()?;
-    if !referer.host_str().is_some_and(|host| {
-        host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("localhost")
-    }) || referer.port() != Some(5000) {
-        return None;
-    }
-
-    let id = referer.path().strip_prefix("/p/")?.split('/').next()?;
-    if id.is_empty() { None } else { Some(id.to_owned()) }
-}
-
-fn fallback_upstream_uri(
-    uri: &axum::http::Uri,
-    referer: &HeaderValue,
-    session: &Session,
-) -> Result<axum::http::Uri, String> {
-    let referer_url = upstream_referer_url(referer, session)
-        .ok_or_else(|| "Could not recover the upstream document URL from Referer".to_owned())?;
-    let target = url_from_origin_path(&referer_url, uri.path(), uri.query())?;
-    proxy_url(&target, &session.base_url, &session.id)
-        .parse::<axum::http::Uri>()
-        .map_err(|_| "Could not construct a recovered session route".to_owned())
 }
 
 async fn create_session(
@@ -481,12 +411,8 @@ async fn proxy(
 
     let upstream_url = match upstream_url_for_request(&uri, &session) {
         Ok(url) => url,
-        Err(message) => {
-            warn!(local_uri = %uri, error = %message, "Could not map session path to an upstream URL");
-            return plain(StatusCode::BAD_REQUEST, &message);
-        }
+        Err(message) => return plain(StatusCode::BAD_REQUEST, &message),
     };
-    debug!(method = %request.method(), local_uri = %uri, upstream_url = %upstream_url, "Translated proxy request");
     if !matches!(upstream_url.scheme(), "http" | "https") || !is_public_destination(&upstream_url) {
         return plain(StatusCode::FORBIDDEN, "Only public HTTP and HTTPS destinations are allowed");
     }
@@ -532,28 +458,20 @@ async fn proxy(
         };
 
         let mut builder = client.request(method, upstream_url.clone());
-        let initiating_url = parts.headers.get(header::REFERER)
-            .and_then(|value| upstream_referer_url(value, &session));
-        let initiating_origin = initiating_url.as_ref()
-            .map(|url| url.origin().ascii_serialization())
-            .unwrap_or_else(|| session.base_url.origin().ascii_serialization());
-
         for (name, value) in parts.headers.iter() {
             if should_skip_request_header(name) {
                 continue;
             }
             if name == header::ORIGIN {
-                if let Ok(origin) = HeaderValue::from_str(&initiating_origin) {
+                if let Ok(origin) = HeaderValue::from_str(&session.base_url.origin().ascii_serialization()) {
                     builder = builder.header(name.clone(), origin);
                 }
             } else if name == header::REFERER {
-                if let Some(referer) = initiating_url.as_ref()
-                    .and_then(|url| HeaderValue::from_str(url.as_str()).ok())
-                {
+                if let Some(referer) = rewrite_referer(value, &session) {
                     builder = builder.header(name.clone(), referer);
                 }
             } else if name.as_str() == "sec-fetch-site" {
-                let fetch_site = if upstream_url.origin().ascii_serialization() == initiating_origin {
+                let fetch_site = if upstream_url.origin() == session.base_url.origin() {
                     "same-origin"
                 } else {
                     "cross-site"
@@ -574,15 +492,6 @@ async fn proxy(
         };
 
         let status = upstream.status();
-        if !status.is_success() {
-            warn!(
-                status = %status,
-                method = %parts.method,
-                local_uri = %uri,
-                upstream_url = %upstream_url,
-                "Upstream returned a non-success HTTP status"
-            );
-        }
         let headers = upstream.headers().clone();
         if let Some(length) = upstream.content_length() {
             if length > MAX_RESPONSE_BODY as u64 {
@@ -708,8 +617,7 @@ fn upstream_url_for_request(uri: &axum::http::Uri, session: &Session) -> Result<
     let suffix = uri.path().strip_prefix(&prefix)
         .ok_or_else(|| "Request path is outside this session".to_owned())?;
 
-    let external_origin_path = external_origin_path_prefix(&session.id);
-    if let Some(encoded_origin) = suffix.strip_prefix(&external_origin_path) {
+    if let Some(encoded_origin) = suffix.strip_prefix("/_/") {
         let (scheme, host_and_path) = encoded_origin.split_once('/')
             .ok_or_else(|| "Malformed proxied origin path".to_owned())?;
         if !matches!(scheme, "http" | "https") {
@@ -720,50 +628,40 @@ fn upstream_url_for_request(uri: &axum::http::Uri, session: &Session) -> Result<
         if authority.is_empty() {
             return Err("Missing upstream host in proxied URL".into());
         }
-        let origin = Url::parse(&format!("{scheme}://{authority}/"))
-            .map_err(|_| "Malformed upstream origin".to_owned())?;
-        let target_path = if path.is_empty() { "/".to_owned() } else { format!("/{path}") };
-        return url_from_origin_path(&origin, &target_path, uri.query());
-    }
-
-    if suffix.is_empty() {
-        let mut target = session.base_url.clone();
-        if let Some(query) = uri.query() {
-            target.set_query(Some(query));
-        }
+        let mut target = Url::parse(&format!("{scheme}://{authority}/{}", path.trim_start_matches('/')))
+            .map_err(|_| "Malformed upstream URL".to_owned())?;
+        target.set_query(uri.query());
         return Ok(target);
     }
 
-    url_from_origin_path(&session.base_url, suffix, uri.query())
-}
-
-fn url_from_origin_path(origin: &Url, path: &str, query: Option<&str>) -> Result<Url, String> {
-    let path = if path.is_empty() { "/" } else { path };
-    let mut absolute = format!("{}{}", origin.origin().ascii_serialization(), path);
-    if let Some(query) = query {
-        absolute.push('?');
-        absolute.push_str(query);
+    let mut target = session.base_url.clone();
+    if !suffix.is_empty() {
+        target.set_path(suffix);
+        target.set_query(uri.query());
+    } else if let Some(query) = uri.query() {
+        target.set_query(Some(query));
     }
-    Url::parse(&absolute).map_err(|_| "Malformed upstream URL path".to_owned())
+    Ok(target)
 }
 
-fn upstream_referer_url(value: &HeaderValue, session: &Session) -> Option<Url> {
+fn rewrite_referer(value: &HeaderValue, session: &Session) -> Option<HeaderValue> {
     let text = value.to_str().ok()?;
     let referer = Url::parse(text).ok()?;
     if !matches!(referer.scheme(), "http" | "https") {
         return None;
     }
 
-    if referer.host_str().is_some_and(|host| {
+    let upstream = if referer.host_str().is_some_and(|host| {
         host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("localhost")
     }) && referer.port() == Some(5000) {
         let mut referer = referer;
         referer.set_fragment(None);
         let uri = referer.as_str().parse::<axum::http::Uri>().ok()?;
-        upstream_url_for_request(&uri, session).ok()
+        upstream_url_for_request(&uri, session).ok()?
     } else {
-        Some(referer)
-    }
+        referer
+    };
+    HeaderValue::from_str(upstream.as_str()).ok()
 }
 
 fn resource_cache_key(url: &Url, headers: &HeaderMap) -> String {
@@ -892,7 +790,7 @@ fn rewrite_html(
     let session_base_for_attrs = session_base.clone();
     let id_for_attrs = session_id.to_owned();
     settings = settings.append_element_content_handler(element!(
-        "[href],[src],[action],[formaction],[poster],[data],[cite],[background],[srcset],[style]",
+        "a[href],area[href],link[href],script[src],img[src],source[src],iframe[src],video[src],video[poster],audio[src],input[src],form[action],button[formaction],base[href],object[data],embed[src],track[src],[srcset],[style]",
         move |el| {
             let mut rewrote_resource = false;
             for attribute in ["href", "src", "action", "formaction", "poster", "data", "cite", "background"] {
@@ -938,10 +836,9 @@ fn rewrite_html(
 
     let id_for_head = session_id.to_owned();
     let primary_origin = session_base.origin().ascii_serialization();
-    let page_origin = base.origin().ascii_serialization();
     settings = settings.append_element_content_handler(element!("head", move |el| {
         let head = format!(
-            r#"<script src="/assets/controller.js" data-session="{id_for_head}" data-upstream-origin="{page_origin}" data-primary-origin="{primary_origin}"></script><link rel="stylesheet" href="/assets/intercept.css">"#
+            r#"<script src="/assets/controller.js" data-session="{id_for_head}" data-upstream-origin="{primary_origin}"></script><link rel="stylesheet" href="/assets/intercept.css">"#
         );
         el.prepend(&head, ContentType::Html);
         Ok(())
@@ -989,17 +886,13 @@ fn rewrite_url(
     Some(proxy_url(&absolute, session_base, session_id))
 }
 
-fn external_origin_path_prefix(session_id: &str) -> String {
-    format!("/_intercept_{session_id}/")
-}
-
 fn proxy_origin_prefix(target: &Url, session_base: &Url, session_id: &str) -> String {
     if target.origin() == session_base.origin() {
         return format!("/p/{session_id}");
     }
     let origin = target.origin().ascii_serialization();
     let authority = origin.strip_prefix(&format!("{}://", target.scheme())).unwrap_or("");
-    format!("/p/{session_id}{}{}/{authority}", external_origin_path_prefix(session_id), target.scheme())
+    format!("/p/{session_id}/_/{}/{authority}", target.scheme())
 }
 
 fn proxy_url(target: &Url, session_base: &Url, session_id: &str) -> String {
@@ -1061,9 +954,7 @@ fn rewrite_css(css: &str, base: &Url, session_base: &Url, session_id: &str) -> R
 }
 
 fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: &str) -> Result<String, String> {
-    let module_specifier = r#"(?:(?:https?://|//)[^"']+|/[^/][^"']*|\.\.?/[^"']+)"#;
-    let static_import_pattern = format!(r#"(?m)(\b(?:import|export)\s+[^;]*?\bfrom\s*|\bimport\s+)(["'])({module_specifier})(["'])"#);
-    let static_imports = Regex::new(&static_import_pattern)
+    let static_imports = Regex::new(r#"(?m)(\b(?:import|export)\s+(?:[^;\n]*?\s+from\s*)?)(["'])(https?://[^"']+)(["'])"#)
         .map_err(|error| error.to_string())?;
     let rewritten = static_imports.replace_all(source, |captures: &regex::Captures<'_>| {
         let prefix = captures.get(1).map(|m| m.as_str()).unwrap_or("");
@@ -1074,8 +965,7 @@ fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: 
         format!("{prefix}{quote}{route}{suffix}")
     });
 
-    let dynamic_import_pattern = format!(r#"(?m)\bimport\(\s*(["'])({module_specifier})(["'])\s*\)"#);
-    let dynamic_imports = Regex::new(&dynamic_import_pattern)
+    let dynamic_imports = Regex::new(r#"(?m)\bimport\(\s*(["'])(https?://[^"']+)(["'])\s*\)"#)
         .map_err(|error| error.to_string())?;
     let rewritten = dynamic_imports.replace_all(&rewritten, |captures: &regex::Captures<'_>| {
         let quote = captures.get(1).map(|m| m.as_str()).unwrap_or("'");
@@ -1083,23 +973,6 @@ fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: 
         let suffix = captures.get(3).map(|m| m.as_str()).unwrap_or(quote);
         let route = rewrite_url(base, session_base, session_id, raw).unwrap_or_else(|| raw.to_owned());
         format!("import({quote}{route}{suffix})")
-    });
-
-    let import_scripts_call = Regex::new(r"(?s)\bimportScripts\(([^)]*)\)")
-        .map_err(|error| error.to_string())?;
-    let import_scripts_argument_pattern = format!(r#"(["'])({module_specifier})(["'])"#);
-    let import_scripts_arguments = Regex::new(&import_scripts_argument_pattern)
-        .map_err(|error| error.to_string())?;
-    let rewritten = import_scripts_call.replace_all(&rewritten, |captures: &regex::Captures<'_>| {
-        let arguments = captures.get(1).map(|m| m.as_str()).unwrap_or("");
-        let rewritten_arguments = import_scripts_arguments.replace_all(arguments, |argument: &regex::Captures<'_>| {
-            let quote = argument.get(1).map(|m| m.as_str()).unwrap_or("'");
-            let raw = argument.get(2).map(|m| m.as_str()).unwrap_or("");
-            let suffix = argument.get(3).map(|m| m.as_str()).unwrap_or(quote);
-            let route = rewrite_url(base, session_base, session_id, raw).unwrap_or_else(|| raw.to_owned());
-            format!("{quote}{route}{suffix}")
-        });
-        format!("importScripts({rewritten_arguments})")
     });
     Ok(rewritten.into_owned())
 }
@@ -1246,18 +1119,6 @@ fn plain(status: StatusCode, message: &str) -> Response<Body> {
 mod tests {
     use super::*;
 
-    fn test_session(base_url: &str) -> Session {
-        let (gate_tx, _) = watch::channel(GateState::Waiting);
-        Session {
-            id: "session123".to_owned(),
-            base_url: Url::parse(base_url).unwrap(),
-            clients: Mutex::new(HashMap::new()),
-            cache: Mutex::new(ResourceCache::default()),
-            gate: Mutex::new(GateState::Waiting),
-            gate_tx,
-        }
-    }
-
     #[test]
     fn accepts_fractional_timer_delays() {
         assert_eq!(timer_duration(1.25).unwrap(), Duration::from_millis(1250));
@@ -1317,7 +1178,7 @@ mod tests {
         );
         assert_eq!(
             rewrite_url(&base, &base, "session123", "https://cdn.example/image.png"),
-            Some("/p/session123/_intercept_session123/https/cdn.example/image.png".to_owned())
+            Some("/p/session123/_/https/cdn.example/image.png".to_owned())
         );
     }
 
@@ -1370,7 +1231,7 @@ mod tests {
             "session123",
         ).unwrap();
         assert!(output.contains("/p/session123/images/bg.png"));
-        assert!(output.contains("/p/session123/_intercept_session123/https/cdn.example/theme.css"));
+        assert!(output.contains("/p/session123/_/https/cdn.example/theme.css"));
     }
 
     #[test]
@@ -1384,7 +1245,7 @@ mod tests {
                 &primary,
                 "session123",
             ),
-            "asset=abc; Path=/p/session123/_intercept_session123/https/cdn.example/; HttpOnly"
+            "asset=abc; Path=/p/session123/_/https/cdn.example/; HttpOnly"
         );
     }
 
@@ -1394,91 +1255,8 @@ mod tests {
         let primary = Url::parse("https://example.com/").unwrap();
         assert_eq!(
             rewrite_location("https://accounts.example/login", &current, &primary, "session123"),
-            "/p/session123/_intercept_session123/https/accounts.example/login"
+            "/p/session123/_/https/accounts.example/login"
         );
-    }
-
-    #[test]
-    fn rewrites_root_relative_and_relative_javascript_module_imports() {
-        let primary = Url::parse("https://example.com/").unwrap();
-        let module = Url::parse("https://cdn.example/assets/js/app.js").unwrap();
-        let output = rewrite_javascript(
-            r#"import "/shared/chunk.js"; import("./chunk.js"); export { value } from "../shared/value.js"; import("react");"#,
-            &module,
-            &primary,
-            "session123",
-        ).unwrap();
-
-        assert!(output.contains(r#"import "/p/session123/_intercept_session123/https/cdn.example/shared/chunk.js""#), "rewritten output: {output}");
-        assert!(output.contains(r#"import("/p/session123/_intercept_session123/https/cdn.example/assets/js/chunk.js")"#));
-        assert!(output.contains(r#"from "/p/session123/_intercept_session123/https/cdn.example/assets/shared/value.js""#));
-        assert!(output.contains(r#"import("react")"#));
-    }
-
-    #[test]
-    fn rewrites_root_relative_worker_import_scripts() {
-        let primary = Url::parse("https://example.com/").unwrap();
-        let worker = Url::parse("https://cdn.example/workers/worker.js").unwrap();
-        let output = rewrite_javascript(
-            r#"importScripts("/workers/chunk.js", "./helper.js");"#,
-            &worker,
-            &primary,
-            "session123",
-        ).unwrap();
-
-        assert!(output.contains("/p/session123/_intercept_session123/https/cdn.example/workers/chunk.js"));
-        assert!(output.contains("/p/session123/_intercept_session123/https/cdn.example/workers/helper.js"));
-    }
-
-    #[test]
-    fn rewrites_network_attributes_on_generic_and_svg_elements() {
-        let primary = Url::parse("https://example.com/").unwrap();
-        let html = r##"<!doctype html><html><head></head><body><svg><use href="/icons.svg#home"></use><image href="https://cdn.example/image.svg"></image></svg><blockquote cite="/article/source"></blockquote></body></html>"##;
-        let output = rewrite_html(html, &primary, &primary, "session123").unwrap();
-
-        assert!(output.contains("/p/session123/icons.svg#home"));
-        assert!(output.contains("/p/session123/_intercept_session123/https/cdn.example/image.svg"));
-        assert!(output.contains("/p/session123/article/source"));
-    }
-
-    #[test]
-    fn identifies_session_from_unprefixed_request_referer() {
-        let referer: HeaderValue =
-            "http://127.0.0.1:5000/p/session123/_intercept_session123/https/cdn.example/page"
-                .parse()
-                .unwrap();
-        assert_eq!(session_id_from_referer(&referer).as_deref(), Some("session123"));
-
-        let external_referer: HeaderValue = "https://example.com/page".parse().unwrap();
-        assert_eq!(session_id_from_referer(&external_referer), None);
-    }
-
-    #[test]
-    fn recovers_root_relative_unprefixed_requests_using_external_iframe_origin() {
-        let session = test_session("https://example.com/home");
-        let referer: HeaderValue =
-            "http://127.0.0.1:5000/p/session123/_intercept_session123/https/cdn.example/docs/page"
-                .parse()
-                .unwrap();
-        let uri = "/api/data?cursor=a%2Fb"
-            .parse::<axum::http::Uri>()
-            .unwrap();
-
-        let recovered = fallback_upstream_uri(&uri, &referer, &session).unwrap();
-        assert_eq!(
-            recovered.to_string(),
-            "/p/session123/_intercept_session123/https/cdn.example/api/data?cursor=a%2Fb"
-        );
-    }
-
-    #[test]
-    fn recovers_root_relative_unprefixed_requests_using_primary_origin() {
-        let session = test_session("https://example.com/home");
-        let referer: HeaderValue = "http://127.0.0.1:5000/p/session123/home".parse().unwrap();
-        let uri = "/favicon.ico".parse::<axum::http::Uri>().unwrap();
-
-        let recovered = fallback_upstream_uri(&uri, &referer, &session).unwrap();
-        assert_eq!(recovered.to_string(), "/p/session123/favicon.ico");
     }
 
     #[test]
@@ -1490,59 +1268,12 @@ mod tests {
     }
 
     #[test]
-    fn decodes_external_origin_paths_without_losing_encoded_path_bytes() {
-        let session = test_session("https://example.com/start");
-        let uri = "/p/session123/_intercept_session123/https/cdn.example:8443/assets/a%2Fb%20c.css?sig=a%2Fb"
-            .parse::<axum::http::Uri>()
-            .unwrap();
-        let target = upstream_url_for_request(&uri, &session).unwrap();
-        assert_eq!(
-            target.as_str(),
-            "https://cdn.example:8443/assets/a%2Fb%20c.css?sig=a%2Fb"
-        );
-    }
-
-    #[test]
-    fn decodes_primary_origin_paths_without_double_encoding() {
-        let session = test_session("https://example.com/start");
-        let uri = "/p/session123/files/a%2Fb/%E2%9C%93.css?sig=a%2Fb"
-            .parse::<axum::http::Uri>()
-            .unwrap();
-        let target = upstream_url_for_request(&uri, &session).unwrap();
-        assert_eq!(
-            target.as_str(),
-            "https://example.com/files/a%2Fb/%E2%9C%93.css?sig=a%2Fb"
-        );
-    }
-
-    #[test]
-    fn primary_origin_paths_starting_with_underscore_slash_are_not_mistaken_for_proxy_routes() {
-        let session = test_session("https://example.com/");
-        let uri = "/p/session123/_/https/cdn.example/assets/image.png"
-            .parse::<axum::http::Uri>()
-            .unwrap();
-        let target = upstream_url_for_request(&uri, &session).unwrap();
-        assert_eq!(
-            target.as_str(),
-            "https://example.com/_/https/cdn.example/assets/image.png"
-        );
-    }
-
-    #[test]
-    fn root_path_keeps_the_submitted_url_path_and_query() {
-        let session = test_session("https://example.com/catalog?edition=2");
-        let uri = "/p/session123".parse::<axum::http::Uri>().unwrap();
-        let target = upstream_url_for_request(&uri, &session).unwrap();
-        assert_eq!(target.as_str(), "https://example.com/catalog?edition=2");
-    }
-
-    #[test]
     fn namespaces_external_origins_in_proxy_paths() {
         let primary = Url::parse("https://example.com/").unwrap();
         let external = Url::parse("https://cdn.example:8443/a.js").unwrap();
         assert_eq!(
             proxy_url(&external, &primary, "session123"),
-            "/p/session123/_intercept_session123/https/cdn.example:8443/a.js"
+            "/p/session123/_/https/cdn.example:8443/a.js"
         );
     }
 }
