@@ -792,6 +792,7 @@ fn rewrite_html(
     settings = settings.append_element_content_handler(element!(
         "a[href],area[href],link[href],script[src],img[src],source[src],iframe[src],video[src],video[poster],audio[src],input[src],form[action],button[formaction],base[href],object[data],embed[src],track[src],[srcset],[style]",
         move |el| {
+            let mut rewrote_resource = false;
             for attribute in ["href", "src", "action", "formaction", "poster", "data", "cite", "background"] {
                 if let Some(value) = el.get_attribute(attribute) {
                     if let Some(rewritten) = rewrite_url(
@@ -801,6 +802,7 @@ fn rewrite_html(
                         &value,
                     ) {
                         el.set_attribute(attribute, &rewritten)?;
+                        rewrote_resource = true;
                     }
                 }
             }
@@ -812,6 +814,11 @@ fn rewrite_html(
                     &srcset,
                 );
                 el.set_attribute("srcset", &rewritten)?;
+                rewrote_resource = true;
+            }
+            if rewrote_resource && el.get_attribute("integrity").is_some() {
+                // Rewritten CSS/module responses no longer match upstream SRI hashes.
+                el.remove_attribute("integrity");
             }
             if let Some(style) = el.get_attribute("style") {
                 if let Ok(rewritten) = rewrite_css(
