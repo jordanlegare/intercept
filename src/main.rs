@@ -152,9 +152,72 @@ async fn intercept_css() -> impl IntoResponse {
     )
 }
 
-async fn unmatched(OriginalUri(uri): OriginalUri) -> Response<Body> {
-    warn!(local_uri = %uri, "Request did not match an Intercept route");
-    plain(StatusCode::NOT_FOUND, "No Intercept route matches this URL. The browser request may have escaped session URL rewriting.")
+async fn unmatched(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    request: Request<Body>,
+) -> Response<Body> {
+    let Some(referer) = request.headers().get(header::REFERER) else {
+        warn!(method = %request.method(), local_uri = %uri, "Unmatched localhost request has no Referer; cannot identify its Intercept session");
+        return plain(StatusCode::NOT_FOUND, "No Intercept session could be identified for this request (missing Referer).");
+    };
+    let Some(id) = session_id_from_referer(referer) else {
+        warn!(method = %request.method(), local_uri = %uri, referer = ?referer, "Unmatched localhost request did not originate from an Intercept session");
+        return plain(StatusCode::NOT_FOUND, "No Intercept session could be identified from the request Referer.");
+    };
+    let session = match find_session(&state, &id).await {
+        Ok(session) => session,
+        Err((status, message)) => {
+            warn!(method = %request.method(), local_uri = %uri, session = %id, "Unmatched request refers to an unknown Intercept session");
+            return plain(status, &message);
+        }
+    };
+    let upstream_uri = match fallback_upstream_uri(&uri, referer, &session) {
+        Ok(uri) => uri,
+        Err(error) => {
+            warn!(method = %request.method(), local_uri = %uri, session = %id, %error, "Could not route unmatched request from Referer");
+            return plain(StatusCode::BAD_REQUEST, &error);
+        }
+    };
+
+    info!(
+        method = %request.method(),
+        local_uri = %uri,
+        upstream_uri = %upstream_uri,
+        session = %id,
+        "Recovered an unprefixed browser request from its Intercept Referer"
+    );
+    proxy(
+        state,
+        Path(HashMap::from([("id".to_owned(), id)])),
+        OriginalUri(upstream_uri),
+        request,
+    ).await
+}
+
+fn session_id_from_referer(value: &HeaderValue) -> Option<String> {
+    let referer = Url::parse(value.to_str().ok()?).ok()?;
+    if !referer.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("localhost")
+    }) || referer.port() != Some(5000) {
+        return None;
+    }
+
+    let id = referer.path().strip_prefix("/p/")?.split('/').next()?;
+    if id.is_empty() { None } else { Some(id.to_owned()) }
+}
+
+fn fallback_upstream_uri(
+    uri: &axum::http::Uri,
+    referer: &HeaderValue,
+    session: &Session,
+) -> Result<axum::http::Uri, String> {
+    let referer_url = upstream_referer_url(referer, session)
+        .ok_or_else(|| "Could not recover the upstream document URL from Referer".to_owned())?;
+    let target = url_from_origin_path(&referer_url, uri.path(), uri.query())?;
+    proxy_url(&target, &session.base_url, &session.id)
+        .parse::<axum::http::Uri>()
+        .map_err(|_| "Could not construct a recovered session route".to_owned())
 }
 
 async fn create_session(
@@ -1376,6 +1439,46 @@ mod tests {
         assert!(output.contains("/p/session123/icons.svg#home"));
         assert!(output.contains("/p/session123/_intercept_session123/https/cdn.example/image.svg"));
         assert!(output.contains("/p/session123/article/source"));
+    }
+
+    #[test]
+    fn identifies_session_from_unprefixed_request_referer() {
+        let referer: HeaderValue =
+            "http://127.0.0.1:5000/p/session123/_intercept_session123/https/cdn.example/page"
+                .parse()
+                .unwrap();
+        assert_eq!(session_id_from_referer(&referer).as_deref(), Some("session123"));
+
+        let external_referer: HeaderValue = "https://example.com/page".parse().unwrap();
+        assert_eq!(session_id_from_referer(&external_referer), None);
+    }
+
+    #[test]
+    fn recovers_root_relative_unprefixed_requests_using_external_iframe_origin() {
+        let session = test_session("https://example.com/home");
+        let referer: HeaderValue =
+            "http://127.0.0.1:5000/p/session123/_intercept_session123/https/cdn.example/docs/page"
+                .parse()
+                .unwrap();
+        let uri = "/api/data?cursor=a%2Fb"
+            .parse::<axum::http::Uri>()
+            .unwrap();
+
+        let recovered = fallback_upstream_uri(&uri, &referer, &session).unwrap();
+        assert_eq!(
+            recovered.to_string(),
+            "/p/session123/_intercept_session123/https/cdn.example/api/data?cursor=a%2Fb"
+        );
+    }
+
+    #[test]
+    fn recovers_root_relative_unprefixed_requests_using_primary_origin() {
+        let session = test_session("https://example.com/home");
+        let referer: HeaderValue = "http://127.0.0.1:5000/p/session123/home".parse().unwrap();
+        let uri = "/favicon.ico".parse::<axum::http::Uri>().unwrap();
+
+        let recovered = fallback_upstream_uri(&uri, &referer, &session).unwrap();
+        assert_eq!(recovered.to_string(), "/p/session123/favicon.ico");
     }
 
     #[test]
