@@ -1134,7 +1134,7 @@ mod tests {
     fn rewrites_session_urls_and_injects_only_the_authority_banner() {
         let base = Url::parse("https://example.com/").unwrap();
         let html = r#"<!doctype html><html><head></head><body><a href="/next">next</a></body></html>"#;
-        let result = rewrite_html(html, &base, "session123").unwrap();
+        let result = rewrite_html(html, &base, &base, "session123").unwrap();
         assert!(result.contains("/p/session123/next"));
         assert!(result.contains("/assets/controller.js"));
         assert!(result.contains("intercept-toolbar"));
@@ -1154,6 +1154,39 @@ mod tests {
         ).unwrap();
         assert!(output.contains("/p/session123/images/bg.png"));
         assert!(output.contains("/p/session123/_/https/cdn.example/theme.css"));
+    }
+
+    #[test]
+    fn scopes_external_cookies_to_their_proxy_origin_path() {
+        let primary = Url::parse("https://example.com/").unwrap();
+        let cdn = Url::parse("https://cdn.example/").unwrap();
+        assert_eq!(
+            rewrite_set_cookie(
+                "asset=abc; Domain=cdn.example; Path=/; HttpOnly",
+                &cdn,
+                &primary,
+                "session123",
+            ),
+            "asset=abc; Path=/p/session123/_/https/cdn.example/; HttpOnly"
+        );
+    }
+
+    #[test]
+    fn rewrites_external_redirects_through_the_session() {
+        let current = Url::parse("https://example.com/start").unwrap();
+        let primary = Url::parse("https://example.com/").unwrap();
+        assert_eq!(
+            rewrite_location("https://accounts.example/login", &current, &primary, "session123"),
+            "/p/session123/_/https/accounts.example/login"
+        );
+    }
+
+    #[test]
+    fn rewrites_external_origins_in_csp_to_local_proxy_origin() {
+        let policy = "default-src 'self' https://cdn.example; img-src https://images.example";
+        let output = rewrite_csp(policy);
+        assert!(output.contains("default-src 'self' http://127.0.0.1:5000"));
+        assert!(output.contains("img-src http://127.0.0.1:5000"));
     }
 
     #[test]
