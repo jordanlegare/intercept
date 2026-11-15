@@ -1,9 +1,8 @@
 use std::{
     collections::{HashMap, VecDeque},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    str::FromStr,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -24,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     net::TcpListener,
     sync::{watch, Mutex, RwLock},
-    time::sleep_until,
+    time::{sleep_until, Instant},
 };
 use tracing::{info, warn};
 use url::Url;
