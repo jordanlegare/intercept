@@ -463,13 +463,20 @@ async fn proxy(
                 continue;
             }
             if name == header::ORIGIN {
-                if let Ok(origin) = HeaderValue::from_str(&upstream_url.origin().ascii_serialization()) {
+                if let Ok(origin) = HeaderValue::from_str(&session.base_url.origin().ascii_serialization()) {
                     builder = builder.header(name.clone(), origin);
                 }
             } else if name == header::REFERER {
-                if let Ok(referer) = HeaderValue::from_str(upstream_url.as_str()) {
+                if let Some(referer) = rewrite_referer(value, &session) {
                     builder = builder.header(name.clone(), referer);
                 }
+            } else if name.as_str() == "sec-fetch-site" {
+                let fetch_site = if upstream_url.origin() == session.base_url.origin() {
+                    "same-origin"
+                } else {
+                    "cross-site"
+                };
+                builder = builder.header(name.clone(), fetch_site);
             } else {
                 builder = builder.header(name.clone(), value.clone());
             }
@@ -625,6 +632,26 @@ fn upstream_url_for_request(uri: &axum::http::Uri, session: &Session) -> Result<
         target.set_query(Some(query));
     }
     Ok(target)
+}
+
+fn rewrite_referer(value: &HeaderValue, session: &Session) -> Option<HeaderValue> {
+    let text = value.to_str().ok()?;
+    let referer = Url::parse(text).ok()?;
+    if !matches!(referer.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let upstream = if referer.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("localhost")
+    }) && referer.port() == Some(5000) {
+        let mut referer = referer;
+        referer.set_fragment(None);
+        let uri = referer.as_str().parse::<axum::http::Uri>().ok()?;
+        upstream_url_for_request(&uri, session).ok()?
+    } else {
+        referer
+    };
+    HeaderValue::from_str(upstream.as_str()).ok()
 }
 
 fn resource_cache_key(url: &Url, headers: &HeaderMap) -> String {
