@@ -409,18 +409,12 @@ async fn proxy(
         Err((status, message)) => return plain(status, &message),
     };
 
-    let mut upstream_url = session.base_url.clone();
-    let prefix = format!("/p/{id}");
-    let suffix = uri.path().strip_prefix(&prefix).unwrap_or("");
-    if !suffix.is_empty() {
-        upstream_url.set_path(suffix);
-        upstream_url.set_query(uri.query());
-    } else if let Some(query) = uri.query() {
-        upstream_url.set_query(Some(query));
-    }
-
-    if upstream_url.origin() != session.base_url.origin() {
-        return plain(StatusCode::FORBIDDEN, "Cross-origin proxy requests are not allowed in this session");
+    let upstream_url = match upstream_url_for_request(&uri, &session) {
+        Ok(url) => url,
+        Err(message) => return plain(StatusCode::BAD_REQUEST, &message),
+    };
+    if !matches!(upstream_url.scheme(), "http" | "https") || !is_public_destination(&upstream_url) {
+        return plain(StatusCode::FORBIDDEN, "Only public HTTP and HTTPS destinations are allowed");
     }
 
     let (parts, body) = request.into_parts();
@@ -433,61 +427,95 @@ async fn proxy(
         wait_for_authorization(&session).await;
     }
 
-    let method = match reqwest::Method::from_bytes(parts.method.as_str().as_bytes()) {
-        Ok(method) => method,
-        Err(_) => return plain(StatusCode::METHOD_NOT_ALLOWED, "Unsupported HTTP method"),
+    let cache_key = if parts.method == Method::GET {
+        Some(resource_cache_key(&upstream_url, &parts.headers))
+    } else {
+        None
     };
-    let mut builder = session.client.request(method, upstream_url.clone());
-    for (name, value) in parts.headers.iter() {
-        if should_skip_request_header(name) {
-            continue;
-        }
-        if name == header::ORIGIN {
-            if let Ok(origin) = HeaderValue::from_str(&session.base_url.origin().ascii_serialization()) {
-                builder = builder.header(name.clone(), origin);
-            }
-        } else if name == header::REFERER {
-            if let Ok(referer) = HeaderValue::from_str(upstream_url.as_str()) {
-                builder = builder.header(name.clone(), referer);
-            }
-        } else {
-            builder = builder.header(name.clone(), value.clone());
-        }
-    }
-    builder = builder.header(header::ACCEPT_ENCODING, "identity").body(body);
+    let bypass_cache = parts.headers
+        .get(header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("no-cache") || value.contains("no-store"));
 
-    let upstream = match builder.send().await {
-        Ok(response) => response,
-        Err(error) => {
-            warn!(%error, url = %upstream_url, "Upstream request failed");
-            return plain(StatusCode::BAD_GATEWAY, "Upstream request failed");
-        }
+    let cached = if bypass_cache {
+        None
+    } else if let Some(key) = cache_key.as_deref() {
+        cache_get(&session, key).await
+    } else {
+        None
     };
 
-    let upstream_status = upstream.status();
-    let upstream_headers = upstream.headers().clone();
-    if let Some(length) = upstream.content_length() {
-        if length > MAX_RESPONSE_BODY as u64 {
-            return plain(StatusCode::PAYLOAD_TOO_LARGE, "Upstream response exceeds the 32 MiB limit");
-        }
-    }
+    let (upstream_status, upstream_headers, mut response_body) = if let Some(cached) = cached {
+        (cached.status, cached.headers, cached.body)
+    } else {
+        let client = match client_for(&session, &upstream_url).await {
+            Ok(client) => client,
+            Err((status, message)) => return plain(status, &message),
+        };
+        let method = match reqwest::Method::from_bytes(parts.method.as_str().as_bytes()) {
+            Ok(method) => method,
+            Err(_) => return plain(StatusCode::METHOD_NOT_ALLOWED, "Unsupported HTTP method"),
+        };
 
-    let mut response_body = Vec::new();
-    let mut stream = upstream.bytes_stream();
-    while let Some(next) = stream.next().await {
-        match next {
-            Ok(chunk) => {
-                if response_body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BODY {
-                    return plain(StatusCode::PAYLOAD_TOO_LARGE, "Upstream response exceeds the 32 MiB limit");
+        let mut builder = client.request(method, upstream_url.clone());
+        for (name, value) in parts.headers.iter() {
+            if should_skip_request_header(name) {
+                continue;
+            }
+            if name == header::ORIGIN {
+                if let Ok(origin) = HeaderValue::from_str(&upstream_url.origin().ascii_serialization()) {
+                    builder = builder.header(name.clone(), origin);
                 }
-                response_body.extend_from_slice(&chunk);
-            }
-            Err(error) => {
-                warn!(%error, "Failed while reading upstream response");
-                return plain(StatusCode::BAD_GATEWAY, "Failed while reading upstream response");
+            } else if name == header::REFERER {
+                if let Ok(referer) = HeaderValue::from_str(upstream_url.as_str()) {
+                    builder = builder.header(name.clone(), referer);
+                }
+            } else {
+                builder = builder.header(name.clone(), value.clone());
             }
         }
-    }
+        builder = builder.header(header::ACCEPT_ENCODING, "identity").body(body);
+
+        let upstream = match builder.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                warn!(%error, url = %upstream_url, "Upstream request failed");
+                return plain(StatusCode::BAD_GATEWAY, "Upstream request failed");
+            }
+        };
+
+        let status = upstream.status();
+        let headers = upstream.headers().clone();
+        if let Some(length) = upstream.content_length() {
+            if length > MAX_RESPONSE_BODY as u64 {
+                return plain(StatusCode::PAYLOAD_TOO_LARGE, "Upstream response exceeds the 32 MiB limit");
+            }
+        }
+
+        let mut bytes = Vec::new();
+        let mut stream = upstream.bytes_stream();
+        while let Some(next) = stream.next().await {
+            match next {
+                Ok(chunk) => {
+                    if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BODY {
+                        return plain(StatusCode::PAYLOAD_TOO_LARGE, "Upstream response exceeds the 32 MiB limit");
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                Err(error) => {
+                    warn!(%error, url = %upstream_url, "Failed while reading upstream response");
+                    return plain(StatusCode::BAD_GATEWAY, "Failed while reading upstream response");
+                }
+            }
+        }
+
+        if let Some(key) = cache_key.as_deref() {
+            if !bypass_cache {
+                cache_put(&session, key, status, &headers, &bytes).await;
+            }
+        }
+        (status, headers, bytes)
+    };
 
     let content_type = upstream_headers
         .get(header::CONTENT_TYPE)
@@ -498,12 +526,22 @@ async fn proxy(
     let mut transformed = false;
     if content_type.contains("text/html") {
         if let Ok(html) = std::str::from_utf8(&response_body) {
-            match rewrite_html(html, &upstream_url, id) {
+            match rewrite_html(html, &upstream_url, &session.base_url, id) {
                 Ok(rewritten) => {
                     response_body = rewritten.into_bytes();
                     transformed = true;
                 }
-                Err(error) => warn!(%error, "HTML rewrite failed; returning original HTML"),
+                Err(error) => warn!(%error, url = %upstream_url, "HTML rewrite failed; returning original HTML"),
+            }
+        }
+    } else if content_type.contains("text/css") {
+        if let Ok(css) = std::str::from_utf8(&response_body) {
+            match rewrite_css(css, &upstream_url, &session.base_url, id) {
+                Ok(rewritten) => {
+                    response_body = rewritten.into_bytes();
+                    transformed = true;
+                }
+                Err(error) => warn!(%error, url = %upstream_url, "CSS rewrite failed; returning original stylesheet"),
             }
         }
     }
@@ -511,23 +549,31 @@ async fn proxy(
     let mut response = Response::builder().status(upstream_status);
     let headers = response.headers_mut().expect("fresh response builder");
     for (name, value) in upstream_headers.iter() {
-        if should_skip_response_header(name) || name == header::CONTENT_LENGTH || (transformed && name == header::CONTENT_ENCODING) {
+        if should_skip_response_header(name)
+            || (transformed && matches!(name, &header::CONTENT_LENGTH | &header::CONTENT_ENCODING | &header::ETAG))
+        {
             continue;
         }
-        if transformed && matches!(name.as_str(), "content-security-policy" | "content-security-policy-report-only" | "x-frame-options" | "etag" | "content-md5" | "digest") {
-            // The proxy needs its controller script and fixed toolbar to run in the document.
+        if transformed && matches!(name.as_str(), "content-md5" | "digest") {
             continue;
         }
+
         if name == header::LOCATION {
             if let Ok(location) = value.to_str() {
-                let rewritten = rewrite_location(location, &upstream_url, id);
+                let rewritten = rewrite_location(location, &upstream_url, &session.base_url, id);
                 if let Ok(value) = HeaderValue::from_str(&rewritten) {
                     headers.append(name.clone(), value);
                 }
             }
         } else if name == header::SET_COOKIE {
             if let Ok(cookie) = value.to_str() {
-                if let Ok(value) = HeaderValue::from_str(&rewrite_set_cookie(cookie, id)) {
+                if let Ok(value) = HeaderValue::from_str(&rewrite_set_cookie(cookie, &upstream_url, id)) {
+                    headers.append(name.clone(), value);
+                }
+            }
+        } else if matches!(name.as_str(), "content-security-policy" | "content-security-policy-report-only") {
+            if let Ok(policy) = value.to_str() {
+                if let Ok(value) = HeaderValue::from_str(&rewrite_csp(policy)) {
                     headers.append(name.clone(), value);
                 }
             }
@@ -535,12 +581,142 @@ async fn proxy(
             headers.append(name.clone(), value.clone());
         }
     }
-    if transformed {
+
+    if transformed && content_type.contains("text/html") {
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    } else if transformed && content_type.contains("text/css") {
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/css; charset=utf-8"));
     }
-    response.body(Body::from(response_body)).unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "Could not build proxy response"))
+    response.body(Body::from(response_body))
+        .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "Could not build proxy response"))
 }
 
+fn upstream_url_for_request(uri: &axum::http::Uri, session: &Session) -> Result<Url, String> {
+    let prefix = format!("/p/{}", session.id);
+    let suffix = uri.path().strip_prefix(&prefix)
+        .ok_or_else(|| "Request path is outside this session".to_owned())?;
+
+    if let Some(encoded_origin) = suffix.strip_prefix("/_/") {
+        let (scheme, host_and_path) = encoded_origin.split_once('/')
+            .ok_or_else(|| "Malformed proxied origin path".to_owned())?;
+        if !matches!(scheme, "http" | "https") {
+            return Err("Only HTTP and HTTPS origins are supported".into());
+        }
+        let (authority, path) = host_and_path.split_once('/')
+            .unwrap_or((host_and_path, ""));
+        if authority.is_empty() {
+            return Err("Missing upstream host in proxied URL".into());
+        }
+        let mut target = Url::parse(&format!("{scheme}://{authority}/{}", path.trim_start_matches('/')))
+            .map_err(|_| "Malformed upstream URL".to_owned())?;
+        target.set_query(uri.query());
+        return Ok(target);
+    }
+
+    let mut target = session.base_url.clone();
+    if !suffix.is_empty() {
+        target.set_path(suffix);
+        target.set_query(uri.query());
+    } else if let Some(query) = uri.query() {
+        target.set_query(Some(query));
+    }
+    Ok(target)
+}
+
+fn resource_cache_key(url: &Url, headers: &HeaderMap) -> String {
+    let value = |name: header::HeaderName| {
+        headers.get(name).and_then(|value| value.to_str().ok()).unwrap_or("").to_owned()
+    };
+    format!(
+        "{}\n{}\n{}\n{}\n{}",
+        url,
+        value(header::ACCEPT),
+        value(header::ACCEPT_LANGUAGE),
+        value(header::COOKIE),
+        value(header::USER_AGENT)
+    )
+}
+
+async fn cache_get(session: &Session, key: &str) -> Option<CachedResponse> {
+    let mut cache = session.cache.lock().await;
+    let expired = cache.entries.get(key).is_some_and(|entry| entry.expires_at <= Instant::now());
+    if expired {
+        if let Some(entry) = cache.entries.remove(key) {
+            cache.bytes = cache.bytes.saturating_sub(entry.body.len());
+        }
+        return None;
+    }
+    cache.entries.get(key).cloned()
+}
+
+async fn cache_put(
+    session: &Session,
+    key: &str,
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+) {
+    if status != StatusCode::OK || body.is_empty() || body.len() > MAX_CACHE_ENTRY_BYTES {
+        return;
+    }
+    let content_type = headers.get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok()).unwrap_or("").to_ascii_lowercase();
+    if !is_cacheable_asset(&content_type) || headers.contains_key(header::SET_COOKIE) {
+        return;
+    }
+    let control = headers.get(header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok()).unwrap_or("");
+    if control.split(',').any(|part| matches!(part.trim(), "no-store" | "no-cache")) {
+        return;
+    }
+    let vary = headers.get(header::VARY).and_then(|value| value.to_str().ok()).unwrap_or("");
+    if vary.trim() == "*" || vary.split(',').any(|name| {
+        !matches!(name.trim().to_ascii_lowercase().as_str(), "accept" | "accept-language" | "user-agent")
+    }) {
+        return;
+    }
+
+    let ttl = control.split(',')
+        .filter_map(|part| part.trim().strip_prefix("max-age="))
+        .find_map(|value| value.trim_matches('"').parse::<u64>().ok())
+        .unwrap_or(DEFAULT_ASSET_CACHE_SECONDS)
+        .min(86_400);
+    if ttl == 0 {
+        return;
+    }
+
+    let mut cache = session.cache.lock().await;
+    if let Some(old) = cache.entries.remove(key) {
+        cache.bytes = cache.bytes.saturating_sub(old.body.len());
+    }
+    while cache.bytes.saturating_add(body.len()) > MAX_CACHE_BYTES {
+        let Some(oldest_key) = cache.entries.iter()
+            .min_by_key(|(_, entry)| entry.expires_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        if let Some(old) = cache.entries.remove(&oldest_key) {
+            cache.bytes = cache.bytes.saturating_sub(old.body.len());
+        }
+    }
+    cache.bytes = cache.bytes.saturating_add(body.len());
+    cache.entries.insert(key.to_owned(), CachedResponse {
+        status,
+        headers: headers.clone(),
+        body: body.to_vec(),
+        expires_at: Instant::now() + Duration::from_secs(ttl),
+    });
+}
+
+fn is_cacheable_asset(content_type: &str) -> bool {
+    content_type.starts_with("text/css")
+        || content_type.contains("javascript")
+        || content_type.starts_with("image/")
+        || content_type.starts_with("font/")
+        || content_type.contains("application/font")
+        || content_type.contains("application/wasm")
+}
 fn rewrite_html(html: &str, base: &Url, session_id: &str) -> Result<String, String> {
     let mut settings = RewriteStrSettings::new();
     let base_for_attrs = base.clone();
