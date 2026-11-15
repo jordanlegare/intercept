@@ -173,10 +173,25 @@ async fn create_session(
     let addresses = match target.host() {
         Some(url::Host::Ipv4(ip)) => vec![SocketAddr::new(IpAddr::V4(ip), port)],
         Some(url::Host::Ipv6(ip)) => vec![SocketAddr::new(IpAddr::V6(ip), port)],
-        Some(url::Host::Domain(domain)) => tokio::net::lookup_host((domain, port))
-            .await
-            .map_err(|_| (StatusCode::BAD_GATEWAY, "Could not resolve upstream host".into()))?
-            .collect::<Vec<_>>(),
+        Some(url::Host::Domain(domain)) => {
+            match tokio::net::lookup_host((domain, port)).await {
+                Ok(addresses) => addresses.collect::<Vec<_>>(),
+                Err(error) => {
+                    warn!(
+                        host = %domain,
+                        port,
+                        %error,
+                        "The operating-system DNS resolver could not resolve the upstream host"
+                    );
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        format!(
+                            "DNS lookup failed for '{domain}:{port}': {error}. Check DNS on the machine/container running Intercept (for example: getent ahosts {domain})."
+                        ),
+                    ));
+                }
+            }
+        },
         None => Vec::new(),
     };
     if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
