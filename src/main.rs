@@ -71,7 +71,7 @@ struct StartTimer {
     delay_seconds: f64,
 }
 
-Event types#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize)]
 struct StatusResponse {
     state: &'static str,
     remaining_ms: u64,
