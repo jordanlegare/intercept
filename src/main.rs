@@ -458,20 +458,28 @@ async fn proxy(
         };
 
         let mut builder = client.request(method, upstream_url.clone());
+        let initiating_url = parts.headers.get(header::REFERER)
+            .and_then(|value| upstream_referer_url(value, &session));
+        let initiating_origin = initiating_url.as_ref()
+            .map(|url| url.origin().ascii_serialization())
+            .unwrap_or_else(|| session.base_url.origin().ascii_serialization());
+
         for (name, value) in parts.headers.iter() {
             if should_skip_request_header(name) {
                 continue;
             }
             if name == header::ORIGIN {
-                if let Ok(origin) = HeaderValue::from_str(&session.base_url.origin().ascii_serialization()) {
+                if let Ok(origin) = HeaderValue::from_str(&initiating_origin) {
                     builder = builder.header(name.clone(), origin);
                 }
             } else if name == header::REFERER {
-                if let Some(referer) = rewrite_referer(value, &session) {
+                if let Some(referer) = initiating_url.as_ref()
+                    .and_then(|url| HeaderValue::from_str(url.as_str()).ok())
+                {
                     builder = builder.header(name.clone(), referer);
                 }
             } else if name.as_str() == "sec-fetch-site" {
-                let fetch_site = if upstream_url.origin() == session.base_url.origin() {
+                let fetch_site = if upstream_url.origin().ascii_serialization() == initiating_origin {
                     "same-origin"
                 } else {
                     "cross-site"
@@ -644,24 +652,23 @@ fn upstream_url_for_request(uri: &axum::http::Uri, session: &Session) -> Result<
     Ok(target)
 }
 
-fn rewrite_referer(value: &HeaderValue, session: &Session) -> Option<HeaderValue> {
+fn upstream_referer_url(value: &HeaderValue, session: &Session) -> Option<Url> {
     let text = value.to_str().ok()?;
     let referer = Url::parse(text).ok()?;
     if !matches!(referer.scheme(), "http" | "https") {
         return None;
     }
 
-    let upstream = if referer.host_str().is_some_and(|host| {
+    if referer.host_str().is_some_and(|host| {
         host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("localhost")
     }) && referer.port() == Some(5000) {
         let mut referer = referer;
         referer.set_fragment(None);
         let uri = referer.as_str().parse::<axum::http::Uri>().ok()?;
-        upstream_url_for_request(&uri, session).ok()?
+        upstream_url_for_request(&uri, session).ok()
     } else {
-        referer
-    };
-    HeaderValue::from_str(upstream.as_str()).ok()
+        Some(referer)
+    }
 }
 
 fn resource_cache_key(url: &Url, headers: &HeaderMap) -> String {
@@ -836,9 +843,10 @@ fn rewrite_html(
 
     let id_for_head = session_id.to_owned();
     let primary_origin = session_base.origin().ascii_serialization();
+    let page_origin = base.origin().ascii_serialization();
     settings = settings.append_element_content_handler(element!("head", move |el| {
         let head = format!(
-            r#"<script src="/assets/controller.js" data-session="{id_for_head}" data-upstream-origin="{primary_origin}"></script><link rel="stylesheet" href="/assets/intercept.css">"#
+            r#"<script src="/assets/controller.js" data-session="{id_for_head}" data-upstream-origin="{page_origin}" data-primary-origin="{primary_origin}"></script><link rel="stylesheet" href="/assets/intercept.css">"#
         );
         el.prepend(&head, ContentType::Html);
         Ok(())
