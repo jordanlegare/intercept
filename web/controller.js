@@ -83,7 +83,9 @@
     [window.HTMLLinkElement && HTMLLinkElement.prototype, "href"],
     [window.HTMLScriptElement && HTMLScriptElement.prototype, "src"],
     [window.HTMLImageElement && HTMLImageElement.prototype, "src"],
+    [window.HTMLImageElement && HTMLImageElement.prototype, "srcset"],
     [window.HTMLSourceElement && HTMLSourceElement.prototype, "src"],
+    [window.HTMLSourceElement && HTMLSourceElement.prototype, "srcset"],
     [window.HTMLIFrameElement && HTMLIFrameElement.prototype, "src"],
     [window.HTMLFormElement && HTMLFormElement.prototype, "action"],
     [window.HTMLInputElement && HTMLInputElement.prototype, "src"],
@@ -122,6 +124,54 @@
       });
     });
   }
+
+  function rewriteDomElement(element) {
+    if (!(element instanceof Element)) return;
+    for (const attribute of ["href", "src", "action", "formaction", "poster", "data", "cite", "background"]) {
+      const current = element.getAttribute(attribute);
+      if (!current) continue;
+      const routed = routeToProxy(current);
+      if (routed && routed !== current) nativeSetAttribute.call(element, attribute, routed);
+    }
+    const srcset = element.getAttribute("srcset");
+    if (srcset) {
+      const routed = routeSrcset(srcset);
+      if (routed !== srcset) nativeSetAttribute.call(element, "srcset", routed);
+    }
+    const style = element.getAttribute("style");
+    if (style) {
+      const routed = routeCssValue(style);
+      if (routed !== style) nativeSetAttribute.call(element, "style", routed);
+    }
+  }
+
+  function rewriteDomTree(root) {
+    if (root instanceof Element) rewriteDomElement(root);
+    if (root && root.querySelectorAll) {
+      root.querySelectorAll("[href],[src],[action],[formaction],[poster],[data],[cite],[background],[srcset],[style]")
+        .forEach(rewriteDomElement);
+    }
+  }
+
+  if (window.MutationObserver && document.documentElement) {
+    const resourceObserver = new MutationObserver(records => {
+      for (const record of records) {
+        if (record.type === "attributes") {
+          rewriteDomElement(record.target);
+        } else {
+          for (const node of record.addedNodes) rewriteDomTree(node);
+        }
+      }
+    });
+    resourceObserver.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["href", "src", "action", "formaction", "poster", "data", "cite", "background", "srcset", "style"]
+    });
+  }
+
+  rewriteDomTree(document.documentElement);
 
   const nativeFetch = window.fetch.bind(window);
   window.fetch = function(input, init) {
