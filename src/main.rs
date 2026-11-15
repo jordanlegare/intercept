@@ -538,9 +538,10 @@ fn rewrite_html(html: &str, base: &Url, session_id: &str) -> Result<String, Stri
     ));
 
     let id_for_head = session_id.to_owned();
+    let upstream_origin = base.origin().ascii_serialization();
     settings = settings.append_element_content_handler(element!("head", move |el| {
         let head = format!(
-            r#"<script src="/assets/controller.js" data-session="{id_for_head}"></script><link rel="stylesheet" href="/assets/intercept.css">"#
+            r#"<script src="/assets/controller.js" data-session="{id_for_head}" data-upstream-origin="{upstream_origin}"></script><link rel="stylesheet" href="/assets/intercept.css">"#
         );
         el.prepend(&head, ContentType::Html);
         Ok(())

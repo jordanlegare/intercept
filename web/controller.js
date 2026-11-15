@@ -3,7 +3,8 @@
 
   const script = document.currentScript;
   const sessionId = script && script.dataset.session;
-  if (!sessionId) return;
+  const upstreamOrigin = script && script.dataset.upstreamOrigin;
+  if (!sessionId || !upstreamOrigin) return;
 
   const rawFetch = window.fetch.bind(window);
   const api = (suffix) => "/api/sessions/" + encodeURIComponent(sessionId) + suffix;
@@ -78,11 +79,15 @@
   function routeRequestUrl(value) {
     try {
       const url = new URL(value, location.href);
-      if (url.origin !== location.origin) return null;
+      const fromLocal = url.origin === location.origin;
+      const fromUpstream = url.origin === upstreamOrigin;
+      if (!fromLocal && !fromUpstream) return null;
       const prefix = "/p/" + sessionId;
-      if (url.pathname !== prefix && !url.pathname.startsWith(prefix + "/")) {
+      if (fromUpstream || (url.pathname !== prefix && !url.pathname.startsWith(prefix + "/"))) {
         url.pathname = prefix + (url.pathname.startsWith("/") ? url.pathname : "/" + url.pathname);
       }
+      url.host = location.host;
+      url.protocol = location.protocol;
       return url.href;
     } catch (_) {
       return null;
@@ -90,8 +95,12 @@
   }
 
   function sameLocalOrigin(value) {
-    try { return new URL(value, location.href).origin === location.origin; }
-    catch (_) { return false; }
+    try {
+      const origin = new URL(value, location.href).origin;
+      return origin === location.origin || origin === upstreamOrigin;
+    } catch (_) {
+      return false;
+    }
   }
 
   // Install this before page scripts so registrations made after the controller loads are observable.
@@ -120,14 +129,15 @@
     const anchor = event.target instanceof Element ? event.target.closest("a[href],area[href]") : null;
     if (!anchor) return;
     const href = anchor.href;
+    const routedHref = routeRequestUrl(href);
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (!sameLocalOrigin(href)) {
+    if (!routedHref) {
       showNotice("Blocked a cross-origin link. Open that origin in a separate Intercept session.");
       record("external_navigation_blocked", selectorFor(anchor), href);
       return;
     }
-    queueAction(() => location.assign(href), href);
+    queueAction(() => location.assign(routedHref), routedHref);
   }, true);
 
   nativeAdd.call(document, "submit", event => {
@@ -135,7 +145,8 @@
     if (!(form instanceof HTMLFormElement) || gateState === "released" || replaying) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (!sameLocalOrigin(form.action)) {
+    const routedAction = routeRequestUrl(form.action);
+    if (!routedAction) {
       showNotice("Blocked a cross-origin form action. This session is pinned to one origin.");
       record("external_form_blocked", selectorFor(form), form.action);
       return;
@@ -144,6 +155,7 @@
     queueAction(() => {
       replaying = true;
       try {
+        form.action = routedAction;
         if (submitter && submitter.form === form) form.requestSubmit(submitter);
         else form.requestSubmit();
       } catch (error) {
