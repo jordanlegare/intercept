@@ -26,7 +26,7 @@ use tokio::{
     sync::{watch, Mutex, RwLock},
     time::{sleep_until, Instant},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use url::Url;
 use uuid::Uuid;
 
@@ -119,6 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/status", get(session_status))
         .route("/p/{id}", any(proxy))
         .route("/p/{id}/{*path}", any(proxy))
+        .fallback(unmatched)
         .with_state(state);
 
     let address: SocketAddr = LISTEN.parse()?;
@@ -149,6 +150,11 @@ async fn intercept_css() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         include_str!("../rewrites/intercept.css"),
     )
+}
+
+async fn unmatched(OriginalUri(uri): OriginalUri) -> Response<Body> {
+    warn!(local_uri = %uri, "Request did not match an Intercept route");
+    plain(StatusCode::NOT_FOUND, "No Intercept route matches this URL. The browser request may have escaped session URL rewriting.")
 }
 
 async fn create_session(
@@ -412,8 +418,12 @@ async fn proxy(
 
     let upstream_url = match upstream_url_for_request(&uri, &session) {
         Ok(url) => url,
-        Err(message) => return plain(StatusCode::BAD_REQUEST, &message),
+        Err(message) => {
+            warn!(local_uri = %uri, error = %message, "Could not map session path to an upstream URL");
+            return plain(StatusCode::BAD_REQUEST, &message);
+        }
     };
+    debug!(method = %request.method(), local_uri = %uri, upstream_url = %upstream_url, "Translated proxy request");
     if !matches!(upstream_url.scheme(), "http" | "https") || !is_public_destination(&upstream_url) {
         return plain(StatusCode::FORBIDDEN, "Only public HTTP and HTTPS destinations are allowed");
     }
@@ -819,7 +829,7 @@ fn rewrite_html(
     let session_base_for_attrs = session_base.clone();
     let id_for_attrs = session_id.to_owned();
     settings = settings.append_element_content_handler(element!(
-        "a[href],area[href],link[href],script[src],img[src],source[src],iframe[src],video[src],video[poster],audio[src],input[src],form[action],button[formaction],base[href],object[data],embed[src],track[src],[srcset],[style]",
+        "[href],[src],[action],[formaction],[poster],[data],[cite],[background],[srcset],[style]",
         move |el| {
             let mut rewrote_resource = false;
             for attribute in ["href", "src", "action", "formaction", "poster", "data", "cite", "background"] {
@@ -988,7 +998,9 @@ fn rewrite_css(css: &str, base: &Url, session_base: &Url, session_id: &str) -> R
 }
 
 fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: &str) -> Result<String, String> {
-    let static_imports = Regex::new(r#"(?m)(\b(?:import|export)\s+(?:[^;\n]*?\s+from\s*)?)(["'])(https?://[^"']+)(["'])"#)
+    let module_specifier = r#"(?:(?:https?://|//)[^"']+|/[^/][^"']*|\.\.?/[^"']+)"#;
+    let static_import_pattern = format!(r#"(?m)(\b(?:import|export)\s+[^;]*?\bfrom\s*|\bimport\s+)(["'])({module_specifier})(["'])"#);
+    let static_imports = Regex::new(&static_import_pattern)
         .map_err(|error| error.to_string())?;
     let rewritten = static_imports.replace_all(source, |captures: &regex::Captures<'_>| {
         let prefix = captures.get(1).map(|m| m.as_str()).unwrap_or("");
@@ -999,7 +1011,8 @@ fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: 
         format!("{prefix}{quote}{route}{suffix}")
     });
 
-    let dynamic_imports = Regex::new(r#"(?m)\bimport\(\s*(["'])(https?://[^"']+)(["'])\s*\)"#)
+    let dynamic_import_pattern = format!(r#"(?m)\bimport\(\s*(["'])({module_specifier})(["'])\s*\)"#);
+    let dynamic_imports = Regex::new(&dynamic_import_pattern)
         .map_err(|error| error.to_string())?;
     let rewritten = dynamic_imports.replace_all(&rewritten, |captures: &regex::Captures<'_>| {
         let quote = captures.get(1).map(|m| m.as_str()).unwrap_or("'");
@@ -1007,6 +1020,23 @@ fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: 
         let suffix = captures.get(3).map(|m| m.as_str()).unwrap_or(quote);
         let route = rewrite_url(base, session_base, session_id, raw).unwrap_or_else(|| raw.to_owned());
         format!("import({quote}{route}{suffix})")
+    });
+
+    let import_scripts_call = Regex::new(r"(?s)\bimportScripts\(([^)]*)\)")
+        .map_err(|error| error.to_string())?;
+    let import_scripts_argument_pattern = format!(r#"(["'])({module_specifier})(["'])"#);
+    let import_scripts_arguments = Regex::new(&import_scripts_argument_pattern)
+        .map_err(|error| error.to_string())?;
+    let rewritten = import_scripts_call.replace_all(&rewritten, |captures: &regex::Captures<'_>| {
+        let arguments = captures.get(1).map(|m| m.as_str()).unwrap_or("");
+        let rewritten_arguments = import_scripts_arguments.replace_all(arguments, |argument: &regex::Captures<'_>| {
+            let quote = argument.get(1).map(|m| m.as_str()).unwrap_or("'");
+            let raw = argument.get(2).map(|m| m.as_str()).unwrap_or("");
+            let suffix = argument.get(3).map(|m| m.as_str()).unwrap_or(quote);
+            let route = rewrite_url(base, session_base, session_id, raw).unwrap_or_else(|| raw.to_owned());
+            format!("{quote}{route}{suffix}")
+        });
+        format!("importScripts({rewritten_arguments})")
     });
     Ok(rewritten.into_owned())
 }
@@ -1303,6 +1333,49 @@ mod tests {
             rewrite_location("https://accounts.example/login", &current, &primary, "session123"),
             "/p/session123/_intercept_session123/https/accounts.example/login"
         );
+    }
+
+    #[test]
+    fn rewrites_root_relative_and_relative_javascript_module_imports() {
+        let primary = Url::parse("https://example.com/").unwrap();
+        let module = Url::parse("https://cdn.example/assets/js/app.js").unwrap();
+        let output = rewrite_javascript(
+            r#"import "/shared/chunk.js"; import("./chunk.js"); export { value } from "../shared/value.js"; import("react");"#,
+            &module,
+            &primary,
+            "session123",
+        ).unwrap();
+
+        assert!(output.contains(r#"import "/p/session123/_intercept_session123/https/cdn.example/shared/chunk.js""#), "rewritten output: {output}");
+        assert!(output.contains(r#"import("/p/session123/_intercept_session123/https/cdn.example/assets/js/chunk.js")"#));
+        assert!(output.contains(r#"from "/p/session123/_intercept_session123/https/cdn.example/assets/shared/value.js""#));
+        assert!(output.contains(r#"import("react")"#));
+    }
+
+    #[test]
+    fn rewrites_root_relative_worker_import_scripts() {
+        let primary = Url::parse("https://example.com/").unwrap();
+        let worker = Url::parse("https://cdn.example/workers/worker.js").unwrap();
+        let output = rewrite_javascript(
+            r#"importScripts("/workers/chunk.js", "./helper.js");"#,
+            &worker,
+            &primary,
+            "session123",
+        ).unwrap();
+
+        assert!(output.contains("/p/session123/_intercept_session123/https/cdn.example/workers/chunk.js"));
+        assert!(output.contains("/p/session123/_intercept_session123/https/cdn.example/workers/helper.js"));
+    }
+
+    #[test]
+    fn rewrites_network_attributes_on_generic_and_svg_elements() {
+        let primary = Url::parse("https://example.com/").unwrap();
+        let html = r##"<!doctype html><html><head></head><body><svg><use href="/icons.svg#home"></use><image href="https://cdn.example/image.svg"></image></svg><blockquote cite="/article/source"></blockquote></body></html>"##;
+        let output = rewrite_html(html, &primary, &primary, "session123").unwrap();
+
+        assert!(output.contains("/p/session123/icons.svg#home"));
+        assert!(output.contains("/p/session123/_intercept_session123/https/cdn.example/image.svg"));
+        assert!(output.contains("/p/session123/article/source"));
     }
 
     #[test]
