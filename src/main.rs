@@ -154,7 +154,7 @@ async fn create_session(
     State(state): State<AppState>,
     Json(input): Json<CreateSession>,
 ) -> Result<Json<CreateSessionResponse>, (StatusCode, String)> {
-    let mut target = Url::parse(input.url.trim())
+    let target = Url::parse(input.url.trim())
         .map_err(|_| (StatusCode::BAD_REQUEST, "Enter a valid absolute http:// or https:// URL".into()))?;
 
     if !matches!(target.scheme(), "http" | "https") {
@@ -213,7 +213,6 @@ async fn create_session(
         .build()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not initialize upstream TLS client".into()))?;
 
-    target.set_fragment(None);
     let id = Uuid::new_v4().simple().to_string();
     let session = Arc::new(Session {
         id: id.clone(),
@@ -224,10 +223,13 @@ async fn create_session(
         events: Mutex::new(VecDeque::new()),
     });
 
+    // Preserve the submitted destination path, query, and browser-side fragment
+    // in the local session URL. The upstream origin remains pinned in base_url.
+    let session_url = local_url(&session.base_url, &id);
     state.sessions.write().await.insert(id.clone(), session);
     Ok(Json(CreateSessionResponse {
         id: id.clone(),
-        session_url: format!("/p/{id}"),
+        session_url,
     }))
 }
 
@@ -818,6 +820,24 @@ mod tests {
         assert_eq!(
             rewrite_url(&base, "session123", "https://other.example/image.png"),
             None
+        );
+    }
+
+    #[test]
+    fn session_url_preserves_the_submitted_path_query_and_fragment() {
+        let target = Url::parse("https://example.com/account/settings?tab=security#sessions").unwrap();
+        assert_eq!(
+            local_url(&target, "session123"),
+            "/p/session123/account/settings?tab=security#sessions"
+        );
+    }
+
+    #[test]
+    fn session_url_preserves_root_query_and_fragment() {
+        let target = Url::parse("https://example.com/?mode=compact#top").unwrap();
+        assert_eq!(
+            local_url(&target, "session123"),
+            "/p/session123/?mode=compact#top"
         );
     }
 
