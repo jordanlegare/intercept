@@ -999,7 +999,7 @@ fn rewrite_css(css: &str, base: &Url, session_base: &Url, session_id: &str) -> R
 
 fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: &str) -> Result<String, String> {
     let module_specifier = r#"(?:(?:https?://|//)[^"']+|/[^/][^"']*|\.\.?/[^"']+)"#;
-    let static_import_pattern = format!(r#"(?m)(\b(?:import|export)\s+(?:[^;\n]*?\s+from\s*)?)(["'])({module_specifier})(["'])"#);
+    let static_import_pattern = format!(r#"(?m)(\b(?:import|export)\s+[^;]*?\bfrom\s*|\bimport\s+)(["'])({module_specifier})(["'])"#);
     let static_imports = Regex::new(&static_import_pattern)
         .map_err(|error| error.to_string())?;
     let rewritten = static_imports.replace_all(source, |captures: &regex::Captures<'_>| {
@@ -1346,7 +1346,7 @@ mod tests {
             "session123",
         ).unwrap();
 
-        assert!(output.contains(r#"import("/p/session123/_intercept_session123/https/cdn.example/shared/chunk.js")"#));
+        assert!(output.contains(r#"import("/p/session123/_intercept_session123/https/cdn.example/shared/chunk.js")"#), "rewritten output: {output}");
         assert!(output.contains(r#"import("/p/session123/_intercept_session123/https/cdn.example/assets/js/chunk.js")"#));
         assert!(output.contains(r#"from "/p/session123/_intercept_session123/https/cdn.example/assets/shared/value.js""#));
         assert!(output.contains(r#"import("react")"#));
