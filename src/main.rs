@@ -117,6 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/start", post(start_timer))
         .route("/api/sessions/{id}/status", get(session_status))
         .route("/p/{id}", any(proxy))
+        .route("/p/{id}/", any(proxy))
         .route("/p/{id}/{*path}", any(proxy))
         .with_state(state);
 
