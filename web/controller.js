@@ -96,15 +96,31 @@
     [window.HTMLObjectElement && HTMLObjectElement.prototype, "data"]
   ].forEach(([proto, property]) => patchUrlSetter(proto, property));
 
-  const nativeSetProperty = window.CSSStyleDeclaration && CSSStyleDeclaration.prototype.setProperty;
+  function routeCssValue(value) {
+    return String(value).replace(/url\\(\\s*["']?(.*?)["']?\\s*\\)/gi, (match, url) => {
+      const routed = routeToProxy(url.trim());
+      return routed ? 'url("' + routed + '")' : match;
+    });
+  }
+
+  const cssPrototype = window.CSSStyleDeclaration && CSSStyleDeclaration.prototype;
+  const nativeSetProperty = cssPrototype && cssPrototype.setProperty;
   if (nativeSetProperty) {
-    CSSStyleDeclaration.prototype.setProperty = function(property, value, priority) {
-      const rewritten = String(value).replace(/url\(\s*["']?(.*?)["']?\s*\)/gi, (match, url) => {
-        const routed = routeToProxy(url.trim());
-        return routed ? 'url("' + routed + '")' : match;
-      });
-      return nativeSetProperty.call(this, property, rewritten, priority);
+    cssPrototype.setProperty = function(property, value, priority) {
+      return nativeSetProperty.call(this, property, routeCssValue(value), priority);
     };
+  }
+  if (cssPrototype) {
+    Object.getOwnPropertyNames(cssPrototype).forEach(property => {
+      const descriptor = Object.getOwnPropertyDescriptor(cssPrototype, property);
+      if (!descriptor || !descriptor.set || !descriptor.configurable || property === "cssText") return;
+      Object.defineProperty(cssPrototype, property, {
+        ...descriptor,
+        set(value) {
+          return descriptor.set.call(this, typeof value === "string" ? routeCssValue(value) : value);
+        }
+      });
+    });
   }
 
   const nativeFetch = window.fetch.bind(window);
