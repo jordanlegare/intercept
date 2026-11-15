@@ -1022,16 +1022,21 @@ fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: 
         format!("import({quote}{route}{suffix})")
     });
 
-    let import_scripts_pattern = format!(r#"(?m)(\bimportScripts\([^)]*?)(["'])({module_specifier})(["'])"#);
-    let import_scripts = Regex::new(&import_scripts_pattern)
+    let import_scripts_call = Regex::new(r"(?s)\bimportScripts\(([^)]*)\)")
         .map_err(|error| error.to_string())?;
-    let rewritten = import_scripts.replace_all(&rewritten, |captures: &regex::Captures<'_>| {
-        let prefix = captures.get(1).map(|m| m.as_str()).unwrap_or("");
-        let quote = captures.get(2).map(|m| m.as_str()).unwrap_or("'");
-        let raw = captures.get(3).map(|m| m.as_str()).unwrap_or("");
-        let suffix = captures.get(4).map(|m| m.as_str()).unwrap_or(quote);
-        let route = rewrite_url(base, session_base, session_id, raw).unwrap_or_else(|| raw.to_owned());
-        format!("{prefix}{quote}{route}{suffix}")
+    let import_scripts_argument_pattern = format!(r#"(["'])({module_specifier})(["'])"#);
+    let import_scripts_arguments = Regex::new(&import_scripts_argument_pattern)
+        .map_err(|error| error.to_string())?;
+    let rewritten = import_scripts_call.replace_all(&rewritten, |captures: &regex::Captures<'_>| {
+        let arguments = captures.get(1).map(|m| m.as_str()).unwrap_or("");
+        let rewritten_arguments = import_scripts_arguments.replace_all(arguments, |argument: &regex::Captures<'_>| {
+            let quote = argument.get(1).map(|m| m.as_str()).unwrap_or("'");
+            let raw = argument.get(2).map(|m| m.as_str()).unwrap_or("");
+            let suffix = argument.get(3).map(|m| m.as_str()).unwrap_or(quote);
+            let route = rewrite_url(base, session_base, session_id, raw).unwrap_or_else(|| raw.to_owned());
+            format!("{quote}{route}{suffix}")
+        });
+        format!("importScripts({rewritten_arguments})")
     });
     Ok(rewritten.into_owned())
 }
