@@ -188,7 +188,7 @@ async fn unmatched(
         "Recovered an unprefixed browser request from its Intercept Referer"
     );
     proxy(
-        state,
+        State(state),
         Path(HashMap::from([("id".to_owned(), id)])),
         OriginalUri(upstream_uri),
         request,
