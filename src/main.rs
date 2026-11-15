@@ -9,7 +9,7 @@ use axum::{
     body::{Body, to_bytes},
     extract::{OriginalUri, Path, State},
     http::{
-        HeaderName, HeaderValue, Method, Request, Response, StatusCode,
+        HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode,
         header,
     },
     response::{Html, IntoResponse},
@@ -18,6 +18,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use lol_html::{RewriteStrSettings, element, html_content::ContentType, rewrite_str};
+use regex::Regex;
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -34,6 +35,9 @@ const MAX_REQUEST_BODY: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE_BODY: usize = 32 * 1024 * 1024;
 const MAX_DELAY_SECONDS: u64 = 24 * 60 * 60;
 const MIN_DELAY_NANOS: f64 = 0.000_000_001;
+const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CACHE_ENTRY_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_ASSET_CACHE_SECONDS: u64 = 300;
 
 #[derive(Clone)]
 struct AppState {
@@ -43,9 +47,24 @@ struct AppState {
 struct Session {
     id: String,
     base_url: Url,
-    client: reqwest::Client,
+    clients: Mutex<HashMap<String, reqwest::Client>>,
+    cache: Mutex<ResourceCache>,
     gate: Mutex<GateState>,
     gate_tx: watch::Sender<GateState>,
+}
+
+#[derive(Default)]
+struct ResourceCache {
+    entries: HashMap<String, CachedResponse>,
+    bytes: usize,
+}
+
+#[derive(Clone)]
+struct CachedResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Vec<u8>,
+    expires_at: Instant,
 }
 
 #[derive(Clone, Copy)]
@@ -148,8 +167,40 @@ async fn create_session(
         return Err((StatusCode::FORBIDDEN, "Local, private, and link-local destinations are blocked".into()));
     }
 
-    // Resolve once, reject non-public answers, and pin the session client to those
-    // addresses so a later DNS answer cannot rebind this session to a private host.
+    let client = build_pinned_client(&target).await?;
+
+    let id = Uuid::new_v4().simple().to_string();
+    let mut clients = HashMap::new();
+    clients.insert(origin_key(&target), client);
+    let session = Arc::new(Session {
+        id: id.clone(),
+        base_url: target,
+        clients: Mutex::new(clients),
+        cache: Mutex::new(ResourceCache::default()),
+        gate: Mutex::new(GateState::Waiting),
+        gate_tx: watch::channel(GateState::Waiting).0,
+    });
+
+    // Preserve the submitted destination path, query, and browser-side fragment
+    // in the local session URL. The upstream origin remains pinned in base_url.
+    let session_url = local_url(&session.base_url, &id);
+    state.sessions.write().await.insert(id.clone(), session);
+    Ok(Json(CreateSessionResponse {
+        id: id.clone(),
+        session_url,
+    }))
+}
+
+
+fn origin_key(url: &Url) -> String {
+    url.origin().ascii_serialization()
+}
+
+async fn build_pinned_client(target: &Url) -> Result<reqwest::Client, (StatusCode, String)> {
+    if !is_public_destination(target) {
+        return Err((StatusCode::FORBIDDEN, "Local, private, and link-local destinations are blocked".into()));
+    }
+
     let host = target.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']').to_owned();
     let port = target.port_or_known_default().unwrap_or(443);
     let addresses = match target.host() {
@@ -163,24 +214,23 @@ async fn create_session(
                         host = %domain,
                         port,
                         %error,
-                        "The operating-system DNS resolver could not resolve the upstream host"
+                        "The operating-system DNS resolver could not resolve an upstream host"
                     );
                     return Err((
                         StatusCode::BAD_GATEWAY,
-                        format!(
-                            "DNS lookup failed for '{domain}:{port}': {error}. Check DNS on the machine/container running Intercept (for example: getent ahosts {domain})."
-                        ),
+                        format!("DNS lookup failed for '{domain}:{port}': {error}"),
                     ));
                 }
             }
         },
         None => Vec::new(),
     };
+
     if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
         return Err((StatusCode::FORBIDDEN, "Upstream DNS resolved to a local, private, or non-public address".into()));
     }
 
-    let mut client_builder = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(90))
@@ -188,29 +238,23 @@ async fn create_session(
         .pool_max_idle_per_host(16)
         .user_agent("Intercept/0.1 (+http://127.0.0.1:5000)");
     if matches!(target.host(), Some(url::Host::Domain(_))) {
-        client_builder = client_builder.resolve_to_addrs(&host, &addresses);
+        builder = builder.resolve_to_addrs(&host, &addresses);
     }
-    let client = client_builder
+    builder
         .build()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not initialize upstream TLS client".into()))?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not initialize upstream TLS client".into()))
+}
 
-    let id = Uuid::new_v4().simple().to_string();
-    let session = Arc::new(Session {
-        id: id.clone(),
-        base_url: target,
-        client,
-        gate: Mutex::new(GateState::Waiting),
-        gate_tx: watch::channel(GateState::Waiting).0,
-    });
+async fn client_for(session: &Session, target: &Url) -> Result<reqwest::Client, (StatusCode, String)> {
+    let key = origin_key(target);
+    let mut clients = session.clients.lock().await;
+    if let Some(client) = clients.get(&key) {
+        return Ok(client.clone());
+    }
 
-    // Preserve the submitted destination path, query, and browser-side fragment
-    // in the local session URL. The upstream origin remains pinned in base_url.
-    let session_url = local_url(&session.base_url, &id);
-    state.sessions.write().await.insert(id.clone(), session);
-    Ok(Json(CreateSessionResponse {
-        id: id.clone(),
-        session_url,
-    }))
+    let client = build_pinned_client(target).await?;
+    clients.insert(key, client.clone());
+    Ok(client)
 }
 
 async fn start_timer(
