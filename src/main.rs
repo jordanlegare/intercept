@@ -154,7 +154,7 @@ async fn create_session(
     State(state): State<AppState>,
     Json(input): Json<CreateSession>,
 ) -> Result<Json<CreateSessionResponse>, (StatusCode, String)> {
-    let mut target = Url::parse(input.url.trim())
+    let target = Url::parse(input.url.trim())
         .map_err(|_| (StatusCode::BAD_REQUEST, "Enter a valid absolute http:// or https:// URL".into()))?;
 
     if !matches!(target.scheme(), "http" | "https") {
