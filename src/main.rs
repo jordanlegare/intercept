@@ -38,7 +38,7 @@ const MIN_DELAY_NANOS: f64 = 0.000_000_001;
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHE_ENTRY_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_ASSET_CACHE_SECONDS: u64 = 300;
-const EXTERNAL_ORIGIN_PATH: &str = "/_intercept/";
+
 
 #[derive(Clone)]
 struct AppState {
@@ -635,7 +635,8 @@ fn upstream_url_for_request(uri: &axum::http::Uri, session: &Session) -> Result<
     let suffix = uri.path().strip_prefix(&prefix)
         .ok_or_else(|| "Request path is outside this session".to_owned())?;
 
-    if let Some(encoded_origin) = suffix.strip_prefix(EXTERNAL_ORIGIN_PATH) {
+    let external_origin_path = external_origin_path_prefix(&session.id);
+    if let Some(encoded_origin) = suffix.strip_prefix(&external_origin_path) {
         let (scheme, host_and_path) = encoded_origin.split_once('/')
             .ok_or_else(|| "Malformed proxied origin path".to_owned())?;
         if !matches!(scheme, "http" | "https") {
@@ -915,13 +916,17 @@ fn rewrite_url(
     Some(proxy_url(&absolute, session_base, session_id))
 }
 
+fn external_origin_path_prefix(session_id: &str) -> String {
+    format!("/_intercept_{session_id}/")
+}
+
 fn proxy_origin_prefix(target: &Url, session_base: &Url, session_id: &str) -> String {
     if target.origin() == session_base.origin() {
         return format!("/p/{session_id}");
     }
     let origin = target.origin().ascii_serialization();
     let authority = origin.strip_prefix(&format!("{}://", target.scheme())).unwrap_or("");
-    format!("/p/{session_id}{EXTERNAL_ORIGIN_PATH}{}/{authority}", target.scheme())
+    format!("/p/{session_id}{}{}/{authority}", external_origin_path_prefix(session_id), target.scheme())
 }
 
 fn proxy_url(target: &Url, session_base: &Url, session_id: &str) -> String {
@@ -1219,7 +1224,7 @@ mod tests {
         );
         assert_eq!(
             rewrite_url(&base, &base, "session123", "https://cdn.example/image.png"),
-            Some("/p/session123/_intercept/https/cdn.example/image.png".to_owned())
+            Some("/p/session123/_intercept_session123/https/cdn.example/image.png".to_owned())
         );
     }
 
@@ -1272,7 +1277,7 @@ mod tests {
             "session123",
         ).unwrap();
         assert!(output.contains("/p/session123/images/bg.png"));
-        assert!(output.contains("/p/session123/_intercept/https/cdn.example/theme.css"));
+        assert!(output.contains("/p/session123/_intercept_session123/https/cdn.example/theme.css"));
     }
 
     #[test]
@@ -1286,7 +1291,7 @@ mod tests {
                 &primary,
                 "session123",
             ),
-            "asset=abc; Path=/p/session123/_intercept/https/cdn.example/; HttpOnly"
+            "asset=abc; Path=/p/session123/_intercept_session123/https/cdn.example/; HttpOnly"
         );
     }
 
@@ -1296,7 +1301,7 @@ mod tests {
         let primary = Url::parse("https://example.com/").unwrap();
         assert_eq!(
             rewrite_location("https://accounts.example/login", &current, &primary, "session123"),
-            "/p/session123/_intercept/https/accounts.example/login"
+            "/p/session123/_intercept_session123/https/accounts.example/login"
         );
     }
 
@@ -1311,7 +1316,7 @@ mod tests {
     #[test]
     fn decodes_external_origin_paths_without_losing_encoded_path_bytes() {
         let session = test_session("https://example.com/start");
-        let uri = "/p/session123/_intercept/https/cdn.example:8443/assets/a%2Fb%20c.css?sig=a%2Fb"
+        let uri = "/p/session123/_intercept_session123/https/cdn.example:8443/assets/a%2Fb%20c.css?sig=a%2Fb"
             .parse::<axum::http::Uri>()
             .unwrap();
         let target = upstream_url_for_request(&uri, &session).unwrap();
@@ -1361,7 +1366,7 @@ mod tests {
         let external = Url::parse("https://cdn.example:8443/a.js").unwrap();
         assert_eq!(
             proxy_url(&external, &primary, "session123"),
-            "/p/session123/_intercept/https/cdn.example:8443/a.js"
+            "/p/session123/_intercept_session123/https/cdn.example:8443/a.js"
         );
     }
 }
