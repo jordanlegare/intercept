@@ -777,12 +777,15 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_html_and_injects_controller_and_toolbar() {
+    fn rewrites_session_urls_and_injects_only_the_authority_banner() {
         let base = Url::parse("https://example.com/").unwrap();
         let html = r#"<!doctype html><html><head></head><body><a href="/next">next</a></body></html>"#;
         let result = rewrite_html(html, &base, "session123").unwrap();
         assert!(result.contains("/p/session123/next"));
         assert!(result.contains("/assets/controller.js"));
         assert!(result.contains("intercept-toolbar"));
+        assert!(result.contains("INTERCEPT AUTHORITY"));
+        assert!(!result.contains("intercept-events"));
+        assert!(!result.contains("listener_registered"));
     }
 }
