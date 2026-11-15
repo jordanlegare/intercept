@@ -551,6 +551,16 @@ async fn proxy(
                 Err(error) => warn!(%error, url = %upstream_url, "CSS rewrite failed; returning original stylesheet"),
             }
         }
+    } else if content_type.contains("javascript") || content_type.contains("ecmascript") {
+        if let Ok(javascript) = std::str::from_utf8(&response_body) {
+            match rewrite_javascript(javascript, &upstream_url, &session.base_url, id) {
+                Ok(rewritten) => {
+                    response_body = rewritten.into_bytes();
+                    transformed = true;
+                }
+                Err(error) => warn!(%error, url = %upstream_url, "JavaScript URL rewrite failed; returning original script"),
+            }
+        }
     }
 
     let mut response = Response::builder().status(upstream_status);
@@ -764,6 +774,16 @@ fn rewrite_html(
             .unwrap_or_else(|_| body.to_owned());
         format!("{open}{rewritten}{close}")
     }).into_owned();
+    let script_blocks = Regex::new(r"(?is)(<script\\b[^>]*>)(.*?)(</script\\s*>)")
+        .map_err(|error| error.to_string())?;
+    let html_with_styles_and_scripts = script_blocks.replace_all(&html_with_styles, |captures: &regex::Captures<'_>| {
+        let open = captures.get(1).map(|m| m.as_str()).unwrap_or("");
+        let body = captures.get(2).map(|m| m.as_str()).unwrap_or("");
+        let close = captures.get(3).map(|m| m.as_str()).unwrap_or("");
+        let rewritten = rewrite_javascript(body, base, session_base, session_id)
+            .unwrap_or_else(|_| body.to_owned());
+        format!("{open}{rewritten}{close}")
+    }).into_owned();
 
     let mut settings = RewriteStrSettings::new();
     let base_for_attrs = base.clone();
@@ -831,7 +851,7 @@ fn rewrite_html(
         Ok(())
     }));
 
-    rewrite_str(&html_with_styles, settings).map_err(|error| error.to_string())
+    rewrite_str(&html_with_styles_and_scripts, settings).map_err(|error| error.to_string())
 }
 
 fn rewrite_url(
@@ -924,6 +944,30 @@ fn rewrite_css(css: &str, base: &Url, session_base: &Url, session_id: &str) -> R
         }
     });
     Ok(with_imports.into_owned())
+}
+
+fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: &str) -> Result<String, String> {
+    let static_imports = Regex::new(r#"(?m)(\\b(?:import|export)\\s+(?:[^;\\n]*?\\s+from\\s*)?)(["'])(https?://[^"']+)(["'])"#)
+        .map_err(|error| error.to_string())?;
+    let rewritten = static_imports.replace_all(source, |captures: &regex::Captures<'_>| {
+        let prefix = captures.get(1).map(|m| m.as_str()).unwrap_or("");
+        let quote = captures.get(2).map(|m| m.as_str()).unwrap_or("\\"");
+        let raw = captures.get(3).map(|m| m.as_str()).unwrap_or("");
+        let suffix = captures.get(4).map(|m| m.as_str()).unwrap_or(quote);
+        let route = rewrite_url(base, session_base, session_id, raw).unwrap_or_else(|| raw.to_owned());
+        format!("{prefix}{quote}{route}{suffix}")
+    });
+
+    let dynamic_imports = Regex::new(r#"(?m)\\bimport\\(\\s*(["'])(https?://[^"']+)(["'])\\s*\\)"#)
+        .map_err(|error| error.to_string())?;
+    let rewritten = dynamic_imports.replace_all(&rewritten, |captures: &regex::Captures<'_>| {
+        let quote = captures.get(1).map(|m| m.as_str()).unwrap_or("\\"");
+        let raw = captures.get(2).map(|m| m.as_str()).unwrap_or("");
+        let suffix = captures.get(3).map(|m| m.as_str()).unwrap_or(quote);
+        let route = rewrite_url(base, session_base, session_id, raw).unwrap_or_else(|| raw.to_owned());
+        format!("import({quote}{route}{suffix})")
+    });
+    Ok(rewritten.into_owned())
 }
 
 fn rewrite_location(location: &str, current: &Url, session_base: &Url, session_id: &str) -> String {
