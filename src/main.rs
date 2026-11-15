@@ -774,7 +774,7 @@ fn rewrite_html(
             .unwrap_or_else(|_| body.to_owned());
         format!("{open}{rewritten}{close}")
     }).into_owned();
-    let script_blocks = Regex::new(r"(?is)(<script\\b[^>]*>)(.*?)(</script\\s*>)")
+    let script_blocks = Regex::new(r"(?is)(<script\b[^>]*>)(.*?)(</script\s*>)")
         .map_err(|error| error.to_string())?;
     let html_with_styles_and_scripts = script_blocks.replace_all(&html_with_styles, |captures: &regex::Captures<'_>| {
         let open = captures.get(1).map(|m| m.as_str()).unwrap_or("");
@@ -947,7 +947,7 @@ fn rewrite_css(css: &str, base: &Url, session_base: &Url, session_id: &str) -> R
 }
 
 fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: &str) -> Result<String, String> {
-    let static_imports = Regex::new(r#"(?m)(\\b(?:import|export)\\s+(?:[^;\\n]*?\\s+from\\s*)?)(["'])(https?://[^"']+)(["'])"#)
+    let static_imports = Regex::new(r#"(?m)(\b(?:import|export)\s+(?:[^;\n]*?\s+from\s*)?)(["'])(https?://[^"']+)(["'])"#)
         .map_err(|error| error.to_string())?;
     let rewritten = static_imports.replace_all(source, |captures: &regex::Captures<'_>| {
         let prefix = captures.get(1).map(|m| m.as_str()).unwrap_or("");
@@ -958,7 +958,7 @@ fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: 
         format!("{prefix}{quote}{route}{suffix}")
     });
 
-    let dynamic_imports = Regex::new(r#"(?m)\\bimport\\(\\s*(["'])(https?://[^"']+)(["'])\\s*\\)"#)
+    let dynamic_imports = Regex::new(r#"(?m)\bimport\(\s*(["'])(https?://[^"']+)(["'])\s*\)"#)
         .map_err(|error| error.to_string())?;
     let rewritten = dynamic_imports.replace_all(&rewritten, |captures: &regex::Captures<'_>| {
         let quote = captures.get(1).map(|m| m.as_str()).unwrap_or("\\"");
