@@ -1,8 +1,8 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use axum::{
@@ -32,7 +32,6 @@ use uuid::Uuid;
 const LISTEN: &str = "127.0.0.1:5000";
 const MAX_REQUEST_BODY: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE_BODY: usize = 32 * 1024 * 1024;
-const MAX_EVENTS: usize = 500;
 const MAX_DELAY_SECONDS: u64 = 24 * 60 * 60;
 const MIN_DELAY_NANOS: f64 = 0.000_000_001;
 
@@ -47,7 +46,6 @@ struct Session {
     client: reqwest::Client,
     gate: Mutex<GateState>,
     gate_tx: watch::Sender<GateState>,
-    events: Mutex<VecDeque<ActionEvent>>,
 }
 
 #[derive(Clone, Copy)]
@@ -73,26 +71,10 @@ struct StartTimer {
     delay_seconds: f64,
 }
 
-#[derive(Debug, Deserialize)]
-struct EventInput {
-    kind: String,
-    target: Option<String>,
-    detail: Option<String>,
-}
-
-#[derive(Debug, Serialize, Clone)]
-struct ActionEvent {
-    at_unix_ms: u128,
-    kind: String,
-    target: String,
-    detail: String,
-}
-
-#[derive(Debug, Serialize)]
+Event types#[derive(Debug, Serialize)]
 struct StatusResponse {
     state: &'static str,
     remaining_ms: u64,
-    event_count: usize,
 }
 
 #[tokio::main]
@@ -115,7 +97,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions", post(create_session))
         .route("/api/sessions/{id}/start", post(start_timer))
         .route("/api/sessions/{id}/status", get(session_status))
-        .route("/api/sessions/{id}/events", get(get_events).post(record_events))
         .route("/p/{id}", any(proxy))
         .route("/p/{id}/{*path}", any(proxy))
         .with_state(state);
@@ -220,7 +201,6 @@ async fn create_session(
         client,
         gate: Mutex::new(GateState::Waiting),
         gate_tx: watch::channel(GateState::Waiting).0,
-        events: Mutex::new(VecDeque::new()),
     });
 
     // Preserve the submitted destination path, query, and browser-side fragment
@@ -299,45 +279,6 @@ async fn session_status(
     Ok(Json(status_for(&session).await))
 }
 
-async fn get_events(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<Vec<ActionEvent>>, (StatusCode, String)> {
-    let session = find_session(&state, &id).await?;
-    let events = session.events.lock().await.iter().cloned().collect::<Vec<_>>();
-    Ok(Json(events))
-}
-
-async fn record_events(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(inputs): Json<Vec<EventInput>>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let session = find_session(&state, &id).await?;
-    for input in inputs.into_iter().take(100) {
-        push_event(
-            &session,
-            &input.kind,
-            input.target.unwrap_or_default(),
-            input.detail.unwrap_or_default(),
-        ).await;
-    }
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn push_event(session: &Session, kind: &str, target: String, detail: String) {
-    let mut events = session.events.lock().await;
-    if events.len() == MAX_EVENTS {
-        events.pop_front();
-    }
-    events.push_back(ActionEvent {
-        at_unix_ms: now_ms(),
-        kind: clean_field(kind.to_owned(), 80),
-        target: clean_field(target, 240),
-        detail: clean_field(detail, 300),
-    });
-}
-
 async fn find_session(
     state: &AppState,
     id: &str,
@@ -366,11 +307,9 @@ async fn status_for(session: &Session) -> StatusResponse {
             GateState::Released => ("released", 0),
         }
     };
-    let event_count = session.events.lock().await.len();
     StatusResponse {
         state,
         remaining_ms,
-        event_count,
     }
 }
 
@@ -441,7 +380,6 @@ async fn proxy(
     }
 
     let (parts, body) = request.into_parts();
-    push_event(&session, "http_request", upstream_url.path().to_owned(), parts.method.as_str().to_owned()).await;
     let body = match to_bytes(body, MAX_REQUEST_BODY).await {
         Ok(body) => body,
         Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "Request body exceeds the 8 MiB limit"),
@@ -566,6 +504,8 @@ fn rewrite_html(html: &str, base: &Url, session_id: &str) -> Result<String, Stri
     settings = settings.append_element_content_handler(element!(
         "a[href],area[href],link[href],script[src],img[src],source[src],iframe[src],video[src],audio[src],input[src],form[action],button[formaction],base[href]",
         move |el| {
+            // These URL changes are routing-only: keep first-party navigation and
+            // resources inside this session without changing their rendered content.
             for attribute in ["href", "src", "action", "formaction", "poster"] {
                 if let Some(value) = el.get_attribute(attribute) {
                     if let Some(rewritten) = rewrite_url(&base_for_attrs, &id_for_attrs, &value) {
@@ -578,27 +518,25 @@ fn rewrite_html(html: &str, base: &Url, session_id: &str) -> Result<String, Stri
     ));
 
     let id_for_head = session_id.to_owned();
-    let upstream_origin = base.origin().ascii_serialization();
     settings = settings.append_element_content_handler(element!("head", move |el| {
         let head = format!(
-            r#"<script src="/assets/controller.js" data-session="{id_for_head}" data-upstream-origin="{upstream_origin}"></script><link rel="stylesheet" href="/assets/intercept.css">"#
+            r#"<script src="/assets/controller.js" data-session="{id_for_head}"></script><link rel="stylesheet" href="/assets/intercept.css">"#
         );
         el.prepend(&head, ContentType::Html);
         Ok(())
     }));
 
-    let id_for_body = session_id.to_owned();
     settings = settings.append_element_content_handler(element!("body", move |el| {
-        let toolbar = format!(
-            r#"<aside id="intercept-toolbar" data-session="{id_for_body}" aria-live="polite">
-<div class="intercept-row"><strong>INTERCEPT</strong><span id="intercept-state">Waiting for timer</span>
-<label for="intercept-delay">Delay (seconds)</label><input id="intercept-delay" type="number" min="0.000000001" max="86400" step="any" value="30" inputmode="decimal">
-<button id="intercept-start" type="button">[START]</button><span id="intercept-countdown">Not started</span></div>
-<div id="intercept-notice">Navigation and form submissions are held until authorization. State-changing HTTP requests are enforced by the Rust proxy.</div>
-<details id="intercept-events"><summary id="intercept-events-summary">EVENT STREAM · loading</summary><pre id="intercept-events-list">Waiting for browser and HTTP events…</pre></details>
-</aside>"#
-        );
-        el.append(&toolbar, ContentType::Html);
+        let banner = r#"<aside id="intercept-toolbar" aria-label="Intercept authority">
+<div class="intercept-row"><strong>INTERCEPT AUTHORITY</strong>
+<span id="intercept-state">WAITING</span>
+<label for="intercept-delay">DELAY (SECONDS)</label>
+<input id="intercept-delay" type="number" min="0.000000001" max="86400" step="any" value="30" inputmode="decimal">
+<button id="intercept-start" type="button">[START]</button>
+<span id="intercept-countdown">NOT STARTED</span>
+</div>
+</aside>"#;
+        el.append(banner, ContentType::Html);
         Ok(())
     }));
 
@@ -735,17 +673,6 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         || ip.is_unicast_link_local()
         || ip.is_multicast()
         || ip.to_ipv4_mapped().is_some_and(|v4| !is_public_v4(v4)))
-}
-
-fn clean_field(value: String, max: usize) -> String {
-    value.chars().filter(|ch| !ch.is_control()).take(max).collect()
-}
-
-fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
 }
 
 fn plain(status: StatusCode, message: &str) -> Response<Body> {
