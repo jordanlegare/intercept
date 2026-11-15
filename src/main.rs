@@ -1030,7 +1030,7 @@ fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: 
         let quote = captures.get(2).map(|m| m.as_str()).unwrap_or("'");
         let raw = captures.get(3).map(|m| m.as_str()).unwrap_or("");
         let suffix = captures.get(4).map(|m| m.as_str()).unwrap_or(quote);
-        let route = rewrite_url(base, session_base, id, raw).unwrap_or_else(|| raw.to_owned());
+        let route = rewrite_url(base, session_base, session_id, raw).unwrap_or_else(|| raw.to_owned());
         format!("{prefix}{quote}{route}{suffix}")
     });
     Ok(rewritten.into_owned())
@@ -1328,6 +1328,49 @@ mod tests {
             rewrite_location("https://accounts.example/login", &current, &primary, "session123"),
             "/p/session123/_intercept_session123/https/accounts.example/login"
         );
+    }
+
+    #[test]
+    fn rewrites_root_relative_and_relative_javascript_module_imports() {
+        let primary = Url::parse("https://example.com/").unwrap();
+        let module = Url::parse("https://cdn.example/assets/js/app.js").unwrap();
+        let output = rewrite_javascript(
+            r#"import "/shared/chunk.js"; import("./chunk.js"); export { value } from "../shared/value.js"; import("react");"#,
+            &module,
+            &primary,
+            "session123",
+        ).unwrap();
+
+        assert!(output.contains(r#"import("/p/session123/_intercept_session123/https/cdn.example/shared/chunk.js")"#));
+        assert!(output.contains(r#"import("/p/session123/_intercept_session123/https/cdn.example/assets/js/chunk.js")"#));
+        assert!(output.contains(r#"from "/p/session123/_intercept_session123/https/cdn.example/assets/shared/value.js""#));
+        assert!(output.contains(r#"import("react")"#));
+    }
+
+    #[test]
+    fn rewrites_root_relative_worker_import_scripts() {
+        let primary = Url::parse("https://example.com/").unwrap();
+        let worker = Url::parse("https://cdn.example/workers/worker.js").unwrap();
+        let output = rewrite_javascript(
+            r#"importScripts("/workers/chunk.js", "./helper.js");"#,
+            &worker,
+            &primary,
+            "session123",
+        ).unwrap();
+
+        assert!(output.contains("/p/session123/_intercept_session123/https/cdn.example/workers/chunk.js"));
+        assert!(output.contains("/p/session123/_intercept_session123/https/cdn.example/workers/helper.js"));
+    }
+
+    #[test]
+    fn rewrites_network_attributes_on_generic_and_svg_elements() {
+        let primary = Url::parse("https://example.com/").unwrap();
+        let html = r##"<!doctype html><html><head></head><body><svg><use href="/icons.svg#home"></use><image href="https://cdn.example/image.svg"></image></svg><blockquote cite="/article/source"></blockquote></body></html>"##;
+        let output = rewrite_html(html, &primary, &primary, "session123").unwrap();
+
+        assert!(output.contains("/p/session123/icons.svg#home"));
+        assert!(output.contains("/p/session123/_intercept_session123/https/cdn.example/image.svg"));
+        assert!(output.contains("/p/session123/article/source"));
     }
 
     #[test]
