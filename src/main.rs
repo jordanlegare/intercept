@@ -487,7 +487,7 @@ async fn proxy(
         let upstream = match builder.send().await {
             Ok(response) => response,
             Err(error) => {
-                warn!(%error, url = %upstream_url, "Upstream request failed");
+                warn!(error = ?error, url = %upstream_url, "Upstream request failed");
                 return plain(StatusCode::BAD_GATEWAY, "Upstream request failed");
             }
         };
