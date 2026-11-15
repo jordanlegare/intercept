@@ -998,7 +998,7 @@ fn rewrite_css(css: &str, base: &Url, session_base: &Url, session_id: &str) -> R
 }
 
 fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: &str) -> Result<String, String> {
-    let module_specifier = r#"(?:(?:https?://)|//|/(?!/)|\./|\.\./)[^"']+"#;
+    let module_specifier = r#"(?:(?:https?://|//)[^"']+|/[^/][^"']*|\.\.?/[^"']+)"#;
     let static_import_pattern = format!(r#"(?m)(\b(?:import|export)\s+(?:[^;\n]*?\s+from\s*)?)(["'])({module_specifier})(["'])"#);
     let static_imports = Regex::new(&static_import_pattern)
         .map_err(|error| error.to_string())?;
