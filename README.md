@@ -14,7 +14,7 @@ Install a recent stable Rust toolchain, then run:
     cargo test
     cargo run
 
-Open http://127.0.0.1:5000, enter an upstream URL such as https://example.com/, and choose **Open through Intercept**. The upstream page is served through the local relay. A fixed controller bar is injected at the bottom of the page:
+Open http://127.0.0.1:5000, enter the complete upstream URL (including any path and query string), and choose **Open through Intercept**. The session opens that exact resource rather than resetting to the site's homepage. The local session URL retains the destination path, query, and browser-side fragment while Rust pins requests to the submitted upstream origin. A fixed controller bar is injected at the bottom of the page:
 
 1. Enter a delay in seconds; fractional values are supported (from 0.000000001 to 86400 seconds).
 2. Press **[START]**.
