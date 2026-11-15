@@ -229,7 +229,8 @@
       }
       if (countdownNode) {
         countdownNode.textContent = gateState === "waiting" ? "Not started" :
-          gateState === "released" ? "00:00" : (remainingMs / 1000).toFixed(1) + "s";
+          gateState === "released" ? "00:00" :
+          (Math.ceil(remainingMs / 10) / 100).toFixed(2) + "s";
       }
       if (startButton) startButton.disabled = gateState !== "waiting";
       if (delayInput) delayInput.disabled = gateState !== "waiting";
@@ -261,8 +262,8 @@
     if (!startButton) return;
     const delayInput = document.getElementById("intercept-delay");
     const seconds = Number(delayInput && delayInput.value);
-    if (!Number.isInteger(seconds) || seconds < 1 || seconds > 86400) {
-      showNotice("Enter a whole-number delay from 1 to 86400 seconds.");
+    if (!Number.isFinite(seconds) || seconds < 0.000000001 || seconds > 86400) {
+      showNotice("Enter a delay from 0.000000001 to 86400 seconds.");
       return;
     }
     startButton.disabled = true;
@@ -274,7 +275,7 @@
       });
       if (!response.ok) throw new Error(await response.text() || "Timer could not start");
       const data = await response.json();
-      record("timer_started", "intercept-toolbar", seconds + " seconds");
+      record("timer_started", "intercept-toolbar", String(seconds) + " seconds");
       await pollStatus();
     } catch (error) {
       showNotice(error.message || String(error));

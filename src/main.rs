@@ -34,6 +34,7 @@ const MAX_REQUEST_BODY: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE_BODY: usize = 32 * 1024 * 1024;
 const MAX_EVENTS: usize = 500;
 const MAX_DELAY_SECONDS: u64 = 24 * 60 * 60;
+const MIN_DELAY_NANOS: f64 = 0.000_000_001;
 
 #[derive(Clone)]
 struct AppState {
@@ -69,7 +70,7 @@ struct CreateSessionResponse {
 
 #[derive(Debug, Deserialize)]
 struct StartTimer {
-    delay_seconds: u64,
+    delay_seconds: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,11 +236,9 @@ async fn start_timer(
     Path(id): Path<String>,
     Json(input): Json<StartTimer>,
 ) -> Result<Json<StatusResponse>, (StatusCode, String)> {
-    if input.delay_seconds == 0 || input.delay_seconds > MAX_DELAY_SECONDS {
-        return Err((StatusCode::BAD_REQUEST, "delay_seconds must be between 1 and 86400".into()));
-    }
+    let duration = timer_duration(input.delay_seconds)?;
     let session = find_session(&state, &id).await?;
-    let deadline = Instant::now() + Duration::from_secs(input.delay_seconds);
+    let deadline = Instant::now() + duration;
     {
         let mut gate = session.gate.lock().await;
         match *gate {
@@ -266,6 +265,28 @@ async fn start_timer(
     });
 
     Ok(Json(status_for(&session).await))
+}
+
+fn timer_duration(delay_seconds: f64) -> Result<Duration, (StatusCode, String)> {
+    if !delay_seconds.is_finite()
+        || delay_seconds <= 0.0
+        || delay_seconds > MAX_DELAY_SECONDS as f64
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("delay_seconds must be greater than 0 and no more than {MAX_DELAY_SECONDS}"),
+        ));
+    }
+
+    let duration = Duration::from_secs_f64(delay_seconds);
+    if duration.is_zero() || delay_seconds < MIN_DELAY_NANOS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "delay_seconds must be at least 0.000000001 seconds (1 nanosecond)".into(),
+        ));
+    }
+
+    Ok(duration)
 }
 
 async fn session_status(
@@ -333,10 +354,13 @@ async fn status_for(session: &Session) -> StatusResponse {
         let gate = session.gate.lock().await;
         match *gate {
             GateState::Waiting => ("waiting", 0),
-            GateState::Running { deadline } => (
-                "running",
-                deadline.saturating_duration_since(Instant::now()).as_millis() as u64,
-            ),
+            GateState::Running { deadline } => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let remaining_ms = remaining.as_millis().saturating_add(
+                    if remaining.subsec_nanos() % 1_000_000 != 0 { 1 } else { 0 },
+                );
+                ("running", remaining_ms as u64)
+            },
             GateState::Released => ("released", 0),
         }
     };
@@ -566,7 +590,7 @@ fn rewrite_html(html: &str, base: &Url, session_id: &str) -> Result<String, Stri
         let toolbar = format!(
             r#"<aside id="intercept-toolbar" data-session="{id_for_body}" aria-live="polite">
 <div class="intercept-row"><strong>INTERCEPT</strong><span id="intercept-state">Waiting for timer</span>
-<label for="intercept-delay">Delay (seconds)</label><input id="intercept-delay" type="number" min="1" max="86400" value="30" inputmode="numeric">
+<label for="intercept-delay">Delay (seconds)</label><input id="intercept-delay" type="number" min="0.000000001" max="86400" step="any" value="30" inputmode="decimal">
 <button id="intercept-start" type="button">[START]</button><span id="intercept-countdown">Not started</span></div>
 <div id="intercept-notice">Navigation and form submissions are held until authorization. State-changing HTTP requests are enforced by the Rust proxy.</div>
 <details id="intercept-events"><summary id="intercept-events-summary">EVENT STREAM · loading</summary><pre id="intercept-events-list">Waiting for browser and HTTP events…</pre></details>
@@ -733,6 +757,35 @@ fn plain(status: StatusCode, message: &str) -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_fractional_timer_delays() {
+        assert_eq!(timer_duration(1.25).unwrap(), Duration::from_millis(1250));
+        assert_eq!(timer_duration(0.5).unwrap(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn accepts_maximum_timer_delay() {
+        assert_eq!(
+            timer_duration(MAX_DELAY_SECONDS as f64).unwrap(),
+            Duration::from_secs(MAX_DELAY_SECONDS)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_timer_delays() {
+        for seconds in [
+            0.0,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.000_000_000_1,
+            MAX_DELAY_SECONDS as f64 + 0.1,
+        ] {
+            assert!(timer_duration(seconds).is_err(), "accepted {seconds}");
+        }
+    }
 
     #[test]
     fn rejects_private_and_local_destinations() {
