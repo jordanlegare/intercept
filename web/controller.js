@@ -23,7 +23,7 @@
     } catch (_) {
       return null;
     }
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    if (url.protocol !== "http:" && url.protocol !== "https:") return url.href;
 
     const path = url.pathname + url.search + url.hash;
     if (url.origin === location.origin) {
@@ -41,6 +41,70 @@
       return sessionPrefix + path;
     }
     return sessionPrefix + "/_/" + url.protocol.slice(0, -1) + "/" + url.host + path;
+  }
+
+  function routeSrcset(value) {
+    return String(value).split(",").map(candidate => {
+      const pieces = candidate.trim().split(/\\s+/);
+      if (!pieces[0]) return candidate;
+      pieces[0] = routeToProxy(pieces[0]) || pieces[0];
+      return pieces.join(" ");
+    }).join(", ");
+  }
+
+  // URL mutation hooks keep dynamically-created page resources on the proxy.
+  const nativeSetAttribute = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function(name, value) {
+    const key = String(name).toLowerCase();
+    if (["href", "src", "action", "formaction", "poster", "data", "cite", "background"].includes(key)) {
+      value = routeToProxy(value) || value;
+    } else if (key === "srcset") {
+      value = routeSrcset(value);
+    }
+    return nativeSetAttribute.call(this, name, value);
+  };
+
+  function patchUrlSetter(proto, property) {
+    if (!proto) return;
+    const descriptor = Object.getOwnPropertyDescriptor(proto, property);
+    if (!descriptor || !descriptor.set || !descriptor.configurable) return;
+    Object.defineProperty(proto, property, {
+      ...descriptor,
+      set(value) {
+        const routed = routeToProxy(value);
+        return descriptor.set.call(this, routed || value);
+      }
+    });
+  }
+
+  [
+    [window.HTMLAnchorElement && HTMLAnchorElement.prototype, "href"],
+    [window.HTMLAreaElement && HTMLAreaElement.prototype, "href"],
+    [window.HTMLLinkElement && HTMLLinkElement.prototype, "href"],
+    [window.HTMLScriptElement && HTMLScriptElement.prototype, "src"],
+    [window.HTMLImageElement && HTMLImageElement.prototype, "src"],
+    [window.HTMLSourceElement && HTMLSourceElement.prototype, "src"],
+    [window.HTMLIFrameElement && HTMLIFrameElement.prototype, "src"],
+    [window.HTMLFormElement && HTMLFormElement.prototype, "action"],
+    [window.HTMLInputElement && HTMLInputElement.prototype, "src"],
+    [window.HTMLInputElement && HTMLInputElement.prototype, "formAction"],
+    [window.HTMLButtonElement && HTMLButtonElement.prototype, "formAction"],
+    [window.HTMLVideoElement && HTMLVideoElement.prototype, "src"],
+    [window.HTMLVideoElement && HTMLVideoElement.prototype, "poster"],
+    [window.HTMLAudioElement && HTMLAudioElement.prototype, "src"],
+    [window.HTMLEmbedElement && HTMLEmbedElement.prototype, "src"],
+    [window.HTMLObjectElement && HTMLObjectElement.prototype, "data"]
+  ].forEach(([proto, property]) => patchUrlSetter(proto, property));
+
+  const nativeSetProperty = window.CSSStyleDeclaration && CSSStyleDeclaration.prototype.setProperty;
+  if (nativeSetProperty) {
+    CSSStyleDeclaration.prototype.setProperty = function(property, value, priority) {
+      const rewritten = String(value).replace(/url\\(\\s*["']?(.*?)["']?\\s*\\)/gi, (match, url) => {
+        const routed = routeToProxy(url.trim());
+        return routed ? 'url("' + routed + '")' : match;
+      });
+      return nativeSetProperty.call(this, property, rewritten, priority);
+    };
   }
 
   const nativeFetch = window.fetch.bind(window);
