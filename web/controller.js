@@ -8,6 +8,7 @@
   if (!sessionId || !upstreamOrigin || !primaryOrigin) return;
 
   const sessionPrefix = "/p/" + encodeURIComponent(sessionId);
+  const externalOriginPath = "/_intercept_" + encodeURIComponent(sessionId) + "/";
   const apiPrefix = "/api/sessions/" + encodeURIComponent(sessionId);
   const api = suffix => apiPrefix + suffix;
   const stateNode = () => document.getElementById("intercept-state");
@@ -20,7 +21,7 @@
   function proxyPrefixForOrigin(origin) {
     if (origin === primaryOrigin) return sessionPrefix;
     const parsed = new URL(origin);
-    return sessionPrefix + "/_intercept/" + parsed.protocol.slice(0, -1) + "/" + parsed.host;
+    return sessionPrefix + externalOriginPath + parsed.protocol.slice(0, -1) + "/" + parsed.host;
   }
 
   function routeToProxy(value) {
