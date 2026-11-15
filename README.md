@@ -55,9 +55,9 @@ The rewrites/ directory contains the authority-banner stylesheet and the extensi
 
 - **Not transparent HTTPS interception:** the browser uses local HTTP and sees the local proxy URL. Rust independently establishes upstream HTTPS with normal certificate verification. This workflow does not need a browser-installed CA because the browser connection to Intercept is HTTP. It does not preserve the original https://host/ address bar.
 - Preserving original HTTPS hostnames while inspecting their traffic requires configuring the browser/network to send traffic through a CONNECT proxy and trusting a local interception CA in that browser. This code does not implement that MITM mode.
-- One upstream origin is pinned per session. Requests from page JavaScript to that selected origin (including absolute-origin fetch/XHR URLs, root-relative paths, and sendBeacon) are mapped into the local session path so they reach Rust. Third-party requests and external navigation are not routed through this single-origin session; third-party static resources may still load directly and therefore are not inspected.
+- One upstream origin is pinned per session. Same-origin URLs present in HTML attributes (links, scripts, images, media, and forms) are routed through the local session. Runtime-generated fetch/XHR URLs are not rewritten or intercepted by JavaScript instrumentation. Third-party requests and external navigation are not routed through this single-origin session; third-party static resources may still load directly and therefore are not inspected.
 - WebSockets, HTTP/3, service workers, download streaming, complex CSP/non-UTF-8 HTML, and full cookie semantics are not implemented.
-- A site that uses unusual navigation, history APIs, custom event dispatch, or nonstandard form behavior may not replay perfectly.
+- Applications that construct absolute URLs dynamically or rely on unusual history/base-URL behavior may issue requests outside the session.
 - Browser page scripts execute in the local proxy origin. **Only open websites you trust.** A proxied page is not isolated from the local dashboard/API, so this version must not be treated as a security boundary against hostile website JavaScript.
 - The IP checks and per-session DNS pinning reduce common SSRF/DNS-rebinding paths, but this is an early-stage development tool, not an audited security product.
 
