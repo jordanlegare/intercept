@@ -38,6 +38,7 @@ const MIN_DELAY_NANOS: f64 = 0.000_000_001;
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHE_ENTRY_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_ASSET_CACHE_SECONDS: u64 = 300;
+const EXTERNAL_ORIGIN_PATH: &str = "/_intercept/";
 
 #[derive(Clone)]
 struct AppState {
@@ -492,6 +493,15 @@ async fn proxy(
         };
 
         let status = upstream.status();
+        if !status.is_success() {
+            warn!(
+                status = %status,
+                method = %parts.method,
+                local_uri = %uri,
+                upstream_url = %upstream_url,
+                "Upstream returned a non-success HTTP status"
+            );
+        }
         let headers = upstream.headers().clone();
         if let Some(length) = upstream.content_length() {
             if length > MAX_RESPONSE_BODY as u64 {
@@ -617,7 +627,7 @@ fn upstream_url_for_request(uri: &axum::http::Uri, session: &Session) -> Result<
     let suffix = uri.path().strip_prefix(&prefix)
         .ok_or_else(|| "Request path is outside this session".to_owned())?;
 
-    if let Some(encoded_origin) = suffix.strip_prefix("/_/") {
+    if let Some(encoded_origin) = suffix.strip_prefix(EXTERNAL_ORIGIN_PATH) {
         let (scheme, host_and_path) = encoded_origin.split_once('/')
             .ok_or_else(|| "Malformed proxied origin path".to_owned())?;
         if !matches!(scheme, "http" | "https") {
@@ -628,20 +638,31 @@ fn upstream_url_for_request(uri: &axum::http::Uri, session: &Session) -> Result<
         if authority.is_empty() {
             return Err("Missing upstream host in proxied URL".into());
         }
-        let mut target = Url::parse(&format!("{scheme}://{authority}/{}", path.trim_start_matches('/')))
-            .map_err(|_| "Malformed upstream URL".to_owned())?;
-        target.set_query(uri.query());
+        let origin = Url::parse(&format!("{scheme}://{authority}/"))
+            .map_err(|_| "Malformed upstream origin".to_owned())?;
+        let target_path = if path.is_empty() { "/".to_owned() } else { format!("/{path}") };
+        return url_from_origin_path(&origin, &target_path, uri.query());
+    }
+
+    if suffix.is_empty() {
+        let mut target = session.base_url.clone();
+        if let Some(query) = uri.query() {
+            target.set_query(Some(query));
+        }
         return Ok(target);
     }
 
-    let mut target = session.base_url.clone();
-    if !suffix.is_empty() {
-        target.set_path(suffix);
-        target.set_query(uri.query());
-    } else if let Some(query) = uri.query() {
-        target.set_query(Some(query));
+    url_from_origin_path(&session.base_url, suffix, uri.query())
+}
+
+fn url_from_origin_path(origin: &Url, path: &str, query: Option<&str>) -> Result<Url, String> {
+    let path = if path.is_empty() { "/" } else { path };
+    let mut absolute = format!("{}{}", origin.origin().ascii_serialization(), path);
+    if let Some(query) = query {
+        absolute.push('?');
+        absolute.push_str(query);
     }
-    Ok(target)
+    Url::parse(&absolute).map_err(|_| "Malformed upstream URL path".to_owned())
 }
 
 fn rewrite_referer(value: &HeaderValue, session: &Session) -> Option<HeaderValue> {
@@ -892,7 +913,7 @@ fn proxy_origin_prefix(target: &Url, session_base: &Url, session_id: &str) -> St
     }
     let origin = target.origin().ascii_serialization();
     let authority = origin.strip_prefix(&format!("{}://", target.scheme())).unwrap_or("");
-    format!("/p/{session_id}/_/{}/{authority}", target.scheme())
+    format!("/p/{session_id}{EXTERNAL_ORIGIN_PATH}{}/{authority}", target.scheme())
 }
 
 fn proxy_url(target: &Url, session_base: &Url, session_id: &str) -> String {
