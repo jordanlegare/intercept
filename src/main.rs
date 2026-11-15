@@ -356,8 +356,9 @@ async fn status_for(session: &Session) -> StatusResponse {
             GateState::Waiting => ("waiting", 0),
             GateState::Running { deadline } => {
                 let remaining = deadline.saturating_duration_since(Instant::now());
-                let remaining_ms = remaining.as_millis()
-                    + u128::from(remaining.subsec_nanos() % 1_000_000 != 0);
+                let remaining_ms = remaining.as_millis().saturating_add(
+                    if remaining.subsec_nanos() % 1_000_000 != 0 { 1 } else { 0 },
+                );
                 ("running", remaining_ms as u64)
             },
             GateState::Released => ("released", 0),
@@ -589,7 +590,7 @@ fn rewrite_html(html: &str, base: &Url, session_id: &str) -> Result<String, Stri
         let toolbar = format!(
             r#"<aside id="intercept-toolbar" data-session="{id_for_body}" aria-live="polite">
 <div class="intercept-row"><strong>INTERCEPT</strong><span id="intercept-state">Waiting for timer</span>
-<label for="intercept-delay">Delay (seconds)</label><input id="intercept-delay" type="number" min="1" max="86400" value="30" inputmode="numeric">
+<label for="intercept-delay">Delay (seconds)</label><input id="intercept-delay" type="number" min="0.000000001" max="86400" step="any" value="30" inputmode="decimal">
 <button id="intercept-start" type="button">[START]</button><span id="intercept-countdown">Not started</span></div>
 <div id="intercept-notice">Navigation and form submissions are held until authorization. State-changing HTTP requests are enforced by the Rust proxy.</div>
 <details id="intercept-events"><summary id="intercept-events-summary">EVENT STREAM · loading</summary><pre id="intercept-events-list">Waiting for browser and HTTP events…</pre></details>
