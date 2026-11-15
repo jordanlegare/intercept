@@ -958,7 +958,7 @@ fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: 
         .map_err(|error| error.to_string())?;
     let rewritten = static_imports.replace_all(source, |captures: &regex::Captures<'_>| {
         let prefix = captures.get(1).map(|m| m.as_str()).unwrap_or("");
-        let quote = captures.get(2).map(|m| m.as_str()).unwrap_or("\\"");
+        let quote = captures.get(2).map(|m| m.as_str()).unwrap_or("'");
         let raw = captures.get(3).map(|m| m.as_str()).unwrap_or("");
         let suffix = captures.get(4).map(|m| m.as_str()).unwrap_or(quote);
         let route = rewrite_url(base, session_base, session_id, raw).unwrap_or_else(|| raw.to_owned());
@@ -968,7 +968,7 @@ fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: 
     let dynamic_imports = Regex::new(r#"(?m)\bimport\(\s*(["'])(https?://[^"']+)(["'])\s*\)"#)
         .map_err(|error| error.to_string())?;
     let rewritten = dynamic_imports.replace_all(&rewritten, |captures: &regex::Captures<'_>| {
-        let quote = captures.get(1).map(|m| m.as_str()).unwrap_or("\\"");
+        let quote = captures.get(1).map(|m| m.as_str()).unwrap_or("'");
         let raw = captures.get(2).map(|m| m.as_str()).unwrap_or("");
         let suffix = captures.get(3).map(|m| m.as_str()).unwrap_or(quote);
         let route = rewrite_url(base, session_base, session_id, raw).unwrap_or_else(|| raw.to_owned());
