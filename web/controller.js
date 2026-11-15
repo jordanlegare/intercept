@@ -4,7 +4,8 @@
   const script = document.currentScript;
   const sessionId = script && script.dataset.session;
   const upstreamOrigin = script && script.dataset.upstreamOrigin;
-  if (!sessionId || !upstreamOrigin) return;
+  const primaryOrigin = script && (script.dataset.primaryOrigin || script.dataset.upstreamOrigin);
+  if (!sessionId || !upstreamOrigin || !primaryOrigin) return;
 
   const sessionPrefix = "/p/" + encodeURIComponent(sessionId);
   const apiPrefix = "/api/sessions/" + encodeURIComponent(sessionId);
@@ -16,6 +17,12 @@
 
   // The page remains on localhost, but every HTTP(S) request made by its scripts
   // is translated into a path-addressed upstream request handled by Rust.
+  function proxyPrefixForOrigin(origin) {
+    if (origin === primaryOrigin) return sessionPrefix;
+    const parsed = new URL(origin);
+    return sessionPrefix + "/_intercept/" + parsed.protocol.slice(0, -1) + "/" + parsed.host;
+  }
+
   function routeToProxy(value) {
     let url;
     try {
@@ -34,13 +41,10 @@
           url.pathname === "/assets/controller.js" || url.pathname === "/assets/intercept.css") {
         return url.href;
       }
-      return sessionPrefix + path;
+      return proxyPrefixForOrigin(upstreamOrigin) + path;
     }
 
-    if (url.origin === upstreamOrigin) {
-      return sessionPrefix + path;
-    }
-    return sessionPrefix + "/_/" + url.protocol.slice(0, -1) + "/" + url.host + path;
+    return proxyPrefixForOrigin(url.origin) + path;
   }
 
   function routeSrcset(value) {
