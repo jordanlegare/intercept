@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Intercept · Timed Browser Proxy</title>
+  <style>
+    :root{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#e9eef7;background:#0a0e14}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(ellipse at 50% 0,#17243a 0,transparent 58%),#0a0e14}
+    main{width:min(760px,100%);border:1px solid #29384e;background:#101722;padding:clamp(22px,5vw,42px);box-shadow:0 24px 80px #0008}
+    .mark{color:#73d1ff;letter-spacing:.18em;font-size:12px}h1{font-size:clamp(32px,7vw,56px);letter-spacing:-.06em;margin:12px 0}p{line-height:1.65;color:#a9b7ca}
+    label{display:block;color:#dce8f7;font-size:12px;margin:28px 0 8px}input{width:100%;background:#080d14;color:#f1f6ff;border:1px solid #34465e;padding:15px;font:inherit;outline:none}input:focus{border-color:#73d1ff}
+    button{margin-top:14px;width:100%;padding:15px;background:#73d1ff;border:0;color:#07111c;font:700 14px inherit;letter-spacing:.12em;cursor:pointer}button:hover{background:#a2e2ff}
+    #message{min-height:1.5em;color:#ffca80;font-size:12px;margin-top:14px}
+    .rule{height:1px;background:#29384e;margin:30px 0}.small{font-size:11px;color:#8192a9}
+    code{color:#b8e7ff}
+  </style>
+</head>
+<body>
+<main>
+  <div class="mark">LOCAL HTTP RELAY · 127.0.0.1:5000</div>
+  <h1>INTERCEPT<span style="color:#73d1ff">_</span></h1>
+  <p>Open one HTTP or HTTPS origin through the local relay. Intercept rewrites same-origin links and resources, observes browser events, and holds state-changing HTTP requests until the Rust timer authorizes them.</p>
+  <form id="launch">
+    <label for="target">UPSTREAM WEBSITE</label>
+    <input id="target" name="url" type="url" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://example.com/" value="https://example.com/" required>
+    <button type="submit">OPEN THROUGH INTERCEPT →</button>
+    <div id="message" role="status"></div>
+  </form>
+  <div class="rule"></div>
+  <p class="small">The browser talks HTTP to this loopback app; Rust makes verified HTTPS connections upstream. This is a same-origin reverse-proxy session, not transparent interception of arbitrary HTTPS tabs. No browser CA installation is needed for this local-HTTP workflow.</p>
+  <p class="small">Only visit sites you trust. A proxied site runs JavaScript in the local proxy origin. Cross-origin application requests, WebSockets, HTTP/3, and service-worker behavior are not fully proxied.</p>
+</main>
+<script>
+(() => {
+  const form = document.querySelector("#launch");
+  const message = document.querySelector("#message");
+  const button = form.querySelector("button");
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    button.disabled = true;
+    message.textContent = "Creating isolated proxy session…";
+    try {
+      const response = await fetch("/api/sessions", {
+        method: "POST",
+        headers: {"content-type":"application/json"},
+        body: JSON.stringify({url: document.querySelector("#target").value.trim()})
+      });
+      if (!response.ok) throw new Error(await response.text() || "Could not create proxy session");
+      const data = await response.json();
+      location.assign(data.session_url);
+    } catch (error) {
+      message.textContent = error.message || String(error);
+      button.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>
