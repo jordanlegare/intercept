@@ -1148,6 +1148,18 @@ fn plain(status: StatusCode, message: &str) -> Response<Body> {
 mod tests {
     use super::*;
 
+    fn test_session(base_url: &str) -> Session {
+        let (gate_tx, _) = watch::channel(GateState::Waiting);
+        Session {
+            id: "session123".to_owned(),
+            base_url: Url::parse(base_url).unwrap(),
+            clients: Mutex::new(HashMap::new()),
+            cache: Mutex::new(ResourceCache::default()),
+            gate: Mutex::new(GateState::Waiting),
+            gate_tx,
+        }
+    }
+
     #[test]
     fn accepts_fractional_timer_delays() {
         assert_eq!(timer_duration(1.25).unwrap(), Duration::from_millis(1250));
@@ -1207,7 +1219,7 @@ mod tests {
         );
         assert_eq!(
             rewrite_url(&base, &base, "session123", "https://cdn.example/image.png"),
-            Some("/p/session123/_/https/cdn.example/image.png".to_owned())
+            Some("/p/session123/_intercept/https/cdn.example/image.png".to_owned())
         );
     }
 
@@ -1260,7 +1272,7 @@ mod tests {
             "session123",
         ).unwrap();
         assert!(output.contains("/p/session123/images/bg.png"));
-        assert!(output.contains("/p/session123/_/https/cdn.example/theme.css"));
+        assert!(output.contains("/p/session123/_intercept/https/cdn.example/theme.css"));
     }
 
     #[test]
@@ -1274,7 +1286,7 @@ mod tests {
                 &primary,
                 "session123",
             ),
-            "asset=abc; Path=/p/session123/_/https/cdn.example/; HttpOnly"
+            "asset=abc; Path=/p/session123/_intercept/https/cdn.example/; HttpOnly"
         );
     }
 
@@ -1284,7 +1296,7 @@ mod tests {
         let primary = Url::parse("https://example.com/").unwrap();
         assert_eq!(
             rewrite_location("https://accounts.example/login", &current, &primary, "session123"),
-            "/p/session123/_/https/accounts.example/login"
+            "/p/session123/_intercept/https/accounts.example/login"
         );
     }
 
@@ -1297,12 +1309,59 @@ mod tests {
     }
 
     #[test]
+    fn decodes_external_origin_paths_without_losing_encoded_path_bytes() {
+        let session = test_session("https://example.com/start");
+        let uri = "/p/session123/_intercept/https/cdn.example:8443/assets/a%2Fb%20c.css?sig=a%2Fb"
+            .parse::<axum::http::Uri>()
+            .unwrap();
+        let target = upstream_url_for_request(&uri, &session).unwrap();
+        assert_eq!(
+            target.as_str(),
+            "https://cdn.example:8443/assets/a%2Fb%20c.css?sig=a%2Fb"
+        );
+    }
+
+    #[test]
+    fn decodes_primary_origin_paths_without_double_encoding() {
+        let session = test_session("https://example.com/start");
+        let uri = "/p/session123/files/a%2Fb/%E2%9C%93.css?sig=a%2Fb"
+            .parse::<axum::http::Uri>()
+            .unwrap();
+        let target = upstream_url_for_request(&uri, &session).unwrap();
+        assert_eq!(
+            target.as_str(),
+            "https://example.com/files/a%2Fb/%E2%9C%93.css?sig=a%2Fb"
+        );
+    }
+
+    #[test]
+    fn primary_origin_paths_starting_with_underscore_slash_are_not_mistaken_for_proxy_routes() {
+        let session = test_session("https://example.com/");
+        let uri = "/p/session123/_/https/cdn.example/assets/image.png"
+            .parse::<axum::http::Uri>()
+            .unwrap();
+        let target = upstream_url_for_request(&uri, &session).unwrap();
+        assert_eq!(
+            target.as_str(),
+            "https://example.com/_/https/cdn.example/assets/image.png"
+        );
+    }
+
+    #[test]
+    fn root_path_keeps_the_submitted_url_path_and_query() {
+        let session = test_session("https://example.com/catalog?edition=2");
+        let uri = "/p/session123".parse::<axum::http::Uri>().unwrap();
+        let target = upstream_url_for_request(&uri, &session).unwrap();
+        assert_eq!(target.as_str(), "https://example.com/catalog?edition=2");
+    }
+
+    #[test]
     fn namespaces_external_origins_in_proxy_paths() {
         let primary = Url::parse("https://example.com/").unwrap();
         let external = Url::parse("https://cdn.example:8443/a.js").unwrap();
         assert_eq!(
             proxy_url(&external, &primary, "session123"),
-            "/p/session123/_/https/cdn.example:8443/a.js"
+            "/p/session123/_intercept/https/cdn.example:8443/a.js"
         );
     }
 }
