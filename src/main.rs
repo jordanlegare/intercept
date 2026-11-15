@@ -9,7 +9,7 @@ use axum::{
     body::{Body, to_bytes},
     extract::{OriginalUri, Path, State},
     http::{
-        HeaderName, HeaderValue, Method, Request, Response, StatusCode,
+        HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode,
         header,
     },
     response::{Html, IntoResponse},
@@ -18,6 +18,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use lol_html::{RewriteStrSettings, element, html_content::ContentType, rewrite_str};
+use regex::Regex;
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -34,6 +35,9 @@ const MAX_REQUEST_BODY: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE_BODY: usize = 32 * 1024 * 1024;
 const MAX_DELAY_SECONDS: u64 = 24 * 60 * 60;
 const MIN_DELAY_NANOS: f64 = 0.000_000_001;
+const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CACHE_ENTRY_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_ASSET_CACHE_SECONDS: u64 = 300;
 
 #[derive(Clone)]
 struct AppState {
@@ -43,9 +47,24 @@ struct AppState {
 struct Session {
     id: String,
     base_url: Url,
-    client: reqwest::Client,
+    clients: Mutex<HashMap<String, reqwest::Client>>,
+    cache: Mutex<ResourceCache>,
     gate: Mutex<GateState>,
     gate_tx: watch::Sender<GateState>,
+}
+
+#[derive(Default)]
+struct ResourceCache {
+    entries: HashMap<String, CachedResponse>,
+    bytes: usize,
+}
+
+#[derive(Clone)]
+struct CachedResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Vec<u8>,
+    expires_at: Instant,
 }
 
 #[derive(Clone, Copy)]
@@ -148,8 +167,40 @@ async fn create_session(
         return Err((StatusCode::FORBIDDEN, "Local, private, and link-local destinations are blocked".into()));
     }
 
-    // Resolve once, reject non-public answers, and pin the session client to those
-    // addresses so a later DNS answer cannot rebind this session to a private host.
+    let client = build_pinned_client(&target).await?;
+
+    let id = Uuid::new_v4().simple().to_string();
+    let mut clients = HashMap::new();
+    clients.insert(origin_key(&target), client);
+    let session = Arc::new(Session {
+        id: id.clone(),
+        base_url: target,
+        clients: Mutex::new(clients),
+        cache: Mutex::new(ResourceCache::default()),
+        gate: Mutex::new(GateState::Waiting),
+        gate_tx: watch::channel(GateState::Waiting).0,
+    });
+
+    // Preserve the submitted destination path, query, and browser-side fragment
+    // in the local session URL. The upstream origin remains pinned in base_url.
+    let session_url = local_url(&session.base_url, &id);
+    state.sessions.write().await.insert(id.clone(), session);
+    Ok(Json(CreateSessionResponse {
+        id: id.clone(),
+        session_url,
+    }))
+}
+
+
+fn origin_key(url: &Url) -> String {
+    url.origin().ascii_serialization()
+}
+
+async fn build_pinned_client(target: &Url) -> Result<reqwest::Client, (StatusCode, String)> {
+    if !is_public_destination(target) {
+        return Err((StatusCode::FORBIDDEN, "Local, private, and link-local destinations are blocked".into()));
+    }
+
     let host = target.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']').to_owned();
     let port = target.port_or_known_default().unwrap_or(443);
     let addresses = match target.host() {
@@ -163,24 +214,23 @@ async fn create_session(
                         host = %domain,
                         port,
                         %error,
-                        "The operating-system DNS resolver could not resolve the upstream host"
+                        "The operating-system DNS resolver could not resolve an upstream host"
                     );
                     return Err((
                         StatusCode::BAD_GATEWAY,
-                        format!(
-                            "DNS lookup failed for '{domain}:{port}': {error}. Check DNS on the machine/container running Intercept (for example: getent ahosts {domain})."
-                        ),
+                        format!("DNS lookup failed for '{domain}:{port}': {error}"),
                     ));
                 }
             }
         },
         None => Vec::new(),
     };
+
     if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
         return Err((StatusCode::FORBIDDEN, "Upstream DNS resolved to a local, private, or non-public address".into()));
     }
 
-    let mut client_builder = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(90))
@@ -188,29 +238,23 @@ async fn create_session(
         .pool_max_idle_per_host(16)
         .user_agent("Intercept/0.1 (+http://127.0.0.1:5000)");
     if matches!(target.host(), Some(url::Host::Domain(_))) {
-        client_builder = client_builder.resolve_to_addrs(&host, &addresses);
+        builder = builder.resolve_to_addrs(&host, &addresses);
     }
-    let client = client_builder
+    builder
         .build()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not initialize upstream TLS client".into()))?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not initialize upstream TLS client".into()))
+}
 
-    let id = Uuid::new_v4().simple().to_string();
-    let session = Arc::new(Session {
-        id: id.clone(),
-        base_url: target,
-        client,
-        gate: Mutex::new(GateState::Waiting),
-        gate_tx: watch::channel(GateState::Waiting).0,
-    });
+async fn client_for(session: &Session, target: &Url) -> Result<reqwest::Client, (StatusCode, String)> {
+    let key = origin_key(target);
+    let mut clients = session.clients.lock().await;
+    if let Some(client) = clients.get(&key) {
+        return Ok(client.clone());
+    }
 
-    // Preserve the submitted destination path, query, and browser-side fragment
-    // in the local session URL. The upstream origin remains pinned in base_url.
-    let session_url = local_url(&session.base_url, &id);
-    state.sessions.write().await.insert(id.clone(), session);
-    Ok(Json(CreateSessionResponse {
-        id: id.clone(),
-        session_url,
-    }))
+    let client = build_pinned_client(target).await?;
+    clients.insert(key, client.clone());
+    Ok(client)
 }
 
 async fn start_timer(
@@ -365,18 +409,12 @@ async fn proxy(
         Err((status, message)) => return plain(status, &message),
     };
 
-    let mut upstream_url = session.base_url.clone();
-    let prefix = format!("/p/{id}");
-    let suffix = uri.path().strip_prefix(&prefix).unwrap_or("");
-    if !suffix.is_empty() {
-        upstream_url.set_path(suffix);
-        upstream_url.set_query(uri.query());
-    } else if let Some(query) = uri.query() {
-        upstream_url.set_query(Some(query));
-    }
-
-    if upstream_url.origin() != session.base_url.origin() {
-        return plain(StatusCode::FORBIDDEN, "Cross-origin proxy requests are not allowed in this session");
+    let upstream_url = match upstream_url_for_request(&uri, &session) {
+        Ok(url) => url,
+        Err(message) => return plain(StatusCode::BAD_REQUEST, &message),
+    };
+    if !matches!(upstream_url.scheme(), "http" | "https") || !is_public_destination(&upstream_url) {
+        return plain(StatusCode::FORBIDDEN, "Only public HTTP and HTTPS destinations are allowed");
     }
 
     let (parts, body) = request.into_parts();
@@ -389,61 +427,102 @@ async fn proxy(
         wait_for_authorization(&session).await;
     }
 
-    let method = match reqwest::Method::from_bytes(parts.method.as_str().as_bytes()) {
-        Ok(method) => method,
-        Err(_) => return plain(StatusCode::METHOD_NOT_ALLOWED, "Unsupported HTTP method"),
+    let cache_key = if parts.method == Method::GET {
+        Some(resource_cache_key(&upstream_url, &parts.headers))
+    } else {
+        None
     };
-    let mut builder = session.client.request(method, upstream_url.clone());
-    for (name, value) in parts.headers.iter() {
-        if should_skip_request_header(name) {
-            continue;
-        }
-        if name == header::ORIGIN {
-            if let Ok(origin) = HeaderValue::from_str(&session.base_url.origin().ascii_serialization()) {
-                builder = builder.header(name.clone(), origin);
-            }
-        } else if name == header::REFERER {
-            if let Ok(referer) = HeaderValue::from_str(upstream_url.as_str()) {
-                builder = builder.header(name.clone(), referer);
-            }
-        } else {
-            builder = builder.header(name.clone(), value.clone());
-        }
-    }
-    builder = builder.header(header::ACCEPT_ENCODING, "identity").body(body);
+    let bypass_cache = parts.headers
+        .get(header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("no-cache") || value.contains("no-store"));
 
-    let upstream = match builder.send().await {
-        Ok(response) => response,
-        Err(error) => {
-            warn!(%error, url = %upstream_url, "Upstream request failed");
-            return plain(StatusCode::BAD_GATEWAY, "Upstream request failed");
-        }
+    let cached = if bypass_cache {
+        None
+    } else if let Some(key) = cache_key.as_deref() {
+        cache_get(&session, key).await
+    } else {
+        None
     };
 
-    let upstream_status = upstream.status();
-    let upstream_headers = upstream.headers().clone();
-    if let Some(length) = upstream.content_length() {
-        if length > MAX_RESPONSE_BODY as u64 {
-            return plain(StatusCode::PAYLOAD_TOO_LARGE, "Upstream response exceeds the 32 MiB limit");
-        }
-    }
+    let (upstream_status, upstream_headers, mut response_body) = if let Some(cached) = cached {
+        (cached.status, cached.headers, cached.body)
+    } else {
+        let client = match client_for(&session, &upstream_url).await {
+            Ok(client) => client,
+            Err((status, message)) => return plain(status, &message),
+        };
+        let method = match reqwest::Method::from_bytes(parts.method.as_str().as_bytes()) {
+            Ok(method) => method,
+            Err(_) => return plain(StatusCode::METHOD_NOT_ALLOWED, "Unsupported HTTP method"),
+        };
 
-    let mut response_body = Vec::new();
-    let mut stream = upstream.bytes_stream();
-    while let Some(next) = stream.next().await {
-        match next {
-            Ok(chunk) => {
-                if response_body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BODY {
-                    return plain(StatusCode::PAYLOAD_TOO_LARGE, "Upstream response exceeds the 32 MiB limit");
+        let mut builder = client.request(method, upstream_url.clone());
+        for (name, value) in parts.headers.iter() {
+            if should_skip_request_header(name) {
+                continue;
+            }
+            if name == header::ORIGIN {
+                if let Ok(origin) = HeaderValue::from_str(&session.base_url.origin().ascii_serialization()) {
+                    builder = builder.header(name.clone(), origin);
                 }
-                response_body.extend_from_slice(&chunk);
-            }
-            Err(error) => {
-                warn!(%error, "Failed while reading upstream response");
-                return plain(StatusCode::BAD_GATEWAY, "Failed while reading upstream response");
+            } else if name == header::REFERER {
+                if let Some(referer) = rewrite_referer(value, &session) {
+                    builder = builder.header(name.clone(), referer);
+                }
+            } else if name.as_str() == "sec-fetch-site" {
+                let fetch_site = if upstream_url.origin() == session.base_url.origin() {
+                    "same-origin"
+                } else {
+                    "cross-site"
+                };
+                builder = builder.header(name.clone(), fetch_site);
+            } else {
+                builder = builder.header(name.clone(), value.clone());
             }
         }
-    }
+        builder = builder.header(header::ACCEPT_ENCODING, "identity").body(body);
+
+        let upstream = match builder.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                warn!(%error, url = %upstream_url, "Upstream request failed");
+                return plain(StatusCode::BAD_GATEWAY, "Upstream request failed");
+            }
+        };
+
+        let status = upstream.status();
+        let headers = upstream.headers().clone();
+        if let Some(length) = upstream.content_length() {
+            if length > MAX_RESPONSE_BODY as u64 {
+                return plain(StatusCode::PAYLOAD_TOO_LARGE, "Upstream response exceeds the 32 MiB limit");
+            }
+        }
+
+        let mut bytes = Vec::new();
+        let mut stream = upstream.bytes_stream();
+        while let Some(next) = stream.next().await {
+            match next {
+                Ok(chunk) => {
+                    if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BODY {
+                        return plain(StatusCode::PAYLOAD_TOO_LARGE, "Upstream response exceeds the 32 MiB limit");
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                Err(error) => {
+                    warn!(%error, url = %upstream_url, "Failed while reading upstream response");
+                    return plain(StatusCode::BAD_GATEWAY, "Failed while reading upstream response");
+                }
+            }
+        }
+
+        if let Some(key) = cache_key.as_deref() {
+            if !bypass_cache {
+                cache_put(&session, key, status, &headers, &bytes).await;
+            }
+        }
+        (status, headers, bytes)
+    };
 
     let content_type = upstream_headers
         .get(header::CONTENT_TYPE)
@@ -454,12 +533,32 @@ async fn proxy(
     let mut transformed = false;
     if content_type.contains("text/html") {
         if let Ok(html) = std::str::from_utf8(&response_body) {
-            match rewrite_html(html, &upstream_url, id) {
+            match rewrite_html(html, &upstream_url, &session.base_url, id) {
                 Ok(rewritten) => {
                     response_body = rewritten.into_bytes();
                     transformed = true;
                 }
-                Err(error) => warn!(%error, "HTML rewrite failed; returning original HTML"),
+                Err(error) => warn!(%error, url = %upstream_url, "HTML rewrite failed; returning original HTML"),
+            }
+        }
+    } else if content_type.contains("text/css") {
+        if let Ok(css) = std::str::from_utf8(&response_body) {
+            match rewrite_css(css, &upstream_url, &session.base_url, id) {
+                Ok(rewritten) => {
+                    response_body = rewritten.into_bytes();
+                    transformed = true;
+                }
+                Err(error) => warn!(%error, url = %upstream_url, "CSS rewrite failed; returning original stylesheet"),
+            }
+        }
+    } else if content_type.contains("javascript") || content_type.contains("ecmascript") {
+        if let Ok(javascript) = std::str::from_utf8(&response_body) {
+            match rewrite_javascript(javascript, &upstream_url, &session.base_url, id) {
+                Ok(rewritten) => {
+                    response_body = rewritten.into_bytes();
+                    transformed = true;
+                }
+                Err(error) => warn!(%error, url = %upstream_url, "JavaScript URL rewrite failed; returning original script"),
             }
         }
     }
@@ -467,23 +566,35 @@ async fn proxy(
     let mut response = Response::builder().status(upstream_status);
     let headers = response.headers_mut().expect("fresh response builder");
     for (name, value) in upstream_headers.iter() {
-        if should_skip_response_header(name) || name == header::CONTENT_LENGTH || (transformed && name == header::CONTENT_ENCODING) {
+        if should_skip_response_header(name)
+            || (transformed && (
+                name == header::CONTENT_LENGTH
+                    || name == header::CONTENT_ENCODING
+                    || name == header::ETAG
+            ))
+        {
             continue;
         }
-        if transformed && matches!(name.as_str(), "content-security-policy" | "content-security-policy-report-only" | "x-frame-options" | "etag" | "content-md5" | "digest") {
-            // The proxy needs its controller script and fixed toolbar to run in the document.
+        if transformed && matches!(name.as_str(), "content-md5" | "digest") {
             continue;
         }
+
         if name == header::LOCATION {
             if let Ok(location) = value.to_str() {
-                let rewritten = rewrite_location(location, &upstream_url, id);
+                let rewritten = rewrite_location(location, &upstream_url, &session.base_url, id);
                 if let Ok(value) = HeaderValue::from_str(&rewritten) {
                     headers.append(name.clone(), value);
                 }
             }
         } else if name == header::SET_COOKIE {
             if let Ok(cookie) = value.to_str() {
-                if let Ok(value) = HeaderValue::from_str(&rewrite_set_cookie(cookie, id)) {
+                if let Ok(value) = HeaderValue::from_str(&rewrite_set_cookie(cookie, &upstream_url, &session.base_url, id)) {
+                    headers.append(name.clone(), value);
+                }
+            }
+        } else if matches!(name.as_str(), "content-security-policy" | "content-security-policy-report-only") {
+            if let Ok(policy) = value.to_str() {
+                if let Ok(value) = HeaderValue::from_str(&rewrite_csp(policy)) {
                     headers.append(name.clone(), value);
                 }
             }
@@ -491,26 +602,232 @@ async fn proxy(
             headers.append(name.clone(), value.clone());
         }
     }
-    if transformed {
+
+    if transformed && content_type.contains("text/html") {
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    } else if transformed && content_type.contains("text/css") {
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/css; charset=utf-8"));
     }
-    response.body(Body::from(response_body)).unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "Could not build proxy response"))
+    response.body(Body::from(response_body))
+        .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "Could not build proxy response"))
 }
 
-fn rewrite_html(html: &str, base: &Url, session_id: &str) -> Result<String, String> {
+fn upstream_url_for_request(uri: &axum::http::Uri, session: &Session) -> Result<Url, String> {
+    let prefix = format!("/p/{}", session.id);
+    let suffix = uri.path().strip_prefix(&prefix)
+        .ok_or_else(|| "Request path is outside this session".to_owned())?;
+
+    if let Some(encoded_origin) = suffix.strip_prefix("/_/") {
+        let (scheme, host_and_path) = encoded_origin.split_once('/')
+            .ok_or_else(|| "Malformed proxied origin path".to_owned())?;
+        if !matches!(scheme, "http" | "https") {
+            return Err("Only HTTP and HTTPS origins are supported".into());
+        }
+        let (authority, path) = host_and_path.split_once('/')
+            .unwrap_or((host_and_path, ""));
+        if authority.is_empty() {
+            return Err("Missing upstream host in proxied URL".into());
+        }
+        let mut target = Url::parse(&format!("{scheme}://{authority}/{}", path.trim_start_matches('/')))
+            .map_err(|_| "Malformed upstream URL".to_owned())?;
+        target.set_query(uri.query());
+        return Ok(target);
+    }
+
+    let mut target = session.base_url.clone();
+    if !suffix.is_empty() {
+        target.set_path(suffix);
+        target.set_query(uri.query());
+    } else if let Some(query) = uri.query() {
+        target.set_query(Some(query));
+    }
+    Ok(target)
+}
+
+fn rewrite_referer(value: &HeaderValue, session: &Session) -> Option<HeaderValue> {
+    let text = value.to_str().ok()?;
+    let referer = Url::parse(text).ok()?;
+    if !matches!(referer.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let upstream = if referer.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("localhost")
+    }) && referer.port() == Some(5000) {
+        let mut referer = referer;
+        referer.set_fragment(None);
+        let uri = referer.as_str().parse::<axum::http::Uri>().ok()?;
+        upstream_url_for_request(&uri, session).ok()?
+    } else {
+        referer
+    };
+    HeaderValue::from_str(upstream.as_str()).ok()
+}
+
+fn resource_cache_key(url: &Url, headers: &HeaderMap) -> String {
+    let value = |name: header::HeaderName| {
+        headers.get(name).and_then(|value| value.to_str().ok()).unwrap_or("").to_owned()
+    };
+    format!(
+        "{}\n{}\n{}\n{}\n{}",
+        url,
+        value(header::ACCEPT),
+        value(header::ACCEPT_LANGUAGE),
+        value(header::COOKIE),
+        value(header::USER_AGENT)
+    )
+}
+
+async fn cache_get(session: &Session, key: &str) -> Option<CachedResponse> {
+    let mut cache = session.cache.lock().await;
+    let expired = cache.entries.get(key).is_some_and(|entry| entry.expires_at <= Instant::now());
+    if expired {
+        if let Some(entry) = cache.entries.remove(key) {
+            cache.bytes = cache.bytes.saturating_sub(entry.body.len());
+        }
+        return None;
+    }
+    cache.entries.get(key).cloned()
+}
+
+async fn cache_put(
+    session: &Session,
+    key: &str,
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+) {
+    if status != StatusCode::OK || body.is_empty() || body.len() > MAX_CACHE_ENTRY_BYTES {
+        return;
+    }
+    let content_type = headers.get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok()).unwrap_or("").to_ascii_lowercase();
+    if !is_cacheable_asset(&content_type) || headers.contains_key(header::SET_COOKIE) {
+        return;
+    }
+    let control = headers.get(header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok()).unwrap_or("");
+    if control.split(',').any(|part| matches!(part.trim(), "no-store" | "no-cache")) {
+        return;
+    }
+    let vary = headers.get(header::VARY).and_then(|value| value.to_str().ok()).unwrap_or("");
+    if vary.trim() == "*" || vary.split(',').any(|name| {
+        !matches!(name.trim().to_ascii_lowercase().as_str(), "accept" | "accept-language" | "user-agent")
+    }) {
+        return;
+    }
+
+    let ttl = control.split(',')
+        .filter_map(|part| part.trim().strip_prefix("max-age="))
+        .find_map(|value| value.trim_matches('"').parse::<u64>().ok())
+        .unwrap_or(DEFAULT_ASSET_CACHE_SECONDS)
+        .min(86_400);
+    if ttl == 0 {
+        return;
+    }
+
+    let mut cache = session.cache.lock().await;
+    if let Some(old) = cache.entries.remove(key) {
+        cache.bytes = cache.bytes.saturating_sub(old.body.len());
+    }
+    while cache.bytes.saturating_add(body.len()) > MAX_CACHE_BYTES {
+        let Some(oldest_key) = cache.entries.iter()
+            .min_by_key(|(_, entry)| entry.expires_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        if let Some(old) = cache.entries.remove(&oldest_key) {
+            cache.bytes = cache.bytes.saturating_sub(old.body.len());
+        }
+    }
+    cache.bytes = cache.bytes.saturating_add(body.len());
+    cache.entries.insert(key.to_owned(), CachedResponse {
+        status,
+        headers: headers.clone(),
+        body: body.to_vec(),
+        expires_at: Instant::now() + Duration::from_secs(ttl),
+    });
+}
+
+fn is_cacheable_asset(content_type: &str) -> bool {
+    content_type.starts_with("text/css")
+        || content_type.contains("javascript")
+        || content_type.starts_with("image/")
+        || content_type.starts_with("font/")
+        || content_type.contains("application/font")
+        || content_type.contains("application/wasm")
+}
+fn rewrite_html(
+    html: &str,
+    base: &Url,
+    session_base: &Url,
+    session_id: &str,
+) -> Result<String, String> {
+    let style_blocks = Regex::new(r"(?is)(<style\b[^>]*>)(.*?)(</style\s*>)")
+        .map_err(|error| error.to_string())?;
+    let html_with_styles = style_blocks.replace_all(html, |captures: &regex::Captures<'_>| {
+        let open = captures.get(1).map(|m| m.as_str()).unwrap_or("");
+        let body = captures.get(2).map(|m| m.as_str()).unwrap_or("");
+        let close = captures.get(3).map(|m| m.as_str()).unwrap_or("");
+        let rewritten = rewrite_css(body, base, session_base, session_id)
+            .unwrap_or_else(|_| body.to_owned());
+        format!("{open}{rewritten}{close}")
+    }).into_owned();
+    let script_blocks = Regex::new(r"(?is)(<script\b[^>]*>)(.*?)(</script\s*>)")
+        .map_err(|error| error.to_string())?;
+    let html_with_styles_and_scripts = script_blocks.replace_all(&html_with_styles, |captures: &regex::Captures<'_>| {
+        let open = captures.get(1).map(|m| m.as_str()).unwrap_or("");
+        let body = captures.get(2).map(|m| m.as_str()).unwrap_or("");
+        let close = captures.get(3).map(|m| m.as_str()).unwrap_or("");
+        let rewritten = rewrite_javascript(body, base, session_base, session_id)
+            .unwrap_or_else(|_| body.to_owned());
+        format!("{open}{rewritten}{close}")
+    }).into_owned();
+
     let mut settings = RewriteStrSettings::new();
     let base_for_attrs = base.clone();
+    let session_base_for_attrs = session_base.clone();
     let id_for_attrs = session_id.to_owned();
     settings = settings.append_element_content_handler(element!(
-        "a[href],area[href],link[href],script[src],img[src],source[src],iframe[src],video[src],audio[src],input[src],form[action],button[formaction],base[href]",
+        "a[href],area[href],link[href],script[src],img[src],source[src],iframe[src],video[src],video[poster],audio[src],input[src],form[action],button[formaction],base[href],object[data],embed[src],track[src],[srcset],[style]",
         move |el| {
-            // These URL changes are routing-only: keep first-party navigation and
-            // resources inside this session without changing their rendered content.
-            for attribute in ["href", "src", "action", "formaction", "poster"] {
+            let mut rewrote_resource = false;
+            for attribute in ["href", "src", "action", "formaction", "poster", "data", "cite", "background"] {
                 if let Some(value) = el.get_attribute(attribute) {
-                    if let Some(rewritten) = rewrite_url(&base_for_attrs, &id_for_attrs, &value) {
+                    if let Some(rewritten) = rewrite_url(
+                        &base_for_attrs,
+                        &session_base_for_attrs,
+                        &id_for_attrs,
+                        &value,
+                    ) {
                         el.set_attribute(attribute, &rewritten)?;
+                        rewrote_resource = true;
                     }
+                }
+            }
+            if let Some(srcset) = el.get_attribute("srcset") {
+                let rewritten = rewrite_srcset(
+                    &base_for_attrs,
+                    &session_base_for_attrs,
+                    &id_for_attrs,
+                    &srcset,
+                );
+                el.set_attribute("srcset", &rewritten)?;
+                rewrote_resource = true;
+            }
+            if rewrote_resource && el.get_attribute("integrity").is_some() {
+                // Rewritten CSS/module responses no longer match upstream SRI hashes.
+                el.remove_attribute("integrity");
+            }
+            if let Some(style) = el.get_attribute("style") {
+                if let Ok(rewritten) = rewrite_css(
+                    &style,
+                    &base_for_attrs,
+                    &session_base_for_attrs,
+                    &id_for_attrs,
+                ) {
+                    el.set_attribute("style", &rewritten)?;
                 }
             }
             Ok(())
@@ -518,9 +835,10 @@ fn rewrite_html(html: &str, base: &Url, session_id: &str) -> Result<String, Stri
     ));
 
     let id_for_head = session_id.to_owned();
+    let primary_origin = session_base.origin().ascii_serialization();
     settings = settings.append_element_content_handler(element!("head", move |el| {
         let head = format!(
-            r#"<script src="/assets/controller.js" data-session="{id_for_head}"></script><link rel="stylesheet" href="/assets/intercept.css">"#
+            r#"<script src="/assets/controller.js" data-session="{id_for_head}" data-upstream-origin="{primary_origin}"></script><link rel="stylesheet" href="/assets/intercept.css">"#
         );
         el.prepend(&head, ContentType::Html);
         Ok(())
@@ -540,49 +858,134 @@ fn rewrite_html(html: &str, base: &Url, session_id: &str) -> Result<String, Stri
         Ok(())
     }));
 
-    rewrite_str(html, settings).map_err(|error| error.to_string())
+    rewrite_str(&html_with_styles_and_scripts, settings).map_err(|error| error.to_string())
 }
 
-fn rewrite_url(base: &Url, session_id: &str, value: &str) -> Option<String> {
+fn rewrite_url(
+    base: &Url,
+    session_base: &Url,
+    session_id: &str,
+    value: &str,
+) -> Option<String> {
     let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
     if trimmed.is_empty()
         || trimmed.starts_with('#')
-        || trimmed.starts_with("data:")
-        || trimmed.starts_with("javascript:")
-        || trimmed.starts_with("mailto:")
-        || trimmed.starts_with("tel:")
-        || trimmed.starts_with("blob:")
+        || lower.starts_with("data:")
+        || lower.starts_with("javascript:")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("tel:")
+        || lower.starts_with("blob:")
     {
         return None;
     }
     let absolute = base.join(trimmed).ok()?;
-    if absolute.origin() != base.origin() {
+    if !matches!(absolute.scheme(), "http" | "https") || absolute.host_str().is_none() {
         return None;
     }
-    Some(local_url(&absolute, session_id))
+    Some(proxy_url(&absolute, session_base, session_id))
 }
 
-fn local_url(upstream: &Url, session_id: &str) -> String {
-    let mut result = format!("/p/{session_id}{}", upstream.path());
-    if let Some(query) = upstream.query() {
+fn proxy_origin_prefix(target: &Url, session_base: &Url, session_id: &str) -> String {
+    if target.origin() == session_base.origin() {
+        return format!("/p/{session_id}");
+    }
+    let origin = target.origin().ascii_serialization();
+    let authority = origin.strip_prefix(&format!("{}://", target.scheme())).unwrap_or("");
+    format!("/p/{session_id}/_/{}/{authority}", target.scheme())
+}
+
+fn proxy_url(target: &Url, session_base: &Url, session_id: &str) -> String {
+    let mut result = format!("{}{}", proxy_origin_prefix(target, session_base, session_id), target.path());
+    if let Some(query) = target.query() {
         result.push('?');
         result.push_str(query);
     }
-    if let Some(fragment) = upstream.fragment() {
+    if let Some(fragment) = target.fragment() {
         result.push('#');
         result.push_str(fragment);
     }
     result
 }
 
-fn rewrite_location(location: &str, current: &Url, session_id: &str) -> String {
+fn local_url(upstream: &Url, session_id: &str) -> String {
+    proxy_url(upstream, upstream, session_id)
+}
+
+fn rewrite_srcset(base: &Url, session_base: &Url, session_id: &str, value: &str) -> String {
+    value.split(',')
+        .map(|candidate| {
+            let candidate = candidate.trim();
+            let mut pieces = candidate.split_whitespace();
+            let Some(url) = pieces.next() else { return candidate.to_owned() };
+            let rewritten = rewrite_url(base, session_base, session_id, url)
+                .unwrap_or_else(|| url.to_owned());
+            let descriptor = pieces.collect::<Vec<_>>().join(" ");
+            if descriptor.is_empty() { rewritten } else { format!("{rewritten} {descriptor}") }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn rewrite_css(css: &str, base: &Url, session_base: &Url, session_id: &str) -> Result<String, String> {
+    let url_pattern = Regex::new(r#"(?i)url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)"#)
+        .map_err(|error| error.to_string())?;
+    let with_urls = url_pattern.replace_all(css, |captures: &regex::Captures<'_>| {
+        let original = captures.get(0).map(|m| m.as_str()).unwrap_or("");
+        let raw = captures.get(1).or_else(|| captures.get(2)).or_else(|| captures.get(3))
+            .map(|m| m.as_str().trim()).unwrap_or("");
+        match rewrite_url(base, session_base, session_id, raw) {
+            Some(rewritten) => format!(r#"url("{rewritten}")"#),
+            None => original.to_owned(),
+        }
+    });
+
+    let import_pattern = Regex::new(r#"(?i)@import\s+(?:"([^"]+)"|'([^']+)')"#)
+        .map_err(|error| error.to_string())?;
+    let with_imports = import_pattern.replace_all(&with_urls, |captures: &regex::Captures<'_>| {
+        let original = captures.get(0).map(|m| m.as_str()).unwrap_or("");
+        let raw = captures.get(1).or_else(|| captures.get(2)).map(|m| m.as_str()).unwrap_or("");
+        match rewrite_url(base, session_base, session_id, raw) {
+            Some(rewritten) => format!(r#"@import url("{rewritten}")"#),
+            None => original.to_owned(),
+        }
+    });
+    Ok(with_imports.into_owned())
+}
+
+fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: &str) -> Result<String, String> {
+    let static_imports = Regex::new(r#"(?m)(\b(?:import|export)\s+(?:[^;\n]*?\s+from\s*)?)(["'])(https?://[^"']+)(["'])"#)
+        .map_err(|error| error.to_string())?;
+    let rewritten = static_imports.replace_all(source, |captures: &regex::Captures<'_>| {
+        let prefix = captures.get(1).map(|m| m.as_str()).unwrap_or("");
+        let quote = captures.get(2).map(|m| m.as_str()).unwrap_or("'");
+        let raw = captures.get(3).map(|m| m.as_str()).unwrap_or("");
+        let suffix = captures.get(4).map(|m| m.as_str()).unwrap_or(quote);
+        let route = rewrite_url(base, session_base, session_id, raw).unwrap_or_else(|| raw.to_owned());
+        format!("{prefix}{quote}{route}{suffix}")
+    });
+
+    let dynamic_imports = Regex::new(r#"(?m)\bimport\(\s*(["'])(https?://[^"']+)(["'])\s*\)"#)
+        .map_err(|error| error.to_string())?;
+    let rewritten = dynamic_imports.replace_all(&rewritten, |captures: &regex::Captures<'_>| {
+        let quote = captures.get(1).map(|m| m.as_str()).unwrap_or("'");
+        let raw = captures.get(2).map(|m| m.as_str()).unwrap_or("");
+        let suffix = captures.get(3).map(|m| m.as_str()).unwrap_or(quote);
+        let route = rewrite_url(base, session_base, session_id, raw).unwrap_or_else(|| raw.to_owned());
+        format!("import({quote}{route}{suffix})")
+    });
+    Ok(rewritten.into_owned())
+}
+
+fn rewrite_location(location: &str, current: &Url, session_base: &Url, session_id: &str) -> String {
     match current.join(location) {
-        Ok(url) if url.origin() == current.origin() => local_url(&url, session_id),
-        _ => "/".to_owned(),
+        Ok(url) if matches!(url.scheme(), "http" | "https") => proxy_url(&url, session_base, session_id),
+        _ => location.to_owned(),
     }
 }
 
-fn rewrite_set_cookie(cookie: &str, session_id: &str) -> String {
+fn rewrite_set_cookie(cookie: &str, target: &Url, session_base: &Url, session_id: &str) -> String {
+    let prefix = proxy_origin_prefix(target, session_base, session_id);
     let mut parts = cookie
         .split(';')
         .map(str::trim)
@@ -593,19 +996,48 @@ fn rewrite_set_cookie(cookie: &str, session_id: &str) -> String {
     for part in &mut parts {
         if part.to_ascii_lowercase().starts_with("path=") {
             let upstream_path = part[5..].trim();
-            let scoped_path = if upstream_path == "/" || upstream_path.is_empty() {
-                format!("/p/{session_id}")
-            } else {
-                format!("/p/{session_id}{}", if upstream_path.starts_with('/') { upstream_path.to_owned() } else { format!("/{upstream_path}") })
-            };
-            *part = format!("Path={scoped_path}");
+            let suffix = if upstream_path.is_empty() { "/" } else if upstream_path.starts_with('/') { upstream_path } else { "" };
+            *part = format!("Path={prefix}{suffix}");
             found_path = true;
         }
     }
     if !found_path {
-        parts.push(format!("Path=/p/{session_id}"));
+        parts.push(format!("Path={prefix}/"));
     }
     parts.join("; ")
+}
+
+fn rewrite_csp(policy: &str) -> String {
+    const LOCAL_ORIGIN: &str = "http://127.0.0.1:5000";
+    const SOURCE_DIRECTIVES: &[&str] = &[
+        "default-src", "script-src", "script-src-elem", "script-src-attr",
+        "style-src", "style-src-elem", "style-src-attr", "img-src", "font-src",
+        "media-src", "connect-src", "frame-src", "child-src", "worker-src",
+        "manifest-src", "prefetch-src", "form-action", "base-uri", "object-src",
+    ];
+    policy.split(';')
+        .filter_map(|directive| {
+            let mut tokens = directive.split_whitespace();
+            let name = tokens.next()?;
+            if name.eq_ignore_ascii_case("upgrade-insecure-requests") {
+                return None;
+            }
+            let mut values = tokens.map(str::to_owned).collect::<Vec<_>>();
+            if SOURCE_DIRECTIVES.iter().any(|candidate| name.eq_ignore_ascii_case(candidate)) {
+                values.retain(|value| value != "'none'");
+                for value in &mut values {
+                    if value.starts_with("http://") || value.starts_with("https://") || value.starts_with("*.") {
+                        *value = LOCAL_ORIGIN.to_owned();
+                    }
+                }
+                if !values.iter().any(|value| value == LOCAL_ORIGIN || value == "'self'") {
+                    values.push(LOCAL_ORIGIN.to_owned());
+                }
+            }
+            Some(if values.is_empty() { name.to_owned() } else { format!("{name} {}", values.join(" ")) })
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn should_skip_request_header(name: &HeaderName) -> bool {
@@ -738,15 +1170,15 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_same_origin_urls_to_local_session_paths() {
+    fn rewrites_same_origin_and_external_urls_to_local_session_paths() {
         let base = Url::parse("https://example.com/account/").unwrap();
         assert_eq!(
-            rewrite_url(&base, "session123", "../settings?tab=security"),
+            rewrite_url(&base, &base, "session123", "../settings?tab=security"),
             Some("/p/session123/settings?tab=security".to_owned())
         );
         assert_eq!(
-            rewrite_url(&base, "session123", "https://other.example/image.png"),
-            None
+            rewrite_url(&base, &base, "session123", "https://cdn.example/image.png"),
+            Some("/p/session123/_/https/cdn.example/image.png".to_owned())
         );
     }
 
@@ -771,7 +1203,7 @@ mod tests {
     #[test]
     fn rewrites_cookie_paths_to_the_session_prefix() {
         assert_eq!(
-            rewrite_set_cookie("sid=abc; Domain=example.com; Path=/admin; HttpOnly", "session123"),
+            rewrite_set_cookie("sid=abc; Domain=example.com; Path=/admin; HttpOnly", &Url::parse("https://example.com/").unwrap(), &Url::parse("https://example.com/").unwrap(), "session123"),
             "sid=abc; Path=/p/session123/admin; HttpOnly"
         );
     }
@@ -780,12 +1212,68 @@ mod tests {
     fn rewrites_session_urls_and_injects_only_the_authority_banner() {
         let base = Url::parse("https://example.com/").unwrap();
         let html = r#"<!doctype html><html><head></head><body><a href="/next">next</a></body></html>"#;
-        let result = rewrite_html(html, &base, "session123").unwrap();
+        let result = rewrite_html(html, &base, &base, "session123").unwrap();
         assert!(result.contains("/p/session123/next"));
         assert!(result.contains("/assets/controller.js"));
         assert!(result.contains("intercept-toolbar"));
         assert!(result.contains("INTERCEPT AUTHORITY"));
         assert!(!result.contains("intercept-events"));
         assert!(!result.contains("listener_registered"));
+    }
+
+    #[test]
+    fn rewrites_external_resources_inside_css() {
+        let base = Url::parse("https://example.com/css/site.css").unwrap();
+        let output = rewrite_css(
+            "body { background: url('../images/bg.png') } @import url('https://cdn.example/theme.css');",
+            &base,
+            &Url::parse("https://example.com/").unwrap(),
+            "session123",
+        ).unwrap();
+        assert!(output.contains("/p/session123/images/bg.png"));
+        assert!(output.contains("/p/session123/_/https/cdn.example/theme.css"));
+    }
+
+    #[test]
+    fn scopes_external_cookies_to_their_proxy_origin_path() {
+        let primary = Url::parse("https://example.com/").unwrap();
+        let cdn = Url::parse("https://cdn.example/").unwrap();
+        assert_eq!(
+            rewrite_set_cookie(
+                "asset=abc; Domain=cdn.example; Path=/; HttpOnly",
+                &cdn,
+                &primary,
+                "session123",
+            ),
+            "asset=abc; Path=/p/session123/_/https/cdn.example/; HttpOnly"
+        );
+    }
+
+    #[test]
+    fn rewrites_external_redirects_through_the_session() {
+        let current = Url::parse("https://example.com/start").unwrap();
+        let primary = Url::parse("https://example.com/").unwrap();
+        assert_eq!(
+            rewrite_location("https://accounts.example/login", &current, &primary, "session123"),
+            "/p/session123/_/https/accounts.example/login"
+        );
+    }
+
+    #[test]
+    fn rewrites_external_origins_in_csp_to_local_proxy_origin() {
+        let policy = "default-src 'self' https://cdn.example; img-src https://images.example";
+        let output = rewrite_csp(policy);
+        assert!(output.contains("default-src 'self' http://127.0.0.1:5000"));
+        assert!(output.contains("img-src http://127.0.0.1:5000"));
+    }
+
+    #[test]
+    fn namespaces_external_origins_in_proxy_paths() {
+        let primary = Url::parse("https://example.com/").unwrap();
+        let external = Url::parse("https://cdn.example:8443/a.js").unwrap();
+        assert_eq!(
+            proxy_url(&external, &primary, "session123"),
+            "/p/session123/_/https/cdn.example:8443/a.js"
+        );
     }
 }
