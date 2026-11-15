@@ -717,20 +717,59 @@ fn is_cacheable_asset(content_type: &str) -> bool {
         || content_type.contains("application/font")
         || content_type.contains("application/wasm")
 }
-fn rewrite_html(html: &str, base: &Url, session_id: &str) -> Result<String, String> {
+fn rewrite_html(
+    html: &str,
+    base: &Url,
+    session_base: &Url,
+    session_id: &str,
+) -> Result<String, String> {
+    let style_blocks = Regex::new(r"(?is)(<style\\b[^>]*>)(.*?)(</style\\s*>)")
+        .map_err(|error| error.to_string())?;
+    let html_with_styles = style_blocks.replace_all(html, |captures: &regex::Captures<'_>| {
+        let open = captures.get(1).map(|m| m.as_str()).unwrap_or("");
+        let body = captures.get(2).map(|m| m.as_str()).unwrap_or("");
+        let close = captures.get(3).map(|m| m.as_str()).unwrap_or("");
+        let rewritten = rewrite_css(body, base, session_base, session_id)
+            .unwrap_or_else(|_| body.to_owned());
+        format!("{open}{rewritten}{close}")
+    }).into_owned();
+
     let mut settings = RewriteStrSettings::new();
     let base_for_attrs = base.clone();
+    let session_base_for_attrs = session_base.clone();
     let id_for_attrs = session_id.to_owned();
     settings = settings.append_element_content_handler(element!(
-        "a[href],area[href],link[href],script[src],img[src],source[src],iframe[src],video[src],audio[src],input[src],form[action],button[formaction],base[href]",
+        "a[href],area[href],link[href],script[src],img[src],source[src],iframe[src],video[src],audio[src],input[src],form[action],button[formaction],base[href],object[data],embed[src],track[src],[srcset],[style]",
         move |el| {
-            // These URL changes are routing-only: keep first-party navigation and
-            // resources inside this session without changing their rendered content.
-            for attribute in ["href", "src", "action", "formaction", "poster"] {
+            for attribute in ["href", "src", "action", "formaction", "poster", "data", "cite", "background"] {
                 if let Some(value) = el.get_attribute(attribute) {
-                    if let Some(rewritten) = rewrite_url(&base_for_attrs, &id_for_attrs, &value) {
+                    if let Some(rewritten) = rewrite_url(
+                        &base_for_attrs,
+                        &session_base_for_attrs,
+                        &id_for_attrs,
+                        &value,
+                    ) {
                         el.set_attribute(attribute, &rewritten)?;
                     }
+                }
+            }
+            if let Some(srcset) = el.get_attribute("srcset") {
+                let rewritten = rewrite_srcset(
+                    &base_for_attrs,
+                    &session_base_for_attrs,
+                    &id_for_attrs,
+                    &srcset,
+                );
+                el.set_attribute("srcset", &rewritten)?;
+            }
+            if let Some(style) = el.get_attribute("style") {
+                if let Ok(rewritten) = rewrite_css(
+                    &style,
+                    &base_for_attrs,
+                    &session_base_for_attrs,
+                    &id_for_attrs,
+                ) {
+                    el.set_attribute("style", &rewritten)?;
                 }
             }
             Ok(())
@@ -738,9 +777,10 @@ fn rewrite_html(html: &str, base: &Url, session_id: &str) -> Result<String, Stri
     ));
 
     let id_for_head = session_id.to_owned();
+    let primary_origin = session_base.origin().ascii_serialization();
     settings = settings.append_element_content_handler(element!("head", move |el| {
         let head = format!(
-            r#"<script src="/assets/controller.js" data-session="{id_for_head}"></script><link rel="stylesheet" href="/assets/intercept.css">"#
+            r#"<script src="/assets/controller.js" data-session="{id_for_head}" data-upstream-origin="{primary_origin}"></script><link rel="stylesheet" href="/assets/intercept.css">"#
         );
         el.prepend(&head, ContentType::Html);
         Ok(())
@@ -760,49 +800,110 @@ fn rewrite_html(html: &str, base: &Url, session_id: &str) -> Result<String, Stri
         Ok(())
     }));
 
-    rewrite_str(html, settings).map_err(|error| error.to_string())
+    rewrite_str(&html_with_styles, settings).map_err(|error| error.to_string())
 }
 
-fn rewrite_url(base: &Url, session_id: &str, value: &str) -> Option<String> {
+fn rewrite_url(
+    base: &Url,
+    session_base: &Url,
+    session_id: &str,
+    value: &str,
+) -> Option<String> {
     let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
     if trimmed.is_empty()
         || trimmed.starts_with('#')
-        || trimmed.starts_with("data:")
-        || trimmed.starts_with("javascript:")
-        || trimmed.starts_with("mailto:")
-        || trimmed.starts_with("tel:")
-        || trimmed.starts_with("blob:")
+        || lower.starts_with("data:")
+        || lower.starts_with("javascript:")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("tel:")
+        || lower.starts_with("blob:")
     {
         return None;
     }
     let absolute = base.join(trimmed).ok()?;
-    if absolute.origin() != base.origin() {
+    if !matches!(absolute.scheme(), "http" | "https") || absolute.host_str().is_none() {
         return None;
     }
-    Some(local_url(&absolute, session_id))
+    Some(proxy_url(&absolute, session_base, session_id))
 }
 
-fn local_url(upstream: &Url, session_id: &str) -> String {
-    let mut result = format!("/p/{session_id}{}", upstream.path());
-    if let Some(query) = upstream.query() {
+fn proxy_origin_prefix(target: &Url, session_base: &Url, session_id: &str) -> String {
+    if target.origin() == session_base.origin() {
+        return format!("/p/{session_id}");
+    }
+    let origin = target.origin().ascii_serialization();
+    let authority = origin.strip_prefix(&format!("{}://", target.scheme())).unwrap_or("");
+    format!("/p/{session_id}/_/{}/{authority}", target.scheme())
+}
+
+fn proxy_url(target: &Url, session_base: &Url, session_id: &str) -> String {
+    let mut result = format!("{}{}", proxy_origin_prefix(target, session_base, session_id), target.path());
+    if let Some(query) = target.query() {
         result.push('?');
         result.push_str(query);
     }
-    if let Some(fragment) = upstream.fragment() {
+    if let Some(fragment) = target.fragment() {
         result.push('#');
         result.push_str(fragment);
     }
     result
 }
 
-fn rewrite_location(location: &str, current: &Url, session_id: &str) -> String {
+fn local_url(upstream: &Url, session_id: &str) -> String {
+    proxy_url(upstream, upstream, session_id)
+}
+
+fn rewrite_srcset(base: &Url, session_base: &Url, session_id: &str, value: &str) -> String {
+    value.split(',')
+        .map(|candidate| {
+            let candidate = candidate.trim();
+            let mut pieces = candidate.split_whitespace();
+            let Some(url) = pieces.next() else { return candidate.to_owned() };
+            let rewritten = rewrite_url(base, session_base, session_id, url)
+                .unwrap_or_else(|| url.to_owned());
+            let descriptor = pieces.collect::<Vec<_>>().join(" ");
+            if descriptor.is_empty() { rewritten } else { format!("{rewritten} {descriptor}") }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn rewrite_css(css: &str, base: &Url, session_base: &Url, session_id: &str) -> Result<String, String> {
+    let url_pattern = Regex::new(r#"(?i)url\\(\\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\\s*\\)"#)
+        .map_err(|error| error.to_string())?;
+    let with_urls = url_pattern.replace_all(css, |captures: &regex::Captures<'_>| {
+        let original = captures.get(0).map(|m| m.as_str()).unwrap_or("");
+        let raw = captures.get(1).or_else(|| captures.get(2)).or_else(|| captures.get(3))
+            .map(|m| m.as_str().trim()).unwrap_or("");
+        match rewrite_url(base, session_base, session_id, raw) {
+            Some(rewritten) => format!(r#"url("{rewritten}")"#),
+            None => original.to_owned(),
+        }
+    });
+
+    let import_pattern = Regex::new(r#"(?i)@import\\s+(?:"([^"]+)"|'([^']+)')"#)
+        .map_err(|error| error.to_string())?;
+    let with_imports = import_pattern.replace_all(&with_urls, |captures: &regex::Captures<'_>| {
+        let original = captures.get(0).map(|m| m.as_str()).unwrap_or("");
+        let raw = captures.get(1).or_else(|| captures.get(2)).map(|m| m.as_str()).unwrap_or("");
+        match rewrite_url(base, session_base, session_id, raw) {
+            Some(rewritten) => format!(r#"@import url("{rewritten}")"#),
+            None => original.to_owned(),
+        }
+    });
+    Ok(with_imports.into_owned())
+}
+
+fn rewrite_location(location: &str, current: &Url, session_base: &Url, session_id: &str) -> String {
     match current.join(location) {
-        Ok(url) if url.origin() == current.origin() => local_url(&url, session_id),
-        _ => "/".to_owned(),
+        Ok(url) if matches!(url.scheme(), "http" | "https") => proxy_url(&url, session_base, session_id),
+        _ => location.to_owned(),
     }
 }
 
-fn rewrite_set_cookie(cookie: &str, session_id: &str) -> String {
+fn rewrite_set_cookie(cookie: &str, target: &Url, session_id: &str) -> String {
+    let prefix = proxy_origin_prefix(target, target, session_id);
     let mut parts = cookie
         .split(';')
         .map(str::trim)
@@ -813,19 +914,48 @@ fn rewrite_set_cookie(cookie: &str, session_id: &str) -> String {
     for part in &mut parts {
         if part.to_ascii_lowercase().starts_with("path=") {
             let upstream_path = part[5..].trim();
-            let scoped_path = if upstream_path == "/" || upstream_path.is_empty() {
-                format!("/p/{session_id}")
-            } else {
-                format!("/p/{session_id}{}", if upstream_path.starts_with('/') { upstream_path.to_owned() } else { format!("/{upstream_path}") })
-            };
-            *part = format!("Path={scoped_path}");
+            let suffix = if upstream_path.is_empty() { "/" } else if upstream_path.starts_with('/') { upstream_path } else { "" };
+            *part = format!("Path={prefix}{suffix}");
             found_path = true;
         }
     }
     if !found_path {
-        parts.push(format!("Path=/p/{session_id}"));
+        parts.push(format!("Path={prefix}/"));
     }
     parts.join("; ")
+}
+
+fn rewrite_csp(policy: &str) -> String {
+    const LOCAL_ORIGIN: &str = "http://127.0.0.1:5000";
+    const SOURCE_DIRECTIVES: &[&str] = &[
+        "default-src", "script-src", "script-src-elem", "script-src-attr",
+        "style-src", "style-src-elem", "style-src-attr", "img-src", "font-src",
+        "media-src", "connect-src", "frame-src", "child-src", "worker-src",
+        "manifest-src", "prefetch-src", "form-action", "base-uri", "object-src",
+    ];
+    policy.split(';')
+        .filter_map(|directive| {
+            let mut tokens = directive.split_whitespace();
+            let name = tokens.next()?;
+            if name.eq_ignore_ascii_case("upgrade-insecure-requests") {
+                return None;
+            }
+            let mut values = tokens.map(str::to_owned).collect::<Vec<_>>();
+            if SOURCE_DIRECTIVES.iter().any(|candidate| name.eq_ignore_ascii_case(candidate)) {
+                values.retain(|value| value != "'none'");
+                for value in &mut values {
+                    if value.starts_with("http://") || value.starts_with("https://") || value.starts_with("*.") {
+                        *value = LOCAL_ORIGIN.to_owned();
+                    }
+                }
+                if !values.iter().any(|value| value == LOCAL_ORIGIN || value == "'self'") {
+                    values.push(LOCAL_ORIGIN.to_owned());
+                }
+            }
+            Some(if values.is_empty() { name.to_owned() } else { format!("{name} {}", values.join(" ")) })
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn should_skip_request_header(name: &HeaderName) -> bool {
