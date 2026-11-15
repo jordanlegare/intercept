@@ -567,7 +567,7 @@ async fn proxy(
             }
         } else if name == header::SET_COOKIE {
             if let Ok(cookie) = value.to_str() {
-                if let Ok(value) = HeaderValue::from_str(&rewrite_set_cookie(cookie, &upstream_url, id)) {
+                if let Ok(value) = HeaderValue::from_str(&rewrite_set_cookie(cookie, &upstream_url, &session.base_url, id)) {
                     headers.append(name.clone(), value);
                 }
             }
@@ -723,7 +723,7 @@ fn rewrite_html(
     session_base: &Url,
     session_id: &str,
 ) -> Result<String, String> {
-    let style_blocks = Regex::new(r"(?is)(<style\\b[^>]*>)(.*?)(</style\\s*>)")
+    let style_blocks = Regex::new(r"(?is)(<style\b[^>]*>)(.*?)(</style\\s*>)")
         .map_err(|error| error.to_string())?;
     let html_with_styles = style_blocks.replace_all(html, |captures: &regex::Captures<'_>| {
         let open = captures.get(1).map(|m| m.as_str()).unwrap_or("");
@@ -870,7 +870,7 @@ fn rewrite_srcset(base: &Url, session_base: &Url, session_id: &str, value: &str)
 }
 
 fn rewrite_css(css: &str, base: &Url, session_base: &Url, session_id: &str) -> Result<String, String> {
-    let url_pattern = Regex::new(r#"(?i)url\\(\\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\\s*\\)"#)
+    let url_pattern = Regex::new(r#"(?i)url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\\s*\\)"#)
         .map_err(|error| error.to_string())?;
     let with_urls = url_pattern.replace_all(css, |captures: &regex::Captures<'_>| {
         let original = captures.get(0).map(|m| m.as_str()).unwrap_or("");
@@ -882,7 +882,7 @@ fn rewrite_css(css: &str, base: &Url, session_base: &Url, session_id: &str) -> R
         }
     });
 
-    let import_pattern = Regex::new(r#"(?i)@import\\s+(?:"([^"]+)"|'([^']+)')"#)
+    let import_pattern = Regex::new(r#"(?i)@import\s+(?:"([^"]+)"|'([^']+)')"#)
         .map_err(|error| error.to_string())?;
     let with_imports = import_pattern.replace_all(&with_urls, |captures: &regex::Captures<'_>| {
         let original = captures.get(0).map(|m| m.as_str()).unwrap_or("");
@@ -902,8 +902,8 @@ fn rewrite_location(location: &str, current: &Url, session_base: &Url, session_i
     }
 }
 
-fn rewrite_set_cookie(cookie: &str, target: &Url, session_id: &str) -> String {
-    let prefix = proxy_origin_prefix(target, target, session_id);
+fn rewrite_set_cookie(cookie: &str, target: &Url, session_base: &Url, session_id: &str) -> String {
+    let prefix = proxy_origin_prefix(target, session_base, session_id);
     let mut parts = cookie
         .split(';')
         .map(str::trim)
@@ -1088,15 +1088,15 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_same_origin_urls_to_local_session_paths() {
+    fn rewrites_same_origin_and_external_urls_to_local_session_paths() {
         let base = Url::parse("https://example.com/account/").unwrap();
         assert_eq!(
-            rewrite_url(&base, "session123", "../settings?tab=security"),
+            rewrite_url(&base, &base, "session123", "../settings?tab=security"),
             Some("/p/session123/settings?tab=security".to_owned())
         );
         assert_eq!(
-            rewrite_url(&base, "session123", "https://other.example/image.png"),
-            None
+            rewrite_url(&base, &base, "session123", "https://cdn.example/image.png"),
+            Some("/p/session123/_/https/cdn.example/image.png".to_owned())
         );
     }
 
@@ -1121,7 +1121,7 @@ mod tests {
     #[test]
     fn rewrites_cookie_paths_to_the_session_prefix() {
         assert_eq!(
-            rewrite_set_cookie("sid=abc; Domain=example.com; Path=/admin; HttpOnly", "session123"),
+            rewrite_set_cookie("sid=abc; Domain=example.com; Path=/admin; HttpOnly", &Url::parse("https://example.com/").unwrap(), &Url::parse("https://example.com/").unwrap(), "session123"),
             "sid=abc; Path=/p/session123/admin; HttpOnly"
         );
     }
@@ -1137,5 +1137,28 @@ mod tests {
         assert!(result.contains("INTERCEPT AUTHORITY"));
         assert!(!result.contains("intercept-events"));
         assert!(!result.contains("listener_registered"));
+    }
+
+    #[test]
+    fn rewrites_external_resources_inside_css() {
+        let base = Url::parse("https://example.com/css/site.css").unwrap();
+        let output = rewrite_css(
+            "body { background: url('../images/bg.png') } @import url('https://cdn.example/theme.css');",
+            &base,
+            &Url::parse("https://example.com/").unwrap(),
+            "session123",
+        ).unwrap();
+        assert!(output.contains("/p/session123/images/bg.png"));
+        assert!(output.contains("/p/session123/_/https/cdn.example/theme.css"));
+    }
+
+    #[test]
+    fn namespaces_external_origins_in_proxy_paths() {
+        let primary = Url::parse("https://example.com/").unwrap();
+        let external = Url::parse("https://cdn.example:8443/a.js").unwrap();
+        assert_eq!(
+            proxy_url(&external, &primary, "session123"),
+            "/p/session123/_/https/cdn.example:8443/a.js"
+        );
     }
 }
