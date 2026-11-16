@@ -788,8 +788,29 @@ fn validate_authorization_rules(rules: &[AuthorizationRule]) -> Result<(), (Stat
     Ok(())
 }
 
+fn is_known_read_only_post(target: &Url) -> bool {
+    let Some(host) = target.host_str() else {
+        return false;
+    };
+    let youtube_host = matches!(
+        host.to_ascii_lowercase().as_str(),
+        "youtube.com"
+            | "www.youtube.com"
+            | "m.youtube.com"
+            | "music.youtube.com"
+            | "youtubei.googleapis.com"
+    );
+    youtube_host && matches!(
+        target.path(),
+        "/youtubei/v1/complete" | "/youtubei/v1/search"
+    )
+}
+
 fn should_hold_request(session: &Session, method: &Method, target: &Url, bootstrap_document: bool) -> bool {
-    let standard = method != Method::GET && method != Method::HEAD && method != Method::OPTIONS;
+    let standard = method != Method::GET
+        && method != Method::HEAD
+        && method != Method::OPTIONS
+        && !(method == Method::POST && is_known_read_only_post(target));
     match session.policy {
         AuthorizationPolicy::Standard => standard,
         AuthorizationPolicy::Strict => !(bootstrap_document && method == Method::GET),
@@ -1308,6 +1329,7 @@ async fn ajax_passthrough(
     request_method: Method,
     request_headers: HeaderMap,
     request_body: bytes::Bytes,
+    input_trace: Option<String>,
     context: ProxyRequestContext,
 ) -> Response<Body> {
     let ProxyRequestContext { request_id, started_at: request_started, permit: request_permit } = context;
@@ -1374,7 +1396,10 @@ async fn ajax_passthrough(
                 session,
                 "ajax_error",
                 upstream_url.path().to_owned(),
-                format!("rid={request_id} upstream request failed"),
+                format!(
+                    "rid={request_id} upstream request failed{}",
+                    input_trace.as_ref().map(|trace| format!(" · {trace}")).unwrap_or_default()
+                ),
             ).await;
             return plain(StatusCode::BAD_GATEWAY, "AJAX upstream request failed");
         }
@@ -1427,7 +1452,12 @@ async fn ajax_passthrough(
         session,
         "ajax_response",
         upstream_url.path().to_owned(),
-        format!("rid={request_id} · {} · headers in {}ms", status.as_u16(), upstream_elapsed_ms),
+        format!(
+            "rid={request_id} · {} · headers in {}ms{}",
+            status.as_u16(),
+            upstream_elapsed_ms,
+            input_trace.as_ref().map(|trace| format!(" · {trace}")).unwrap_or_default()
+        ),
     ).await;
     debug!(
         request_id = %request_id,
@@ -1562,6 +1592,7 @@ async fn proxy(
 
     let (parts, body) = request.into_parts();
     let ajax_request = is_ajax_request(&parts.headers);
+    let input_trace = input_event_trace(&parts.headers);
     let worker_script = parts.headers.get("sec-fetch-dest")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "worker" | "sharedworker" | "serviceworker"));
@@ -1569,7 +1600,11 @@ async fn proxy(
         &session,
         if ajax_request { "ajax_request" } else { "http_request" },
         upstream_url.path().to_owned(),
-        format!("rid={request_id} method={}", parts.method),
+        format!(
+            "rid={request_id} method={}{}",
+            parts.method,
+            input_trace.as_ref().map(|trace| format!(" · {trace}")).unwrap_or_default()
+        ),
     ).await;
     let body = tokio::select! {
         _ = wait_for_session_termination(&session) => {
@@ -1611,6 +1646,7 @@ async fn proxy(
             parts.method,
             parts.headers,
             body,
+            input_trace,
             ProxyRequestContext {
                 request_id: request_id.clone(),
                 started_at: request_started,
@@ -2688,12 +2724,32 @@ fn rewrite_csp(policy: &str, session_id: &str) -> String {
     rewritten.join("; ")
 }
 
+fn input_event_trace(headers: &HeaderMap) -> Option<String> {
+    let id = headers.get("x-intercept-input-id")
+        .and_then(|value| value.to_str().ok())?;
+    if id.is_empty()
+        || id.len() > 48
+        || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return None;
+    }
+    let target = headers.get("x-intercept-input-target")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| clean_field(value.to_owned(), 180))
+        .filter(|value| !value.is_empty());
+    Some(match target {
+        Some(target) => format!("input_id={id} target={target}"),
+        None => format!("input_id={id}"),
+    })
+}
+
 fn should_skip_request_header(name: &HeaderName) -> bool {
     matches!(
         name.as_str(),
         "host" | "connection" | "keep-alive" | "proxy-authenticate" | "proxy-authorization"
             | "te" | "trailer" | "transfer-encoding" | "upgrade" | "content-length"
             | "accept-encoding" | "x-intercept-proxy-mode"
+            | "x-intercept-input-id" | "x-intercept-input-target"
     )
 }
 
@@ -2975,6 +3031,56 @@ mod tests {
             rewrite_referer(&referer, &session).unwrap(),
             HeaderValue::from_static("https://example.com/profile")
         );
+    }
+
+    #[test]
+    fn standard_policy_allows_only_known_youtube_read_only_post_endpoints() {
+        let session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        for url in [
+            "https://www.youtube.com/youtubei/v1/complete?prettyPrint=false",
+            "https://www.youtube.com/youtubei/v1/search",
+            "https://youtubei.googleapis.com/youtubei/v1/complete",
+            "https://m.youtube.com/youtubei/v1/search",
+        ] {
+            let target = Url::parse(url).unwrap();
+            assert!(
+                !should_hold_request(&session, &Method::POST, &target, false),
+                "{url} should be allowed as a read-only POST"
+            );
+        }
+
+        for url in [
+            "https://www.youtube.com/youtubei/v1/like",
+            "https://www.youtube.com/youtubei/v1/comment/create",
+            "https://other.example/youtubei/v1/complete",
+        ] {
+            let target = Url::parse(url).unwrap();
+            assert!(
+                should_hold_request(&session, &Method::POST, &target, false),
+                "{url} must remain protected"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_policy_still_holds_youtube_read_only_post_requests() {
+        let session = policy_test_session(AuthorizationPolicy::Strict, Vec::new());
+        let target = Url::parse("https://www.youtube.com/youtubei/v1/complete").unwrap();
+        assert!(should_hold_request(&session, &Method::POST, &target, false));
+    }
+
+    #[test]
+    fn input_event_trace_is_bounded_and_contains_no_input_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-intercept-input-id", HeaderValue::from_static("i1"));
+        headers.insert("x-intercept-input-target", HeaderValue::from_static("input%23search"));
+        assert_eq!(
+            input_event_trace(&headers).as_deref(),
+            Some("input_id=i1 target=input%23search")
+        );
+
+        headers.insert("x-intercept-input-id", HeaderValue::from_static("bad id"));
+        assert!(input_event_trace(&headers).is_none());
     }
 
     #[test]
