@@ -23,7 +23,7 @@ use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use tokio::{
     net::TcpListener,
-    sync::{watch, Mutex, RwLock},
+    sync::{watch, Mutex, RwLock, Semaphore},
     time::{sleep_until, Instant},
 };
 use tracing::{debug, info, warn};
@@ -69,6 +69,7 @@ static JS_DYNAMIC_IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
 #[derive(Clone)]
 struct AppState {
     sessions: Arc<RwLock<HashMap<String, Arc<Session>>>>,
+    rewrite_slots: Arc<Semaphore>,
 }
 
 struct Session {
@@ -132,8 +133,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
+    let rewrite_workers = std::env::var("INTERCEPT_REWRITE_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(2)
+        });
+    info!(rewrite_workers, "CPU rewrite concurrency configured");
+
     let state = AppState {
         sessions: Arc::new(RwLock::new(HashMap::new())),
+        rewrite_slots: Arc::new(Semaphore::new(rewrite_workers)),
     };
 
     let app = Router::new()
@@ -300,14 +313,20 @@ async fn build_pinned_client(target: &Url) -> Result<reqwest::Client, (StatusCod
 
 async fn client_for(session: &Session, target: &Url) -> Result<reqwest::Client, (StatusCode, String)> {
     let key = origin_key(target);
-    let mut clients = session.clients.lock().await;
-    if let Some(client) = clients.get(&key) {
-        return Ok(client.clone());
+
+    // Do not hold the session-wide map lock while DNS resolution and client
+    // construction await network/runtime work. Different origins can initialize
+    // their clients concurrently.
+    if let Some(client) = session.clients.lock().await.get(&key).cloned() {
+        return Ok(client);
     }
 
     let client = build_pinned_client(target).await?;
-    clients.insert(key, client.clone());
-    Ok(client)
+    let mut clients = session.clients.lock().await;
+
+    // Another request may have initialized this origin while we were resolving it.
+    // Reuse that client rather than replacing it and discarding its connection pool.
+    Ok(clients.entry(key).or_insert(client).clone())
 }
 
 async fn start_timer(
@@ -600,34 +619,69 @@ async fn proxy(
         .to_ascii_lowercase();
 
     let mut transformed = false;
-    if content_type.contains("text/html") {
-        if let Ok(html) = std::str::from_utf8(&response_body) {
-            match rewrite_html(html, &upstream_url, &session.base_url, id) {
-                Ok(rewritten) => {
-                    response_body = rewritten.into_bytes();
-                    transformed = true;
+    let needs_rewrite = content_type.contains("text/html")
+        || content_type.contains("text/css")
+        || content_type.contains("javascript")
+        || content_type.contains("ecmascript");
+
+    if needs_rewrite {
+        let permit = match state.rewrite_slots.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => return plain(StatusCode::INTERNAL_SERVER_ERROR, "Response rewrite workers are unavailable"),
+        };
+        let body = std::mem::take(&mut response_body);
+        let rewrite_content_type = content_type.clone();
+        let rewrite_base = upstream_url.clone();
+        let rewrite_session_base = session.base_url.clone();
+        let rewrite_session_id = id.clone();
+
+        let rewrite_result = tokio::task::spawn_blocking(move || {
+            // Keep the CPU concurrency bounded to the configured worker count.
+            let _permit = permit;
+            let mut body = body;
+            let mut transformed = false;
+
+            if let Ok(text) = std::str::from_utf8(&body) {
+                if rewrite_content_type.contains("text/html") {
+                    match rewrite_html(text, &rewrite_base, &rewrite_session_base, &rewrite_session_id) {
+                        Ok(rewritten) => {
+                            body = rewritten.into_bytes();
+                            transformed = true;
+                        }
+                        Err(error) => warn!(%error, url = %rewrite_base, "HTML rewrite failed; returning original HTML"),
+                    }
+                } else if rewrite_content_type.contains("text/css") {
+                    match rewrite_css(text, &rewrite_base, &rewrite_session_base, &rewrite_session_id) {
+                        Ok(rewritten) => {
+                            body = rewritten.into_bytes();
+                            transformed = true;
+                        }
+                        Err(error) => warn!(%error, url = %rewrite_base, "CSS rewrite failed; returning original stylesheet"),
+                    }
+                } else if rewrite_content_type.contains("javascript")
+                    || rewrite_content_type.contains("ecmascript")
+                {
+                    match rewrite_javascript(text, &rewrite_base, &rewrite_session_base, &rewrite_session_id) {
+                        Ok(rewritten) => {
+                            body = rewritten.into_bytes();
+                            transformed = true;
+                        }
+                        Err(error) => warn!(%error, url = %rewrite_base, "JavaScript URL rewrite failed; returning original script"),
+                    }
                 }
-                Err(error) => warn!(%error, url = %upstream_url, "HTML rewrite failed; returning original HTML"),
             }
-        }
-    } else if content_type.contains("text/css") {
-        if let Ok(css) = std::str::from_utf8(&response_body) {
-            match rewrite_css(css, &upstream_url, &session.base_url, id) {
-                Ok(rewritten) => {
-                    response_body = rewritten.into_bytes();
-                    transformed = true;
-                }
-                Err(error) => warn!(%error, url = %upstream_url, "CSS rewrite failed; returning original stylesheet"),
+
+            (body, transformed)
+        }).await;
+
+        match rewrite_result {
+            Ok((rewritten_body, was_transformed)) => {
+                response_body = rewritten_body;
+                transformed = was_transformed;
             }
-        }
-    } else if content_type.contains("javascript") || content_type.contains("ecmascript") {
-        if let Ok(javascript) = std::str::from_utf8(&response_body) {
-            match rewrite_javascript(javascript, &upstream_url, &session.base_url, id) {
-                Ok(rewritten) => {
-                    response_body = rewritten.into_bytes();
-                    transformed = true;
-                }
-                Err(error) => warn!(%error, url = %upstream_url, "JavaScript URL rewrite failed; returning original script"),
+            Err(error) => {
+                warn!(%error, url = %upstream_url, "Response rewrite worker failed");
+                return plain(StatusCode::INTERNAL_SERVER_ERROR, "Response rewrite worker failed");
             }
         }
     }
