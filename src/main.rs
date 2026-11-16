@@ -2,7 +2,10 @@ use std::{
     collections::{HashMap, VecDeque},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::{Arc, LazyLock},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, LazyLock,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -13,6 +16,7 @@ use axum::{
         HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode,
         header,
     },
+    middleware::{self, Next},
     response::{Html, IntoResponse},
     routing::{any, get, post},
     Json, Router,
@@ -46,6 +50,13 @@ const UPSTREAM_TIMEOUT_SECONDS: u64 = 120;
 // Long-lived AJAX streams (notably EventSource) may remain open for hours.
 const AJAX_STREAM_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 const SHUTDOWN_GRACE_SECONDS: u64 = 5;
+const DASHBOARD_HOST: &str = "127.0.0.1:5000";
+const SESSION_PORT: &str = "5000";
+const DEFAULT_MAX_SESSIONS: usize = 8;
+const DEFAULT_SESSION_IDLE_SECONDS: u64 = 1800;
+const DEFAULT_MAX_INFLIGHT_PER_SESSION: usize = 64;
+const MAX_UPSTREAM_ORIGINS_PER_SESSION: usize = 24;
+const MAX_CUSTOM_RULES: usize = 100;
 
 static HTML_STYLE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?is)(<style\b[^>]*>)(.*?)(</style\s*>)")
@@ -76,6 +87,9 @@ static JS_DYNAMIC_IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
 struct AppState {
     sessions: Arc<RwLock<HashMap<String, Arc<Session>>>>,
     rewrite_slots: Arc<Semaphore>,
+    max_sessions: usize,
+    session_idle_timeout: Duration,
+    max_inflight_per_session: usize,
 }
 
 struct Session {
@@ -86,6 +100,13 @@ struct Session {
     gate: Mutex<GateState>,
     gate_tx: watch::Sender<GateState>,
     events: Mutex<VecDeque<ActionEvent>>,
+    policy: AuthorizationPolicy,
+    rules: Vec<AuthorizationRule>,
+    bootstrap_pending: AtomicBool,
+    last_accessed_ms: AtomicU64,
+    start_delay_nanos: AtomicU64,
+    inflight: Arc<Semaphore>,
+    max_inflight: usize,
 }
 
 #[derive(Default)]
@@ -112,6 +133,37 @@ enum GateState {
 #[derive(Debug, Deserialize)]
 struct CreateSession {
     url: String,
+    policy: Option<AuthorizationPolicy>,
+    #[serde(default)]
+    rules: Vec<AuthorizationRule>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum AuthorizationPolicy {
+    #[default]
+    Standard,
+    Strict,
+    Custom,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AuthorizationRule {
+    host: Option<String>,
+    path_prefix: String,
+    #[serde(default)]
+    methods: Vec<String>,
+    hold: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionMetrics {
+    policy: &'static str,
+    cached_bytes: usize,
+    upstream_origins: usize,
+    active_requests: usize,
+    max_inflight_requests: usize,
+    last_activity_ago_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,30 +217,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(usize::from)
                 .unwrap_or(2)
         });
-    info!(rewrite_workers, "CPU rewrite concurrency configured");
+    let max_sessions = env_usize("INTERCEPT_MAX_SESSIONS", DEFAULT_MAX_SESSIONS, 1, 256);
+    let session_idle_timeout = Duration::from_secs(env_u64(
+        "INTERCEPT_SESSION_IDLE_SECONDS",
+        DEFAULT_SESSION_IDLE_SECONDS,
+        60,
+        86_400,
+    ));
+    let max_inflight_per_session = env_usize(
+        "INTERCEPT_MAX_INFLIGHT_PER_SESSION",
+        DEFAULT_MAX_INFLIGHT_PER_SESSION,
+        1,
+        512,
+    );
+    info!(rewrite_workers, max_sessions, session_idle_seconds = session_idle_timeout.as_secs(),
+        max_inflight_per_session, "Proxy resource limits configured");
 
     let state = AppState {
         sessions: Arc::new(RwLock::new(HashMap::new())),
         rewrite_slots: Arc::new(Semaphore::new(rewrite_workers)),
+        max_sessions,
+        session_idle_timeout,
+        max_inflight_per_session,
     };
+    let cleanup_state = state.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            ticker.tick().await;
+            prune_sessions(&cleanup_state).await;
+        }
+    });
 
     let app = Router::new()
         .route("/", get(index))
         .route("/assets/controller.js", get(controller_js))
         .route("/assets/intercept.css", get(intercept_css))
         .route("/api/sessions", post(create_session))
-        .route("/api/sessions/{id}/start", post(start_timer))
-        .route("/api/sessions/{id}/status", get(session_status))
-        .route("/api/sessions/{id}/events", get(get_events).post(record_events))
+        .route("/api/sessions/{id}/start", post(start_timer).options(api_preflight))
+        .route("/api/sessions/{id}/status", get(session_status).options(api_preflight))
+        .route("/api/sessions/{id}/events", get(get_events).post(record_events).options(api_preflight))
+        .route("/api/sessions/{id}/metrics", get(session_metrics).options(api_preflight))
         .route("/p/{id}", any(proxy))
         .route("/p/{id}/", any(proxy))
         .route("/p/{id}/{*path}", any(proxy))
-        .with_state(state);
+        .layer(middleware::from_fn_with_state(state.clone(), host_and_cors_guard))
+        .with_state(state.clone());
 
     let address: SocketAddr = LISTEN.parse()?;
     let listener = TcpListener::bind(address).await?;
-    info!("Intercept listening at http://{LISTEN}");
-    info!("This service is loopback-only; it is not a network-wide transparent proxy.");
+    info!("Intercept dashboard and control API listening at http://{LISTEN}");
+    info!("Session pages use per-session origins such as http://<session-id>.localhost:5000.");
+    info!("The listener is loopback-only; this is not a network-wide transparent proxy.");
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let server = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -256,6 +336,22 @@ async fn create_session(
         return Err((StatusCode::FORBIDDEN, "Local, private, and link-local destinations are blocked".into()));
     }
 
+    let policy = input.policy.unwrap_or_else(|| {
+        std::env::var("INTERCEPT_AUTH_POLICY")
+            .ok()
+            .and_then(|value| match value.to_ascii_lowercase().as_str() {
+                "strict" => Some(AuthorizationPolicy::Strict),
+                "custom" => Some(AuthorizationPolicy::Custom),
+                "standard" => Some(AuthorizationPolicy::Standard),
+                _ => None,
+            })
+            .unwrap_or_default()
+    });
+    validate_authorization_rules(&input.rules)?;
+    if policy == AuthorizationPolicy::Custom && input.rules.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Custom policy requires at least one authorization rule".into()));
+    }
+    prune_sessions(&state).await;
     let client = build_pinned_client(&target).await?;
 
     let id = Uuid::new_v4().simple().to_string();
@@ -269,18 +365,87 @@ async fn create_session(
         gate: Mutex::new(GateState::Waiting),
         gate_tx: watch::channel(GateState::Waiting).0,
         events: Mutex::new(VecDeque::new()),
+        policy,
+        rules: input.rules,
+        bootstrap_pending: AtomicBool::new(true),
+        last_accessed_ms: AtomicU64::new(now_ms() as u64),
+        start_delay_nanos: AtomicU64::new(0),
+        inflight: Arc::new(Semaphore::new(state.max_inflight_per_session)),
+        max_inflight: state.max_inflight_per_session,
     });
 
     // Preserve the submitted destination path, query, and browser-side fragment
     // in the local session URL. The upstream origin remains pinned in base_url.
     let session_url = local_url(&session.base_url, &id);
-    state.sessions.write().await.insert(id.clone(), session);
+    let mut sessions = state.sessions.write().await;
+    if sessions.len() >= state.max_sessions {
+        return Err((StatusCode::TOO_MANY_REQUESTS, "Maximum active session count reached; wait for an idle session to expire".into()));
+    }
+    sessions.insert(id.clone(), session);
+    drop(sessions);
     Ok(Json(CreateSessionResponse {
         id: id.clone(),
         session_url,
     }))
 }
 
+
+fn env_usize(name: &str, default: usize, min: usize, max: usize) -> usize {
+    std::env::var(name).ok().and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(default).clamp(min, max)
+}
+
+fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
+    std::env::var(name).ok().and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default).clamp(min, max)
+}
+
+async fn prune_sessions(state: &AppState) {
+    let now = now_ms() as u64;
+    let idle_limit = state.session_idle_timeout.as_millis() as u64;
+    let mut sessions = state.sessions.write().await;
+    let before = sessions.len();
+    sessions.retain(|_, session| now.saturating_sub(session.last_accessed_ms.load(Ordering::Relaxed)) < idle_limit);
+    let expired = before.saturating_sub(sessions.len());
+    if expired > 0 {
+        info!(expired, active = sessions.len(), "Expired idle proxy sessions");
+    }
+}
+
+fn validate_authorization_rules(rules: &[AuthorizationRule]) -> Result<(), (StatusCode, String)> {
+    if rules.len() > MAX_CUSTOM_RULES {
+        return Err((StatusCode::BAD_REQUEST, format!("At most {MAX_CUSTOM_RULES} custom authorization rules are allowed")));
+    }
+    for rule in rules {
+        if !rule.path_prefix.starts_with('/') || rule.path_prefix.len() > 512 {
+            return Err((StatusCode::BAD_REQUEST, "Each authorization rule needs a path_prefix beginning with / and no longer than 512 characters".into()));
+        }
+        if rule.host.as_ref().is_some_and(|host| host.is_empty() || host.len() > 253 || host.chars().any(char::is_whitespace)) {
+            return Err((StatusCode::BAD_REQUEST, "Authorization rule host values must be valid host names".into()));
+        }
+        for method in &rule.methods {
+            if Method::from_bytes(method.to_ascii_uppercase().as_bytes()).is_err() {
+                return Err((StatusCode::BAD_REQUEST, format!("Invalid HTTP method in authorization rule: {method}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn should_hold_request(session: &Session, method: &Method, target: &Url, bootstrap_document: bool) -> bool {
+    let standard = method != Method::GET && method != Method::HEAD && method != Method::OPTIONS;
+    match session.policy {
+        AuthorizationPolicy::Standard => standard,
+        AuthorizationPolicy::Strict => !bootstrap_document,
+        AuthorizationPolicy::Custom => session.rules.iter().find(|rule| {
+            let host_matches = rule.host.as_ref().is_none_or(|host| target.host_str()
+                .is_some_and(|actual| actual.eq_ignore_ascii_case(host)));
+            let method_matches = rule.methods.is_empty() || rule.methods.iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(method.as_str()));
+            host_matches && method_matches && target.path().starts_with(&rule.path_prefix)
+        }).map(|rule| rule.hold).unwrap_or(standard),
+    }
+}
 
 fn origin_key(url: &Url) -> String {
     url.origin().ascii_serialization()
@@ -320,6 +485,7 @@ async fn build_pinned_client(target: &Url) -> Result<reqwest::Client, (StatusCod
         return Err((StatusCode::FORBIDDEN, "Upstream DNS resolved to a local, private, or non-public address".into()));
     }
 
+    debug!(host = %host, resolved_addresses = addresses.len(), "Upstream DNS resolution completed");
     let mut builder = reqwest::Client::builder()
         .http1_only()
         .redirect(Policy::none())
@@ -349,9 +515,15 @@ async fn client_for(session: &Session, target: &Url) -> Result<reqwest::Client, 
     let client = build_pinned_client(target).await?;
     let mut clients = session.clients.lock().await;
 
-    // Another request may have initialized this origin while we were resolving it.
-    // Reuse that client rather than replacing it and discarding its connection pool.
-    Ok(clients.entry(key).or_insert(client).clone())
+    // Reuse a client another concurrent request may have initialized.
+    if let Some(existing) = clients.get(&key) {
+        return Ok(existing.clone());
+    }
+    if clients.len() >= MAX_UPSTREAM_ORIGINS_PER_SESSION {
+        return Err((StatusCode::TOO_MANY_REQUESTS, "Session upstream-origin limit reached".into()));
+    }
+    clients.insert(key, client.clone());
+    Ok(client)
 }
 
 async fn start_timer(
@@ -366,11 +538,17 @@ async fn start_timer(
         let mut gate = session.gate.lock().await;
         match *gate {
             GateState::Waiting => {
+                session.start_delay_nanos.store(duration.as_nanos() as u64, Ordering::Release);
                 *gate = GateState::Running { deadline };
                 session.gate_tx.send_replace(*gate);
             }
             GateState::Running { .. } | GateState::Released => {
-                return Err((StatusCode::CONFLICT, "The timer has already been started for this session".into()));
+                // A retry with the same delay is idempotent: the original
+                // server-owned deadline is retained and no second timer is spawned.
+                if session.start_delay_nanos.load(Ordering::Acquire) == duration.as_nanos() as u64 {
+                    return Ok(Json(status_for(&session).await));
+                }
+                return Err((StatusCode::CONFLICT, "The timer has already been started with a different delay".into()));
             }
         }
     }
@@ -420,6 +598,29 @@ async fn session_status(
     Ok(Json(status_for(&session).await))
 }
 
+async fn session_metrics(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SessionMetrics>, (StatusCode, String)> {
+    let session = find_session(&state, &id).await?;
+    let cached_bytes = session.cache.lock().await.bytes;
+    let upstream_origins = session.clients.lock().await.len();
+    let last_accessed = session.last_accessed_ms.load(Ordering::Relaxed);
+    let policy = match session.policy {
+        AuthorizationPolicy::Standard => "standard",
+        AuthorizationPolicy::Strict => "strict",
+        AuthorizationPolicy::Custom => "custom",
+    };
+    Ok(Json(SessionMetrics {
+        policy,
+        cached_bytes,
+        upstream_origins,
+        active_requests: session.max_inflight.saturating_sub(session.inflight.available_permits()),
+        max_inflight_requests: session.max_inflight,
+        last_activity_ago_ms: (now_ms() as u64).saturating_sub(last_accessed),
+    }))
+}
+
 async fn get_events(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -463,13 +664,14 @@ async fn find_session(
     state: &AppState,
     id: &str,
 ) -> Result<Arc<Session>, (StatusCode, String)> {
-    state
-        .sessions
+    let session = state.sessions
         .read()
         .await
         .get(id)
         .cloned()
-        .ok_or((StatusCode::NOT_FOUND, "Unknown or expired session".into()))
+        .ok_or((StatusCode::NOT_FOUND, "Unknown or expired session".into()))?;
+    session.last_accessed_ms.store(now_ms() as u64, Ordering::Relaxed);
+    Ok(session)
 }
 
 async fn status_for(session: &Session) -> StatusResponse {
