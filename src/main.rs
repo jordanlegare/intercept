@@ -3078,18 +3078,71 @@ fn rewrite_worker_javascript(
       }}
       if(self.fetch){{
         const nativeFetch=self.fetch.bind(self);
+        function reportDispatch(target,detail){{
+          try{{
+            const endpoint=new URL("/_intercept/events",self.location.origin).href;
+            const payload=[{{kind:"ajax_dispatch",target:String(target||"").slice(0,240),detail:String(detail||"").slice(0,300)}}];
+            nativeFetch(endpoint,{{
+              method:"POST",
+              headers:{{"content-type":"application/json"}},
+              body:JSON.stringify(payload),
+              keepalive:true
+            }}).catch(()=>{{}});
+          }}catch(_e){{}}
+        }}
+        function bodyDiagnostic(body,provided){{
+          if(!provided)return "body_arg=omitted";
+          if(body===null)return "body_arg=null";
+          if(body===undefined)return "body_arg=undefined";
+          if(typeof body==="string")return "body_arg=string body_arg_bytes="+new TextEncoder().encode(body).byteLength;
+          if(typeof URLSearchParams!=="undefined"&&body instanceof URLSearchParams)
+            return "body_arg=urlsearchparams body_arg_bytes="+new TextEncoder().encode(body.toString()).byteLength;
+          if(typeof Blob!=="undefined"&&body instanceof Blob)return "body_arg=blob body_arg_bytes="+body.size;
+          if(typeof ArrayBuffer!=="undefined"&&body instanceof ArrayBuffer)return "body_arg=arraybuffer body_arg_bytes="+body.byteLength;
+          if(typeof ArrayBuffer!=="undefined"&&ArrayBuffer.isView(body))return "body_arg=arraybuffer_view body_arg_bytes="+body.byteLength;
+          if(typeof FormData!=="undefined"&&body instanceof FormData){{
+            let entries=0;
+            for(const _entry of body.entries())entries++;
+            return "body_arg=formdata body_arg_entries="+entries;
+          }}
+          if(typeof ReadableStream!=="undefined"&&body instanceof ReadableStream)return "body_arg=stream body_arg_bytes=unknown";
+          const type=Object.prototype.toString.call(body).slice(8,-1).slice(0,40);
+          return "body_arg="+(type||typeof body)+" body_arg_bytes=unknown";
+        }}
         self.fetch=function(input,init){{
           const source=input instanceof Request?input.url:input;
+          const method=String((init&&init.method)||(input instanceof Request&&input.method)||"GET").toUpperCase();
           const routed=route(source);
           let request;
           if(input instanceof Request){{request=new Request(routed,input);if(init)request=new Request(request,init)}}
           else request=new Request(routed,init);
+          const bodyDetail=init&&Object.prototype.hasOwnProperty.call(init,"body")&&init.body!==undefined
+            ?bodyDiagnostic(init.body,true)
+            :(input instanceof Request&&input.body?"body_arg=request_stream body_arg_bytes=unknown":"body_arg=none");
           const headers=new Headers(request.headers);
           headers.set("X-Intercept-Proxy-Mode","ajax");
+          reportDispatch(routed,method+" · "+bodyDetail+" · transport=worker-fetch");
           return nativeFetch(new Request(request,{{headers}}));
         }};
-      }}
-      if(self.XMLHttpRequest){{
+        if(self.XMLHttpRequest){{
+          const proto=XMLHttpRequest.prototype;
+          const nativeOpen=proto.open;
+          const nativeSet=proto.setRequestHeader;
+          const nativeSend=proto.send;
+          const xhrMeta=new WeakMap();
+          proto.open=function(method,url,...rest){{
+            const routed=route(url);
+            xhrMeta.set(this,{{method:String(method).toUpperCase(),url:routed}});
+            return nativeOpen.call(this,method,routed,...rest);
+          }};
+          proto.send=function(...args){{
+            const meta=xhrMeta.get(this);
+            try{{nativeSet.call(this,"X-Intercept-Proxy-Mode","ajax")}}catch(_e){{}}
+            if(meta)reportDispatch(meta.url,meta.method+" · "+bodyDiagnostic(args[0],args.length>0)+" · transport=worker-xhr");
+            return nativeSend.apply(this,args);
+          }};
+        }}
+      }} else if(self.XMLHttpRequest){{
         const proto=XMLHttpRequest.prototype;
         const nativeOpen=proto.open;
         const nativeSet=proto.setRequestHeader;
