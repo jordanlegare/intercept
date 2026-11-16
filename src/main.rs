@@ -166,6 +166,12 @@ struct SessionMetrics {
     last_activity_ago_ms: u64,
 }
 
+struct ProxyRequestContext {
+    request_id: String,
+    started_at: Instant,
+    permit: tokio::sync::OwnedSemaphorePermit,
+}
+
 #[derive(Debug, Serialize)]
 struct CreateSessionResponse {
     id: String,
@@ -893,10 +899,9 @@ async fn ajax_passthrough(
     request_method: Method,
     request_headers: HeaderMap,
     request_body: bytes::Bytes,
-    request_started: Instant,
-    request_id: String,
-    request_permit: tokio::sync::OwnedSemaphorePermit,
+    context: ProxyRequestContext,
 ) -> Response<Body> {
+    let ProxyRequestContext { request_id, started_at: request_started, permit: request_permit } = context;
     let client = match client_for(session, &upstream_url).await {
         Ok(client) => client,
         Err((status, message)) => return plain(status, &message),
@@ -1037,10 +1042,9 @@ async fn stream_regular_response(
     upstream: reqwest::Response,
     session: &Session,
     upstream_url: &Url,
-    request_started: Instant,
-    request_id: String,
-    request_permit: tokio::sync::OwnedSemaphorePermit,
+    context: ProxyRequestContext,
 ) -> Response<Body> {
+    let ProxyRequestContext { request_id, started_at: request_started, permit: request_permit } = context;
     let status = upstream.status();
     let upstream_headers = upstream.headers().clone();
     let mut response = Response::builder().status(status);
@@ -1171,9 +1175,11 @@ async fn proxy(
             parts.method,
             parts.headers,
             body,
-            request_started,
-            request_id.clone(),
-            request_permit,
+            ProxyRequestContext {
+                request_id: request_id.clone(),
+                started_at: request_started,
+                permit: request_permit,
+            },
         ).await;
     }
 
@@ -1267,9 +1273,11 @@ async fn proxy(
                 upstream,
                 &session,
                 &upstream_url,
-                request_started,
-                request_id,
-                request_permit,
+                ProxyRequestContext {
+                    request_id,
+                    started_at: request_started,
+                    permit: request_permit,
+                },
             ).await;
         }
         if let Some(length) = upstream.content_length() {
@@ -1942,13 +1950,12 @@ fn rewrite_csp(policy: &str, session_id: &str) -> String {
                 if !values.iter().any(|value| value == &local_origin || value == "'self'") {
                     values.push(local_origin.clone());
                 }
-                if name.eq_ignore_ascii_case("default-src")
+                if (name.eq_ignore_ascii_case("default-src")
                     || name.eq_ignore_ascii_case("frame-src")
-                    || name.eq_ignore_ascii_case("child-src")
+                    || name.eq_ignore_ascii_case("child-src"))
+                    && !values.iter().any(|value| value == DASHBOARD_ORIGIN)
                 {
-                    if !values.iter().any(|value| value == DASHBOARD_ORIGIN) {
-                        values.push(DASHBOARD_ORIGIN.to_owned());
-                    }
+                    values.push(DASHBOARD_ORIGIN.to_owned());
                 }
             }
             Some(if values.is_empty() { name.to_owned() } else { format!("{name} {}", values.join(" ")) })
