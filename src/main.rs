@@ -40,6 +40,8 @@ const LISTEN: &str = "127.0.0.1:5000";
 const MAX_REQUEST_BODY: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE_BODY: usize = 32 * 1024 * 1024;
 const MAX_EVENTS: usize = 500;
+const MAX_ERROR_BODY_BYTES: usize = 2 * 1024;
+const MAX_ERROR_BODY_SAMPLE_MS: u64 = 500;
 const MAX_DELAY_SECONDS: u64 = 24 * 60 * 60;
 const MIN_DELAY_NANOS: f64 = 0.000_000_001;
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
@@ -91,6 +93,35 @@ static JS_STATIC_IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
 static JS_DYNAMIC_IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?m)\bimport\(\s*(["'])(https?://[^"']+)(["'])\s*\)"#)
         .expect("valid JavaScript dynamic import regex")
+});
+
+static ERROR_BODY_SCRIPT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)<script\b[^>]*>.*?</script\s*>")
+        .expect("valid error-body script regex")
+});
+static ERROR_BODY_STYLE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)<style\b[^>]*>.*?</style\s*>")
+        .expect("valid error-body style regex")
+});
+static ERROR_BODY_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)<!--.*?-->")
+        .expect("valid error-body comment regex")
+});
+static ERROR_BODY_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)<[^>]*>")
+        .expect("valid error-body tag regex")
+});
+static ERROR_BODY_URL_QUERY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)((?:https?://[^?\s"'<>]+|/[^?\s"'<>]+))\?[^\s"'<>]*"#)
+        .expect("valid error-body URL query regex")
+});
+static ERROR_BODY_SECRET_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)["']?(cookie|set-cookie|authorization|proxy-authorization|csrf|xsrf|access[_-]?token|refresh[_-]?token|id[_-]?token|token|session(?:[_-]?id)?|password|passwd|secret|api[_-]?key)["']?\s*[:=]\s*(?:Bearer\s+)?(?:"[^"]*"|'[^']*'|[^\s,;&]+)"#)
+        .expect("valid error-body secret regex")
+});
+static ERROR_BODY_BEARER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\bbearer\s+[A-Za-z0-9._~+./=-]+")
+        .expect("valid error-body bearer regex")
 });
 
 #[derive(Clone)]
@@ -377,11 +408,22 @@ struct EventInput {
 }
 
 #[derive(Debug, Serialize, Clone)]
+struct UpstreamErrorBody {
+    text: String,
+    captured_bytes: usize,
+    truncated: bool,
+    complete: bool,
+    timed_out: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
 struct ActionEvent {
     at_unix_ms: u128,
     kind: String,
     target: String,
     detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upstream_error_body: Option<UpstreamErrorBody>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1484,6 +1526,16 @@ async fn record_events(
 }
 
 async fn push_event(session: &Session, kind: &str, target: String, detail: String) {
+    push_event_with_error_body(session, kind, target, detail, None).await;
+}
+
+async fn push_event_with_error_body(
+    session: &Session,
+    kind: &str,
+    target: String,
+    detail: String,
+    upstream_error_body: Option<UpstreamErrorBody>,
+) {
     let mut events = session.events.lock().await;
     if events.len() == MAX_EVENTS {
         events.pop_front();
@@ -1493,6 +1545,7 @@ async fn push_event(session: &Session, kind: &str, target: String, detail: Strin
         kind: clean_field(kind.to_owned(), 80),
         target: clean_field(target, 240),
         detail: clean_field(detail, 300),
+        upstream_error_body,
     });
 }
 
@@ -1749,53 +1802,119 @@ async fn ajax_passthrough(
     let upstream_set_cookie = upstream_headers.contains_key(header::SET_COOKIE);
     let upstream_elapsed_ms = request_started.elapsed().as_millis();
 
-    // Preserve the upstream response stream while sampling only the first
-    // chunk of textual error responses. Record why a preview is absent so an
-    // empty body, a read failure, and an intentionally skipped sample are
-    // distinguishable in the event stream. The sampled bytes are replayed
-    // unchanged before the remainder of the upstream stream.
-    let mut error_prefix = None;
-    let mut error_preview = None;
+    // Sample a bounded prefix of textual error responses for the JSON event
+    // export. Every consumed byte is replayed unchanged to the browser.
+    // Content-Length lets short error bodies be captured completely; chunked
+    // and long-lived responses are bounded by both size and elapsed time.
+    let mut error_prefix = Vec::new();
+    let mut error_body_capture = Vec::with_capacity(MAX_ERROR_BODY_BYTES);
+    let mut error_preview: Option<String> = None;
     let mut error_sampled_bytes = 0usize;
+    let mut first_error_chunk_seen = false;
     let mut error_read_failed = false;
+    let mut error_body_truncated = false;
+    let mut error_body_complete = false;
+    let mut error_body_timed_out = false;
     let error_content_type = upstream_headers.get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_owned();
+    let upstream_content_length = upstream_headers.get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok());
     let should_sample_error = !status.is_success()
+        && !error_content_type.to_ascii_lowercase().contains("text/event-stream")
         && (error_content_type.starts_with("text/")
             || error_content_type.contains("xml")
             || error_content_type.contains("json"));
     if should_sample_error {
-        match upstream.chunk().await {
-            Ok(Some(chunk)) => {
-                error_sampled_bytes = chunk.len();
-                if !chunk.is_empty() {
-                    error_preview = Some(clean_field(
-                        String::from_utf8_lossy(&chunk[..chunk.len().min(512)]).into_owned(),
-                        240,
-                    ));
+        let sample_deadline = tokio::time::sleep(Duration::from_millis(MAX_ERROR_BODY_SAMPLE_MS));
+        tokio::pin!(sample_deadline);
+        loop {
+            let next_chunk = tokio::select! {
+                _ = &mut sample_deadline => {
+                    error_body_timed_out = true;
+                    break;
                 }
-                error_prefix = Some(chunk);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                error_read_failed = true;
-                debug!(
-                    host = %upstream_host,
-                    path = %upstream_path,
-                    error = %error.without_url(),
-                    "Could not sample upstream error response"
-                );
+                chunk = upstream.chunk() => chunk,
+            };
+            match next_chunk {
+                Ok(Some(chunk)) => {
+                    if !first_error_chunk_seen {
+                        error_sampled_bytes = chunk.len();
+                        first_error_chunk_seen = true;
+                    }
+
+                    let remaining = MAX_ERROR_BODY_BYTES.saturating_sub(error_body_capture.len());
+                    let captured_len = chunk.len().min(remaining);
+                    if captured_len > 0 {
+                        error_body_capture.extend_from_slice(&chunk[..captured_len]);
+                        error_prefix.push(chunk.slice(..captured_len));
+                    }
+                    if chunk.len() > captured_len {
+                        // The tail of this already-read network chunk must be
+                        // forwarded too, even though it is outside the capture.
+                        error_prefix.push(chunk.slice(captured_len..));
+                        error_body_truncated = true;
+                        break;
+                    }
+
+                    if upstream_content_length
+                        .is_some_and(|length| error_body_capture.len() >= length)
+                    {
+                        error_body_complete = true;
+                        break;
+                    }
+                    if error_body_capture.len() >= MAX_ERROR_BODY_BYTES
+                        && upstream_content_length.is_some_and(|length| length > MAX_ERROR_BODY_BYTES)
+                    {
+                        error_body_truncated = true;
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    error_body_complete = true;
+                    break;
+                }
+                Err(error) => {
+                    error_read_failed = true;
+                    debug!(
+                        host = %upstream_host,
+                        path = %upstream_path,
+                        error = %error.without_url(),
+                        "Could not sample upstream error response"
+                    );
+                    break;
+                }
             }
         }
     }
+    if upstream_content_length
+        .is_some_and(|length| length > error_body_capture.len())
+        && should_sample_error
+    {
+        error_body_truncated = true;
+    }
+    let sanitized_error_body = if should_sample_error {
+        let text = sanitize_error_body(&error_body_capture);
+        if !text.is_empty() {
+            error_preview = Some(text.chars().take(240).collect());
+        }
+        Some(UpstreamErrorBody {
+            text,
+            captured_bytes: error_body_capture.len(),
+            truncated: error_body_truncated,
+            complete: error_body_complete && !error_read_failed,
+            timed_out: error_body_timed_out,
+        })
+    } else {
+        None
+    };
     let error_body_state = error_body_state(
         should_sample_error,
         error_sampled_bytes,
         error_read_failed,
     );
-
     let mut response = Response::builder().status(status);
     let response_headers = response.headers_mut().expect("fresh response builder");
     response_headers.insert("origin-agent-cluster", HeaderValue::from_static("?1"));
@@ -1857,7 +1976,7 @@ async fn ajax_passthrough(
     } else {
         String::new()
     };
-    push_event(
+    push_event_with_error_body(
         session,
         "ajax_response",
         format!("{upstream_host}{upstream_path}"),
@@ -1868,6 +1987,7 @@ async fn ajax_passthrough(
             response_diagnostics,
             input_trace.as_ref().map(|trace| format!(" · {trace}")).unwrap_or_default()
         ),
+        sanitized_error_body,
     ).await;
     debug!(
         request_id = %request_id,
@@ -3267,6 +3387,27 @@ fn clean_field(value: String, max: usize) -> String {
     value.chars().filter(|ch| !ch.is_control()).take(max).collect()
 }
 
+fn sanitize_error_body(body: &[u8]) -> String {
+    let raw = String::from_utf8_lossy(body);
+    let without_scripts = ERROR_BODY_SCRIPT_RE.replace_all(&raw, " ");
+    let without_styles = ERROR_BODY_STYLE_RE.replace_all(&without_scripts, " ");
+    let without_comments = ERROR_BODY_COMMENT_RE.replace_all(&without_styles, " ");
+    let without_tags = ERROR_BODY_TAG_RE.replace_all(&without_comments, " ");
+    let without_secrets = ERROR_BODY_SECRET_RE.replace_all(&without_tags, "$1=[REDACTED]");
+    let without_bearers = ERROR_BODY_BEARER_RE.replace_all(&without_secrets, "Bearer [REDACTED]");
+    let without_queries = ERROR_BODY_URL_QUERY_RE.replace_all(&without_bearers, "$1?[query redacted]");
+    let normalized = without_queries.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_utf8_bytes(&normalized, MAX_ERROR_BODY_BYTES)
+}
+
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
 fn error_body_state(sampled: bool, sampled_bytes: usize, read_failed: bool) -> &'static str {
     if !sampled {
         "not_sampled"
@@ -3362,6 +3503,70 @@ mod tests {
             diagnostic_header(&headers, "x-guploader-uploadid", "guploader", 80),
             ""
         );
+    }
+
+    #[test]
+    fn error_body_sanitizer_removes_markup_scripts_and_sensitive_values() {
+        let body = br#"<!doctype html>
+            <html><head><script>window.sessionToken = "do-not-export";</script>
+            <style>.secret { color: red; }</style></head>
+            <body><h1>Sorry...</h1>
+            <input type="hidden" name="access_token" value="hidden-value">
+            <p>Authorization: Bearer abc.def.ghi</p>
+            <p>access_token=visible-secret</p>
+            <p>https://accounts.example/login?continue=private&token=private</p>
+            </body></html>"#;
+        let sanitized = sanitize_error_body(body);
+
+        assert!(sanitized.contains("Sorry..."));
+        assert!(!sanitized.contains("<"));
+        assert!(!sanitized.contains("window.sessionToken"));
+        assert!(!sanitized.contains("do-not-export"));
+        assert!(!sanitized.contains("hidden-value"));
+        assert!(!sanitized.contains("abc.def.ghi"));
+        assert!(!sanitized.contains("visible-secret"));
+        assert!(!sanitized.contains("continue=private"));
+        assert!(sanitized.contains("[REDACTED]"));
+        assert!(sanitized.contains("[query redacted]"));
+    }
+
+    #[test]
+    fn error_body_sanitizer_enforces_a_utf8_byte_limit() {
+        let body = "é".repeat(MAX_ERROR_BODY_BYTES);
+        let sanitized = sanitize_error_body(body.as_bytes());
+        assert!(sanitized.len() <= MAX_ERROR_BODY_BYTES);
+        assert!(sanitized.is_char_boundary(sanitized.len()));
+    }
+
+    #[test]
+    fn event_json_retains_the_separate_bounded_body_field() {
+        let event = ActionEvent {
+            at_unix_ms: 1,
+            kind: "ajax_response".to_owned(),
+            target: "example.test/resource".to_owned(),
+            detail: "upstream=short preview".to_owned(),
+            upstream_error_body: Some(UpstreamErrorBody {
+                text: "Sorry...".to_owned(),
+                captured_bytes: 8,
+                truncated: false,
+                complete: true,
+                timed_out: false,
+            }),
+        };
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["detail"], "upstream=short preview");
+        assert_eq!(value["upstream_error_body"]["text"], "Sorry...");
+        assert_eq!(value["upstream_error_body"]["captured_bytes"], 8);
+
+        let event_without_body = ActionEvent {
+            at_unix_ms: 2,
+            kind: "timer_started".to_owned(),
+            target: "session".to_owned(),
+            detail: "timer".to_owned(),
+            upstream_error_body: None,
+        };
+        let value = serde_json::to_value(event_without_body).unwrap();
+        assert!(value.get("upstream_error_body").is_none());
     }
 
     #[test]
