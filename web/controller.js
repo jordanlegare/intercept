@@ -846,6 +846,17 @@
       return;
     }
 
+    if (data.type === "intercept:authority-resize") {
+      const expanded = data.expanded === true;
+      const height = expanded ? "50vh" : "148px";
+      toolbarHost.style.setProperty("height", height, "important");
+      authorityFrame.style.setProperty("height", height, "important");
+      const reservedSpace = expanded ? "50vh" : "148px";
+      document.documentElement.style.setProperty("scroll-padding-bottom", reservedSpace, "important");
+      if (document.body) document.body.style.setProperty("padding-bottom", reservedSpace, "important");
+      return;
+    }
+
     if (data.type !== "intercept:authority-status"
         || !["waiting", "running", "released"].includes(data.state)) {
       return;

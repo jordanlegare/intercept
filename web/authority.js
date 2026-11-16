@@ -13,6 +13,26 @@
   const eventsNode = document.getElementById("events");
   const eventSummary = document.getElementById("event-summary");
   const metricsNode = document.getElementById("metrics");
+  const resizeButton = document.getElementById("resize-panel");
+  const eventPanel = document.getElementById("event-panel");
+  let panelExpanded = false;
+
+  function setPanelExpanded(expanded) {
+    panelExpanded = Boolean(expanded);
+    eventPanel.open = panelExpanded;
+    resizeButton.textContent = panelExpanded ? "[COLLAPSE ▼]" : "[EXPAND ▲]";
+    resizeButton.setAttribute("aria-expanded", String(panelExpanded));
+    resizeButton.setAttribute("aria-label", panelExpanded
+      ? "Collapse authority panel to the bottom bar"
+      : "Expand authority panel to half the screen");
+    window.parent.postMessage({
+      type: "intercept:authority-resize",
+      session_id: sessionId,
+      expanded: panelExpanded
+    }, "http://" + sessionId + ".localhost:5000");
+  }
+
+  resizeButton.addEventListener("click", () => setPanelExpanded(!panelExpanded));
 
   let gateState = "waiting";
   let lastRelayedState = null;
