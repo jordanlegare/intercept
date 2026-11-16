@@ -3142,7 +3142,7 @@ fn rewrite_worker_javascript(
             return nativeSend.apply(this,args);
           }};
         }}
-      } else if(self.XMLHttpRequest){{
+      }} else if(self.XMLHttpRequest){{
         const proto=XMLHttpRequest.prototype;
         const nativeOpen=proto.open;
         const nativeSet=proto.setRequestHeader;
