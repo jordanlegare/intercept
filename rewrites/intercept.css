@@ -128,9 +128,9 @@
 }
 
 html.intercept-session-page {
-  scroll-padding-top: 158px !important;
+  scroll-padding-bottom: 158px !important;
 }
 
 body.intercept-session-page {
-  padding-top: 148px !important;
+  padding-bottom: 148px !important;
 }
