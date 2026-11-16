@@ -1430,8 +1430,8 @@ mod tests {
         assert!(result.contains("/assets/controller.js"));
         assert!(result.contains("intercept-toolbar"));
         assert!(result.contains("INTERCEPT AUTHORITY"));
-        assert!(!result.contains("intercept-events"));
-        assert!(!result.contains("listener_registered"));
+        assert!(result.contains("intercept-events"));
+        assert!(result.contains("intercept-notice"));
     }
 
     #[test]
