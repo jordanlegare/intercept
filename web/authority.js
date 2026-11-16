@@ -15,6 +15,7 @@
   const metricsNode = document.getElementById("metrics");
 
   let gateState = "waiting";
+  let lastRelayedState = null;
   let countdownDeadline = 0;
   let startInFlight = false;
   let statusPollInFlight = false;
@@ -67,14 +68,18 @@
       : 0;
     renderGateState();
     updateCountdown();
-    // Relay only the authoritative state to the embedding session origin.
-    // The parent validates both this frame's origin and WindowProxy source.
-    window.parent.postMessage({
-      type: "intercept:authority-status",
-      session_id: sessionId,
-      state: gateState,
-      remaining_ms: Number(data.remaining_ms) || 0
-    }, "http://" + sessionId + ".localhost:5000");
+    // Relay state only on the initial status and actual transitions. The
+    // status endpoint is polled frequently to keep the countdown accurate;
+    // forwarding every unchanged poll only creates redundant parent messages.
+    if (lastRelayedState !== gateState) {
+      lastRelayedState = gateState;
+      window.parent.postMessage({
+        type: "intercept:authority-status",
+        session_id: sessionId,
+        state: gateState,
+        remaining_ms: Number(data.remaining_ms) || 0
+      }, "http://" + sessionId + ".localhost:5000");
+    }
   }
 
   function updateCountdown() {
