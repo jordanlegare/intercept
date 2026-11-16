@@ -2506,9 +2506,9 @@ fn rewrite_worker_javascript(
         const path=url.pathname+url.search+url.hash;
         if(url.origin===self.location.origin){{
           if(url.pathname===prefix||url.pathname.startsWith(prefix+"/"))return url.href;
-          return prefix+path;
+          return url.href;
         }}
-        if(url.origin===primaryOrigin)return prefix+path;
+        if(url.origin===primaryOrigin)return path;
         return prefix+"/_/"+url.protocol.slice(0,-1)+"/"+url.host+path;
       }}
       if(self.fetch){{
@@ -3420,6 +3420,7 @@ mod tests {
     fn scopes_external_cookies_to_their_proxy_origin_path() {
         let primary = Url::parse("https://example.com/").unwrap();
         let cdn = Url::parse("https://cdn.example/").unwrap();
+        let namespace = cookie_namespace(&cdn, &primary);
         assert_eq!(
             rewrite_set_cookie(
                 "asset=abc; Domain=cdn.example; Path=/; HttpOnly",
@@ -3427,7 +3428,7 @@ mod tests {
                 &primary,
                 "session123",
             ),
-            "asset=abc; Path=/p/session123/_/https/cdn.example/; HttpOnly"
+            format!("{namespace}asset=abc; Path=/p/session123/_/https/cdn.example/; HttpOnly")
         );
     }
 
