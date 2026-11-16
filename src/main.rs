@@ -3372,7 +3372,7 @@ fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -
     }).collect::<String>();
 
     format!(
-        "method={method} · body_bytes={} · content_length_out={}{}{}{} · cookie_header_in={cookie_header_in} · json={json_state}{client_headers}",
+        "method={method} · body_bytes={} · content_length_out={}{}{}{}{} · cookie_header_in={cookie_header_in} · json={json_state}{client_headers}",
         body.len(),
         body.len(),
         content_type,
