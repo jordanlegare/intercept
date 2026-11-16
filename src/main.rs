@@ -1747,12 +1747,16 @@ async fn ajax_passthrough(
     // request without its original framing can otherwise leave Google APIs
     // seeing a POST with no length (HTTP 411).
     let request_body_len = request_body.len();
+    if request_body_len > 0
+        || matches!(method, reqwest::Method::POST | reqwest::Method::PUT | reqwest::Method::PATCH)
+    {
+        builder = builder.header(header::CONTENT_LENGTH, request_body_len);
+    }
     let upstream = tokio::select! {
         _ = wait_for_session_termination(session) => {
             return plain(StatusCode::GONE, "Session terminated");
         }
         result = builder
-            .header(header::CONTENT_LENGTH, request_body_len)
             .header(header::ACCEPT_ENCODING, "identity")
             .timeout(Duration::from_secs(AJAX_STREAM_TIMEOUT_SECONDS))
             .body(request_body)
@@ -2262,8 +2266,12 @@ async fn proxy(
         // This path also forwards a fully buffered Bytes body. Reconstruct
         // framing from its actual size instead of relying on incoming headers.
         let request_body_len = body.len();
+        if request_body_len > 0
+            || matches!(parts.method, Method::POST | Method::PUT | Method::PATCH)
+        {
+            builder = builder.header(header::CONTENT_LENGTH, request_body_len);
+        }
         builder = builder
-            .header(header::CONTENT_LENGTH, request_body_len)
             .header(header::ACCEPT_ENCODING, "identity")
             .body(body);
 
