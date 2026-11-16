@@ -70,6 +70,10 @@ static HTML_SCRIPT_NONCE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?is)<script\b[^>]*\bnonce\s*=\s*(?:"([^"]+)"|'([^']+)')"#)
         .expect("valid HTML script nonce regex")
 });
+static HTML_META_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)<meta\\b[^>]*>")
+        .expect("valid HTML meta tag regex")
+});
 static CSS_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)"#)
         .expect("valid CSS url() regex")
@@ -337,10 +341,23 @@ async fn api_preflight() -> StatusCode {
 async fn authority_page(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Html<String>, (StatusCode, String)> {
+) -> Result<Response<Body>, (StatusCode, String)> {
     find_session(&state, &id).await?;
     let page = include_str!("../web/authority.html").replace("__SESSION_ID__", &id);
-    Ok(Html(page))
+    let mut response = Html(page).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        "cross-origin-resource-policy",
+        HeaderValue::from_static("cross-origin"),
+    );
+    // The proxy page embeds this trusted dashboard-origin frame. CORP permits
+    // the COEP-protected parent to load it, while frame-ancestors restricts
+    // embedding to this session's own origin.
+    let frame_ancestors = format!("frame-ancestors {}", proxy_origin(&id));
+    if let Ok(value) = HeaderValue::from_str(&frame_ancestors) {
+        headers.insert(header::CONTENT_SECURITY_POLICY, value);
+    }
+    Ok(response)
 }
 
 async fn authority_js() -> impl IntoResponse {
@@ -1827,7 +1844,7 @@ fn rewrite_html(
         Ok(result) => result,
         Err(error) => {
             warn!(%error, url = %base, "HTML parser rewrite failed; injecting the session controller with a conservative fallback");
-            html_with_styles_and_scripts
+            rewrite_meta_csp_tags(&html_with_styles_and_scripts, session_id)
         }
     };
     Ok(ensure_controller_bootstrap(&rewritten, session_id, &primary_origin))
@@ -2077,6 +2094,131 @@ fn rewrite_set_cookie(cookie: &str, target: &Url, session_base: &Url, session_id
         parts.push(format!("Path={prefix}/"));
     }
     parts.join("; ")
+}
+
+
+fn decode_html_attribute_entities(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&#34;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+fn escape_meta_attribute_value(value: &str, quote: Option<char>) -> String {
+    let mut escaped = value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    match quote {
+        Some('"') => escaped = escaped.replace('"', "&quot;"),
+        Some('\'') => escaped = escaped.replace('\'', "&#39;"),
+        _ => {
+            escaped = escaped.replace('"', "&quot;");
+            return format!("\"{escaped}\"");
+        }
+    }
+    escaped
+}
+
+// Rewrites a single meta tag without requiring a valid surrounding HTML tree.
+// This is used when lol_html rejects malformed upstream markup; CSP must still
+// be rewritten in that fallback or the browser continues enforcing upstream
+// origins and blocks the local controller.
+fn rewrite_meta_csp_tag(tag: &str, session_id: &str) -> String {
+    let bytes = tag.as_bytes();
+    let mut cursor = 5usize; // immediately after "<meta"
+    let mut http_equiv: Option<String> = None;
+    let mut content: Option<(usize, usize, Option<char>, String)> = None;
+
+    while cursor < bytes.len() {
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || bytes[cursor] == b'>' || bytes[cursor] == b'/' {
+            break;
+        }
+
+        let name_start = cursor;
+        while cursor < bytes.len()
+            && !bytes[cursor].is_ascii_whitespace()
+            && !matches!(bytes[cursor], b'=' | b'>' | b'/')
+        {
+            cursor += 1;
+        }
+        if name_start == cursor {
+            cursor += 1;
+            continue;
+        }
+        let name = tag[name_start..cursor].to_ascii_lowercase();
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || bytes[cursor] != b'=' {
+            continue;
+        }
+        cursor += 1;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+
+        let (value_start, value_end, quote) = if cursor < bytes.len()
+            && matches!(bytes[cursor], b'"' | b'\'')
+        {
+            let quote = bytes[cursor] as char;
+            cursor += 1;
+            let start = cursor;
+            while cursor < bytes.len() && bytes[cursor] != quote as u8 {
+                cursor += 1;
+            }
+            let end = cursor;
+            if cursor < bytes.len() {
+                cursor += 1;
+            }
+            (start, end, Some(quote))
+        } else {
+            let start = cursor;
+            while cursor < bytes.len()
+                && !bytes[cursor].is_ascii_whitespace()
+                && bytes[cursor] != b'>'
+            {
+                cursor += 1;
+            }
+            (start, cursor, None)
+        };
+        let value = decode_html_attribute_entities(&tag[value_start..value_end]);
+        if name == "http-equiv" {
+            http_equiv = Some(value);
+        } else if name == "content" {
+            content = Some((value_start, value_end, quote, value));
+        }
+    }
+
+    if !http_equiv
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("content-security-policy"))
+    {
+        return tag.to_owned();
+    }
+
+    let Some((start, end, quote, policy)) = content else {
+        return tag.to_owned();
+    };
+    let rewritten = rewrite_csp(&policy, session_id);
+    let escaped = escape_meta_attribute_value(&rewritten, quote);
+    format!("{}{}{}", &tag[..start], escaped, &tag[end..])
+}
+
+fn rewrite_meta_csp_tags(html: &str, session_id: &str) -> String {
+    HTML_META_TAG_RE
+        .replace_all(html, |captures: &regex::Captures<'_>| {
+            let tag = captures.get(0).map(|value| value.as_str()).unwrap_or("");
+            rewrite_meta_csp_tag(tag, session_id)
+        })
+        .into_owned()
 }
 
 fn rewrite_csp(policy: &str, session_id: &str) -> String {
@@ -2579,6 +2721,17 @@ mod tests {
     }
 
     
+
+    #[test]
+    fn fallback_meta_csp_rewrite_handles_attribute_order_and_single_quotes() {
+        let html = "<meta content='default-src &#39;none&#39;; script-src https://cdn.example' HTTP-EQUIV='content-security-policy'>";
+        let output = rewrite_meta_csp_tags(html, "0123456789abcdef0123456789abcdef");
+        assert!(output.contains("default-src"));
+        assert!(output.contains("http://0123456789abcdef0123456789abcdef.localhost:5000"));
+        assert!(output.contains("style-src &#39;unsafe-inline&#39;"));
+        assert!(!output.contains("https://cdn.example"));
+    }
+
     #[test]
     fn csp_rewrite_allows_inline_styles_when_only_default_src_is_present() {
         let output = rewrite_csp(
