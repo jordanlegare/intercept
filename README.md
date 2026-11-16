@@ -37,7 +37,7 @@ The listener is hard-bound to 127.0.0.1:5000. It is not intended to be exposed o
               v
           Upstream origin
 
-One reqwest Client is created per upstream origin and reused. Each new origin is DNS-resolved, non-public answers are rejected, and the client is pinned to the resolved addresses to reduce DNS-rebinding/SSRF risk. TLS certificate verification remains enabled. CSS, JavaScript, images, fonts, and WebAssembly responses are cached in a bounded 64 MiB per-session cache (up to 8 MiB per entry, five-minute default TTL); HTML and API responses are not cached by default.
+One reqwest Client is created per upstream origin and reused. Each new origin is DNS-resolved, non-public answers are rejected, and the client is pinned to the resolved addresses to reduce DNS-rebinding/SSRF risk. TLS certificate verification remains enabled. Regular document and static-resource requests have a 120-second total upstream deadline, including response-body download; AJAX requests retain their separate 24-hour deadline. CSS, JavaScript, images, fonts, and WebAssembly responses are cached in a bounded 64 MiB per-session cache (up to 8 MiB per entry, five-minute default TTL); HTML and API responses are not cached by default.
 
 ## Authority behavior
 
