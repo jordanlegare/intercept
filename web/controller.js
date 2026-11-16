@@ -602,6 +602,80 @@
     return "body_arg=none";
   }
 
+  function isYouTubeSearchEndpoint(source) {
+    try {
+      const upstream = new URL(upstreamOrigin);
+      const candidate = new URL(
+        source instanceof Request ? source.url : String(source),
+        document.baseURI
+      );
+      return /(^|\\.)youtube\\.com$/i.test(upstream.hostname)
+        && candidate.pathname === "/youtubei/v1/search";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function buildYouTubeSearchFallbackBody() {
+    let context = null;
+    try {
+      const config = window.ytcfg;
+      if (config && typeof config.get === "function") {
+        context = config.get("INNERTUBE_CONTEXT");
+      }
+      if (!context && config && config.data_) {
+        context = config.data_.INNERTUBE_CONTEXT;
+      }
+    } catch (_) {}
+
+    if (!context || typeof context !== "object" || !context.client) {
+      return {body: null, reason: "INNERTUBE_CONTEXT unavailable"};
+    }
+
+    let query = "";
+    let querySource = "";
+    try {
+      const pageUrl = new URL(window.location.href);
+      query = pageUrl.searchParams.get("search_query")
+        || pageUrl.searchParams.get("q")
+        || "";
+      if (query) querySource = "page_url";
+    } catch (_) {}
+
+    if (!query) {
+      const selectors = [
+        "input.yt-searchbox-input",
+        "ytd-searchbox input#search",
+        'input[name="search_query"]',
+        "input#search"
+      ];
+      for (const selector of selectors) {
+        const input = document.querySelector(selector);
+        const value = input && typeof input.value === "string"
+          ? input.value.trim()
+          : "";
+        if (value) {
+          query = value;
+          querySource = "search_input";
+          break;
+        }
+      }
+    }
+
+    if (!query.trim()) {
+      return {body: null, reason: "search query unavailable"};
+    }
+
+    try {
+      return {
+        body: JSON.stringify({context, query: query.trim()}),
+        querySource
+      };
+    } catch (_) {
+      return {body: null, reason: "INNERTUBE_CONTEXT is not serializable"};
+    }
+  }
+
   for (const type of ["pointerdown", "click", "change", "input", "keydown"]) {
     nativeAdd.call(document, type, event => {
       let detail = "";
@@ -705,9 +779,27 @@
       } else {
         routedRequest = new Request(routed, init);
       }
+      let bodyDetail = fetchBodyDiagnostic(input, init);
+      if (routedRequest.method === "POST"
+          && routedRequest.body === null
+          && isYouTubeSearchEndpoint(source)) {
+        const fallback = buildYouTubeSearchFallbackBody();
+        if (fallback.body) {
+          routedRequest = new Request(routedRequest, {body: fallback.body});
+          bodyDetail = "body_arg=generated_innertube_search body_arg_bytes="
+            + new TextEncoder().encode(fallback.body).byteLength;
+          record(
+            "youtube_search_body_generated",
+            routed,
+            "Generated InnerTube search payload · query_source=" + fallback.querySource
+              + " · body_bytes=" + new TextEncoder().encode(fallback.body).byteLength
+          );
+        } else {
+          record("youtube_search_body_unavailable", routed, fallback.reason);
+        }
+      }
       const headers = new Headers(routedRequest.headers);
       headers.set("X-Intercept-Proxy-Mode", "ajax");
-      const bodyDetail = fetchBodyDiagnostic(input, init);
       headers.set("X-Intercept-Body-Diagnostic", bodyDetail);
       const inputContext = addInputCorrelation(headers);
       const markedRequest = new Request(routedRequest, {headers});
