@@ -67,6 +67,14 @@
       : 0;
     renderGateState();
     updateCountdown();
+    // Relay only the authoritative state to the embedding session origin.
+    // The parent validates both this frame's origin and WindowProxy source.
+    window.parent.postMessage({
+      type: "intercept:authority-status",
+      session_id: sessionId,
+      state: gateState,
+      remaining_ms: Number(data.remaining_ms) || 0
+    }, "http://" + sessionId + ".localhost:5000");
   }
 
   function updateCountdown() {
