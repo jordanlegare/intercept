@@ -602,21 +602,40 @@
     return "body_arg=none";
   }
 
-  function isYouTubeSearchEndpoint(source) {
+  function youtubeSearchEndpointCheck(source) {
     try {
       const upstream = new URL(upstreamOrigin);
       const candidate = new URL(
         source instanceof Request ? source.url : String(source),
         document.baseURI
       );
-      const upstreamHost = upstream.hostname.toLowerCase();
-      const isYouTubeHost = upstreamHost === "youtube.com"
-        || upstreamHost.endsWith(".youtube.com");
-      return isYouTubeHost && candidate.pathname === "/youtubei/v1/search";
+      const isYouTubeHost = host => {
+        const normalized = host.toLowerCase();
+        return normalized === "youtube.com" || normalized.endsWith(".youtube.com");
+      };
+      const upstreamHostMatch = isYouTubeHost(upstream.hostname);
+      const candidatePathMatch = candidate.pathname === "/youtubei/v1/search";
+      const candidatePathLooksLikeSearch = candidate.pathname.includes("/youtubei/v1/search");
+      return {
+        upstreamHostMatch,
+        candidatePathMatch,
+        candidatePathLooksLikeSearch,
+        candidateIsProxyOrigin: candidate.origin === location.origin,
+        candidateIsUpstreamOrigin: candidate.origin === upstream.origin,
+        endpointMatch: upstreamHostMatch && candidatePathMatch
+      };
     } catch (_) {
-      return false;
+      return {
+        upstreamHostMatch: false,
+        candidatePathMatch: false,
+        candidatePathLooksLikeSearch: false,
+        candidateIsProxyOrigin: false,
+        candidateIsUpstreamOrigin: false,
+        endpointMatch: false
+      };
     }
   }
+
 
   function buildYouTubeSearchFallbackBody() {
     let context = null;
@@ -799,9 +818,28 @@
         routedRequest = new Request(routed, init);
       }
       let bodyDetail = fetchBodyDiagnostic(input, init);
+      const youtubeSearchCheck = youtubeSearchEndpointCheck(source);
+      const bodyIsNull = routedRequest.body === null;
       if (routedRequest.method === "POST"
-          && routedRequest.body === null
-          && isYouTubeSearchEndpoint(source)) {
+          && youtubeSearchCheck.upstreamHostMatch
+          && youtubeSearchCheck.candidatePathLooksLikeSearch
+          && (bodyIsNull || bodyDetail === "body_arg=none")) {
+        record(
+          "youtube_search_fallback_gate",
+          "youtube search",
+          "method_post=true"
+            + " · body_null=" + bodyIsNull
+            + " · body_diag_none=" + (bodyDetail === "body_arg=none")
+            + " · endpoint_match=" + youtubeSearchCheck.endpointMatch
+            + " · candidate_path_match=" + youtubeSearchCheck.candidatePathMatch
+            + " · candidate_path_looks_like_search=" + youtubeSearchCheck.candidatePathLooksLikeSearch
+            + " · candidate_proxy_origin=" + youtubeSearchCheck.candidateIsProxyOrigin
+            + " · candidate_upstream_origin=" + youtubeSearchCheck.candidateIsUpstreamOrigin
+        );
+      }
+      if (routedRequest.method === "POST"
+          && bodyIsNull
+          && youtubeSearchCheck.endpointMatch) {
         const fallback = buildYouTubeSearchFallbackBody();
         if (fallback.body) {
           routedRequest = new Request(routedRequest, {body: fallback.body});
