@@ -172,7 +172,7 @@
       // Axum returns a short plain-text reason for rejected bridge requests.
       // Include it in the event stream so HTTP 400s can be diagnosed without
       // logging or exposing the cookie assignment itself.
-      const detail = body.replace(/\\s+/g, " ").trim().slice(0, 220);
+      const detail = body.replace(/\s+/g, " ").trim().slice(0, 220);
       throw new Error(operation + " returned HTTP " + response.status
         + (detail ? ": " + detail : ""));
     }
