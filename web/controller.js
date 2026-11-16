@@ -166,6 +166,23 @@
     cookieMirror = filtered.join("; ");
   }
 
+  async function readCookieBridgeResponse(response, operation) {
+    const body = await response.text();
+    if (!response.ok) {
+      // Axum returns a short plain-text reason for rejected bridge requests.
+      // Include it in the event stream so HTTP 400s can be diagnosed without
+      // logging or exposing the cookie assignment itself.
+      const detail = body.replace(/\\s+/g, " ").trim().slice(0, 220);
+      throw new Error(operation + " returned HTTP " + response.status
+        + (detail ? ": " + detail : ""));
+    }
+    try {
+      return body ? JSON.parse(body) : {};
+    } catch (_) {
+      throw new Error(operation + " returned invalid JSON");
+    }
+  }
+
   function queueCookieWrite(assignment) {
     cookieWritesPending++;
     const body = JSON.stringify({target: location.pathname + location.search, cookie: String(assignment)});
@@ -175,10 +192,7 @@
       credentials: "same-origin",
       cache: "no-store",
       body
-    })).then(response => {
-      if (!response.ok) throw new Error("Cookie bridge write returned HTTP " + response.status);
-      return response.json();
-    }).then(data => {
+    })).then(response => readCookieBridgeResponse(response, "Cookie bridge write")).then(data => {
       cookieMirror = String(data.cookie || "");
     }).catch(error => {
       record("cookie_bridge_error", location.pathname, String(error && error.message || error));
@@ -195,10 +209,7 @@
       headers: {"X-Intercept-Cookie-Token": cookieToken},
       credentials: "same-origin",
       cache: "no-store"
-    })).then(response => {
-      if (!response.ok) throw new Error("Cookie bridge refresh returned HTTP " + response.status);
-      return response.json();
-    }).then(data => {
+    })).then(response => readCookieBridgeResponse(response, "Cookie bridge refresh")).then(data => {
       cookieMirror = String(data.cookie || "");
     }).catch(error => {
       record("cookie_bridge_error", location.pathname, String(error && error.message || error));
