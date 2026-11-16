@@ -22,6 +22,10 @@
     #notice{flex:0 0 auto;margin-top:6px;color:#a9bad0;text-align:center;font-size:10px}
     details{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;margin:7px auto 0;width:100%;max-width:none}
     summary{flex:0 0 auto;color:#9cc7e8;cursor:pointer;text-align:center;user-select:none}
+    .event-actions{display:flex;flex:0 0 auto;align-items:center;justify-content:flex-end;gap:10px;margin:6px 0 0}
+    #event-export-status{color:#758ba5;font-size:9px;text-align:right}
+    #export-events{padding:6px 10px;font-size:10px}
+    #export-events:focus-visible{outline:1px solid #fff;outline-offset:2px}
     #events{flex:1 1 auto;min-height:0;max-height:none;overflow:auto;margin:7px 0 0;padding:8px;color:#b8c8dc;background:#070c13;border:1px solid #26394f;white-space:pre-wrap;overflow-wrap:anywhere;font:10px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
     #metrics{flex:0 0 auto;margin-top:5px;color:#758ba5;text-align:center;font-size:9px}
     @media(max-width:520px){main{padding:7px}.row{gap:7px 9px}strong{flex-basis:100%;text-align:center}#notice{font-size:9px}button{padding:7px 9px}}
@@ -42,6 +46,10 @@
     <div id="notice" role="status">Waiting for the local authorization service.</div>
     <details id="event-panel">
       <summary id="event-summary">EVENT STREAM · connecting</summary>
+      <div class="event-actions">
+        <span id="event-export-status" role="status" aria-live="polite">Waiting for event history…</span>
+        <button id="export-events" type="button" disabled title="Download all retained session events as JSON">[EXPORT JSON]</button>
+      </div>
       <pre id="events">Waiting for browser and upstream request events…</pre>
       <div id="metrics">Resource metrics unavailable until connected.</div>
     </details>

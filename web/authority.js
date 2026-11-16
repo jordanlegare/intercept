@@ -15,6 +15,8 @@
   const metricsNode = document.getElementById("metrics");
   const resizeButton = document.getElementById("resize-panel");
   const eventPanel = document.getElementById("event-panel");
+  const exportEventsButton = document.getElementById("export-events");
+  const eventExportStatus = document.getElementById("event-export-status");
   let panelExpanded = false;
 
   function setPanelExpanded(expanded) {
@@ -41,6 +43,8 @@
   let statusPollInFlight = false;
   let eventsPollInFlight = false;
   let metricsPollInFlight = false;
+  let latestEvents = null;
+  let latestEventsAt = null;
 
   async function controlFetch(suffix, options = {}, timeoutMs = 5000) {
     const controller = new AbortController();
@@ -142,6 +146,11 @@
       const response = await controlFetch("/events");
       if (!response.ok) throw new Error("events " + response.status);
       const events = response.json() || [];
+      if (!Array.isArray(events)) throw new Error("invalid event history response");
+      latestEvents = events;
+      latestEventsAt = new Date();
+      exportEventsButton.disabled = false;
+      eventExportStatus.textContent = events.length + " retained events · snapshot " + latestEventsAt.toLocaleTimeString();
       eventSummary.textContent = "EVENT STREAM · " + events.length + " retained";
       eventsNode.textContent = events.slice(-30).reverse().map(item => {
         const time = new Date(Number(item.at_unix_ms)).toLocaleTimeString();
@@ -153,6 +162,38 @@
       eventsPollInFlight = false;
     }
   }
+
+  function exportRetainedEvents() {
+    if (!Array.isArray(latestEvents)) return;
+
+    const exportedAt = new Date();
+    const payload = {
+      format: "intercept-event-stream",
+      version: 1,
+      session_id: sessionId,
+      exported_at: exportedAt.toISOString(),
+      snapshot_at: latestEventsAt ? latestEventsAt.toISOString() : exportedAt.toISOString(),
+      event_count: latestEvents.length,
+      retained_event_limit: 500,
+      events: latestEvents
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2) + "\n"], {
+      type: "application/json;charset=utf-8"
+    });
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = "intercept-events-" + sessionId + "-"
+      + exportedAt.toISOString().replace(/[:.]/g, "-") + ".json";
+    anchor.hidden = true;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    eventExportStatus.textContent = "EXPORTED " + latestEvents.length + " EVENTS";
+  }
+
+  exportEventsButton.addEventListener("click", exportRetainedEvents);
 
   async function pollMetrics() {
     if (metricsPollInFlight) return;
