@@ -2054,6 +2054,25 @@ fn plain(status: StatusCode, message: &str) -> Response<Body> {
 mod tests {
     use super::*;
 
+    fn policy_test_session(policy: AuthorizationPolicy, rules: Vec<AuthorizationRule>) -> Session {
+        Session {
+            id: "0123456789abcdef0123456789abcdef".to_owned(),
+            base_url: Url::parse("https://example.com/start").unwrap(),
+            clients: Mutex::new(HashMap::new()),
+            cache: Mutex::new(ResourceCache::default()),
+            gate: Mutex::new(GateState::Waiting),
+            gate_tx: watch::channel(GateState::Waiting).0,
+            events: Mutex::new(VecDeque::new()),
+            policy,
+            rules,
+            bootstrap_pending: AtomicBool::new(true),
+            last_accessed_ms: AtomicU64::new(0),
+            start_delay_nanos: AtomicU64::new(0),
+            inflight: Arc::new(Semaphore::new(8)),
+            max_inflight: 8,
+        }
+    }
+
     #[test]
     fn identifies_explicit_controller_ajax_marker() {
         let mut headers = HeaderMap::new();
@@ -2121,6 +2140,46 @@ mod tests {
             rewrite_referer(&referer, &session).unwrap(),
             HeaderValue::from_static("https://example.com/profile")
         );
+    }
+
+    #[test]
+    fn standard_policy_holds_mutating_methods_but_allows_safe_methods() {
+        let session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        let target = Url::parse("https://example.com/api/items").unwrap();
+        assert!(!should_hold_request(&session, &Method::GET, &target, false));
+        assert!(!should_hold_request(&session, &Method::HEAD, &target, false));
+        assert!(!should_hold_request(&session, &Method::OPTIONS, &target, false));
+        assert!(should_hold_request(&session, &Method::POST, &target, false));
+        assert!(should_hold_request(&session, &Method::DELETE, &target, false));
+    }
+
+    #[test]
+    fn strict_policy_allows_only_the_initial_document_bootstrap() {
+        let session = policy_test_session(AuthorizationPolicy::Strict, Vec::new());
+        let target = Url::parse("https://example.com/start").unwrap();
+        assert!(!should_hold_request(&session, &Method::GET, &target, true));
+        assert!(should_hold_request(&session, &Method::GET, &target, false));
+        assert!(should_hold_request(&session, &Method::POST, &target, true));
+    }
+
+    #[test]
+    fn custom_policy_matches_host_path_and_method_then_falls_back_to_standard() {
+        let session = policy_test_session(
+            AuthorizationPolicy::Custom,
+            vec![AuthorizationRule {
+                host: Some("example.com".to_owned()),
+                path_prefix: "/api/".to_owned(),
+                methods: vec!["GET".to_owned()],
+                hold: true,
+            }],
+        );
+        let api = Url::parse("https://example.com/api/items").unwrap();
+        let other_path = Url::parse("https://example.com/public/items").unwrap();
+        let other_host = Url::parse("https://cdn.example/api/items").unwrap();
+        assert!(should_hold_request(&session, &Method::GET, &api, false));
+        assert!(!should_hold_request(&session, &Method::GET, &other_path, false));
+        assert!(!should_hold_request(&session, &Method::GET, &other_host, false));
+        assert!(should_hold_request(&session, &Method::POST, &api, false));
     }
 
     #[test]
