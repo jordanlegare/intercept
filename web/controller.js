@@ -615,9 +615,11 @@
       };
       const upstreamHostMatch = isYouTubeHost(upstream.hostname);
       const candidatePathMatch = candidate.pathname === "/youtubei/v1/search";
+      const candidatePathLooksLikeSearch = candidate.pathname.includes("/youtubei/v1/search");
       return {
         upstreamHostMatch,
         candidatePathMatch,
+        candidatePathLooksLikeSearch,
         candidateIsProxyOrigin: candidate.origin === location.origin,
         candidateIsUpstreamOrigin: candidate.origin === upstream.origin,
         endpointMatch: upstreamHostMatch && candidatePathMatch
@@ -626,6 +628,7 @@
       return {
         upstreamHostMatch: false,
         candidatePathMatch: false,
+        candidatePathLooksLikeSearch: false,
         candidateIsProxyOrigin: false,
         candidateIsUpstreamOrigin: false,
         endpointMatch: false
@@ -819,6 +822,7 @@
       const bodyIsNull = routedRequest.body === null;
       if (routedRequest.method === "POST"
           && youtubeSearchCheck.upstreamHostMatch
+          && youtubeSearchCheck.candidatePathLooksLikeSearch
           && (bodyIsNull || bodyDetail === "body_arg=none")) {
         record(
           "youtube_search_fallback_gate",
@@ -828,6 +832,7 @@
             + " · body_diag_none=" + (bodyDetail === "body_arg=none")
             + " · endpoint_match=" + youtubeSearchCheck.endpointMatch
             + " · candidate_path_match=" + youtubeSearchCheck.candidatePathMatch
+            + " · candidate_path_looks_like_search=" + youtubeSearchCheck.candidatePathLooksLikeSearch
             + " · candidate_proxy_origin=" + youtubeSearchCheck.candidateIsProxyOrigin
             + " · candidate_upstream_origin=" + youtubeSearchCheck.candidateIsUpstreamOrigin
         );
