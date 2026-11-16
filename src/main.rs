@@ -571,7 +571,7 @@ fn should_hold_request(session: &Session, method: &Method, target: &Url, bootstr
     let standard = method != Method::GET && method != Method::HEAD && method != Method::OPTIONS;
     match session.policy {
         AuthorizationPolicy::Standard => standard,
-        AuthorizationPolicy::Strict => !bootstrap_document,
+        AuthorizationPolicy::Strict => !(bootstrap_document && method == Method::GET),
         AuthorizationPolicy::Custom => session.rules.iter().find(|rule| {
             let host_matches = rule.host.as_ref().is_none_or(|host| target.host_str()
                 .is_some_and(|actual| actual.eq_ignore_ascii_case(host)));
