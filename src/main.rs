@@ -1359,7 +1359,8 @@ async fn stream_regular_response(
     let stream_request_id = request_id.clone();
     let mut cancellation = session.cancel_tx.subscribe();
     let cancelled = async move {
-        if !*cancellation.borrow_and_update() {
+        let already_cancelled = *cancellation.borrow_and_update();
+        if !already_cancelled {
             let _ = cancellation.wait_for(|cancelled| *cancelled).await;
         }
     };
