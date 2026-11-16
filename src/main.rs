@@ -902,7 +902,7 @@ async fn start_timer(
         }
         tokio::select! {
             biased;
-            _ = cancellation.wait_for(|cancelled| *cancelled) => return,
+            _ = wait_for_cancellation(&mut cancellation) => return,
             _ = sleep_until(deadline) => {}
         }
         let mut gate = timer_session.gate.lock().await;
@@ -1071,6 +1071,18 @@ async fn status_for(session: &Session) -> StatusResponse {
     }
 }
 
+async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
+    loop {
+        let cancelled = *cancellation.borrow_and_update();
+        if cancelled {
+            return;
+        }
+        if cancellation.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 async fn wait_for_session_termination(session: &Session) {
     if session.cancelled.load(Ordering::Acquire) {
         return;
@@ -1079,10 +1091,7 @@ async fn wait_for_session_termination(session: &Session) {
     if session.cancelled.load(Ordering::Acquire) {
         return;
     }
-    let already_cancelled = *cancellation.borrow_and_update();
-    if !already_cancelled {
-        let _ = cancellation.wait_for(|cancelled| *cancelled).await;
-    }
+    wait_for_cancellation(&mut cancellation).await;
 }
 
 async fn wait_for_authorization(session: &Session) -> bool {
@@ -1098,7 +1107,7 @@ async fn wait_for_authorization(session: &Session) -> bool {
             GateState::Waiting => {
                 tokio::select! {
                     biased;
-                    _ = cancellation.wait_for(|cancelled| *cancelled) => return false,
+                    _ = wait_for_cancellation(&mut cancellation) => return false,
                     changed = updates.changed() => {
                         if changed.is_err() {
                             return false;
@@ -1110,7 +1119,7 @@ async fn wait_for_authorization(session: &Session) -> bool {
             GateState::Running { deadline } => {
                 tokio::select! {
                     biased;
-                    _ = cancellation.wait_for(|cancelled| *cancelled) => return false,
+                    _ = wait_for_cancellation(&mut cancellation) => return false,
                     _ = sleep_until(deadline) => {
                         let released = {
                             let mut gate = session.gate.lock().await;
@@ -1294,10 +1303,7 @@ async fn ajax_passthrough(
     let stream_url = upstream_url.to_string();
     let mut cancellation = session.cancel_tx.subscribe();
     let cancelled = async move {
-        let already_cancelled = *cancellation.borrow_and_update();
-        if !already_cancelled {
-            let _ = cancellation.wait_for(|cancelled| *cancelled).await;
-        }
+        wait_for_cancellation(&mut cancellation).await;
     };
     let body_stream = upstream.bytes_stream().take_until(cancelled).map(move |chunk| {
         let _keep_request_slot = &request_permit;
@@ -1359,10 +1365,7 @@ async fn stream_regular_response(
     let stream_request_id = request_id.clone();
     let mut cancellation = session.cancel_tx.subscribe();
     let cancelled = async move {
-        let already_cancelled = *cancellation.borrow_and_update();
-        if !already_cancelled {
-            let _ = cancellation.wait_for(|cancelled| *cancelled).await;
-        }
+        wait_for_cancellation(&mut cancellation).await;
     };
     let body_stream = upstream.bytes_stream().take_until(cancelled).map(move |chunk| {
         let _keep_request_slot = &request_permit;
@@ -1388,7 +1391,6 @@ async fn stream_regular_response(
         .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "Could not build streaming response"))
 }
 
-#[axum::debug_handler]
 async fn proxy(
     State(state): State<AppState>,
     Path(params): Path<HashMap<String, String>>,
