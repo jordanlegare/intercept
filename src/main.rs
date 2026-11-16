@@ -178,6 +178,22 @@ struct CreateSessionResponse {
     session_url: String,
 }
 
+#[derive(Debug, Serialize)]
+struct SessionsResponse {
+    active_sessions: usize,
+    max_sessions: usize,
+    sessions: Vec<SessionSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionSummary {
+    id: String,
+    target_url: String,
+    session_url: String,
+    policy: &'static str,
+    state: &'static str,
+}
+
 #[derive(Debug, Deserialize)]
 struct StartTimer {
     delay_seconds: f64,
@@ -262,7 +278,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/assets/intercept.css", get(intercept_css))
         .route("/assets/authority.js", get(authority_js))
         .route("/_intercept/events", post(record_session_events))
-        .route("/api/sessions", post(create_session))
+        .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}/start", post(start_timer).options(api_preflight))
         .route("/api/sessions/{id}/status", get(session_status).options(api_preflight))
         .route("/api/sessions/{id}/events", get(get_events).post(record_events).options(api_preflight))
@@ -449,6 +465,40 @@ async fn intercept_css() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         include_str!("../rewrites/intercept.css"),
     )
+}
+
+async fn list_sessions(State(state): State<AppState>) -> Json<SessionsResponse> {
+    let sessions = state.sessions.read().await.values().cloned().collect::<Vec<_>>();
+    let active_sessions = sessions.len();
+    let mut summaries = Vec::with_capacity(active_sessions);
+
+    for session in sessions {
+        let gate = *session.gate.lock().await;
+        let state_label = match gate {
+            GateState::Waiting => "WAITING",
+            GateState::Running { .. } => "COUNTDOWN",
+            GateState::Released => "AUTHORIZED",
+        };
+        let policy_label = match session.policy {
+            AuthorizationPolicy::Standard => "standard",
+            AuthorizationPolicy::Strict => "strict",
+            AuthorizationPolicy::Custom => "custom",
+        };
+        summaries.push(SessionSummary {
+            id: session.id.clone(),
+            target_url: session.base_url.to_string(),
+            session_url: local_url(&session.base_url, &session.id),
+            policy: policy_label,
+            state: state_label,
+        });
+    }
+
+    summaries.sort_by(|left, right| left.target_url.cmp(&right.target_url));
+    Json(SessionsResponse {
+        active_sessions,
+        max_sessions: state.max_sessions,
+        sessions: summaries,
+    })
 }
 
 async fn create_session(

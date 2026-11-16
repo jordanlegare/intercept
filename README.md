@@ -14,7 +14,7 @@ Install a recent stable Rust toolchain, then run:
     cargo test
     cargo run
 
-Open http://127.0.0.1:5000, enter the complete upstream URL (including any path and query string), and choose **Open through Intercept**. The session opens that exact resource rather than resetting to the site's homepage. The session URL retains the destination path, query, and browser-side fragment. The browser sees a unique `.localhost` host for the session; the trusted authority panel is loaded in a cross-origin iframe. Select an authorization policy before opening:
+Open http://127.0.0.1:5000, enter the complete upstream URL (including any path and query string), and choose **Open new session tab**. Each launch creates an independent server-side session and opens it in a separate browser tab; the launcher remains open so you can start more sessions without restarting Intercept. The **Active Sessions** list shows sessions currently held by the process and lets you reopen one in another tab. The session opens the exact resource rather than resetting to the site's homepage. The session URL retains the destination path, query, and browser-side fragment. The browser sees a unique `.localhost` host for each session; the trusted authority panel is loaded in a cross-origin iframe. Allow pop-ups for `127.0.0.1:5000` so each launch can open its own tab. Select an authorization policy before opening:
 
 1. **Standard** holds POST, PUT, PATCH, and DELETE while allowing GET, HEAD, and OPTIONS.
 2. **Strict** permits the initial document bootstrap, then holds all upstream requests until the timer starts and expires.
@@ -89,7 +89,7 @@ Resource-limit environment variables:
 | `INTERCEPT_REWRITE_WORKERS` | CPU count | Maximum concurrent blocking rewrite workers |
 | `INTERCEPT_AUTH_POLICY` | standard | Default policy when the launcher omits one |
 
-The UI reports cache bytes, initialized upstream origins, in-flight request counts, selected policy, and last activity. Sessions are pruned every minute; sessions with active requests are retained.
+The dashboard reports the active-session count against `INTERCEPT_MAX_SESSIONS` and lists each active session with its target URL, policy, and authorization state. The list is refreshed after each launch or on demand. The authority UI for each tab reports cache bytes, initialized upstream origins, in-flight request counts, selected policy, and last activity. Sessions are pruned every minute; sessions with active requests are retained.
 
 ## Tests
 
