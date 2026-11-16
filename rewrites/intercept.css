@@ -63,9 +63,6 @@
   font-weight: 700;
 }
 
-html { scroll-padding-bottom: 90px; }
-body { padding-bottom: 78px !important; }
-
 #intercept-toolbar #intercept-notice {
   margin-top: 6px;
   color: #8fa1b7;
