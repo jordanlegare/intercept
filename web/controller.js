@@ -609,8 +609,10 @@
         source instanceof Request ? source.url : String(source),
         document.baseURI
       );
-      return /(^|\\.)youtube\\.com$/i.test(upstream.hostname)
-        && candidate.pathname === "/youtubei/v1/search";
+      const upstreamHost = upstream.hostname.toLowerCase();
+      const isYouTubeHost = upstreamHost === "youtube.com"
+        || upstreamHost.endsWith(".youtube.com");
+      return isYouTubeHost && candidate.pathname === "/youtubei/v1/search";
     } catch (_) {
       return false;
     }
