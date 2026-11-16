@@ -321,7 +321,7 @@
     try {
       trustedScriptUrlPolicy = window.trustedTypes.createPolicy(TRUSTED_SCRIPT_URL_POLICY_NAME, {
         createScriptURL(value) {
-          const url = new URL(String(value), document.baseURI);
+          const url = new URL(String(value), location.href);
           const allowedBlob = url.protocol === "blob:" && url.origin === location.origin;
           const allowedHttp = (url.protocol === "http:" || url.protocol === "https:")
             && url.origin === location.origin;
