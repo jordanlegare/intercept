@@ -2484,7 +2484,7 @@ fn rewrite_html(
     let session_base_for_attrs = session_base.clone();
     let id_for_attrs = session_id.to_owned();
     settings = settings.append_element_content_handler(element!(
-        "a[href],area[href],link[href],script[src],img[src],source[src],iframe[src],video[src],video[poster],audio[src],input[src],form[action],button[formaction],base[href],object[data],embed[src],track[src],[srcset],[style]",
+        "[href],[src],[action],[formaction],[poster],[data],[cite],[background],[srcset],[style]",
         move |el| {
             let mut rewrote_resource = false;
             for attribute in ["href", "src", "action", "formaction", "poster", "data", "cite", "background"] {
@@ -3636,6 +3636,34 @@ mod tests {
 
         headers.insert("x-intercept-cookie-token", HeaderValue::from_static("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         assert!(cookie_bridge_capability_origin(&session, &headers).is_err());
+    }
+
+    #[test]
+    fn html_rewriter_catches_svg_and_custom_element_resource_urls() {
+        let base = Url::parse("https://www.youtube.com/").unwrap();
+        let html = r##"<!doctype html><html><head></head><body>
+            <svg><use href="https://www.gstatic.com/youtube/img/icons/web/youtube_fill/yt-logo-updated/v3/24px.svg#logo"></use></svg>
+            <svg><image href="https://www.gstatic.com/youtube/img/icons/web/youtube_fill/offline_no_content/v1/192px.svg"></image></svg>
+            <yt-icon href="https://youtube.com/"></yt-icon>
+        </body></html>"##;
+        let output = rewrite_html(
+            html,
+            &base,
+            &base,
+            "session123",
+            "",
+            "0123456789abcdef0123456789abcdef",
+        ).unwrap();
+
+        assert!(output.contains(
+            "http://session123.localhost:5000/p/session123/_/https/www.gstatic.com/youtube/img/icons/web/youtube_fill/yt-logo-updated/v3/24px.svg#logo"
+        ));
+        assert!(output.contains(
+            "http://session123.localhost:5000/p/session123/_/https/www.gstatic.com/youtube/img/icons/web/youtube_fill/offline_no_content/v1/192px.svg"
+        ));
+        assert!(output.contains(
+            "http://session123.localhost:5000/p/session123/_/https/youtube.com/"
+        ));
     }
 
     #[test]
