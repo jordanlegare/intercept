@@ -695,7 +695,7 @@ async fn start_timer(
     push_event(
         &session,
         "timer_started",
-        "authority",
+        "authority".to_owned(),
         format!("{:.9} seconds", duration.as_secs_f64()),
     ).await;
     info!(session = %session.id, delay_ms = duration.as_millis(), "Authorization timer started");
@@ -711,7 +711,7 @@ async fn start_timer(
             push_event(
                 &timer_session,
                 "authorization_released",
-                "authority",
+                "authority".to_owned(),
                 "Timer completed; state-changing requests are now authorized".to_owned(),
             ).await;
             info!(session = %timer_session.id, "Timer expired; state-changing requests are now authorized");
