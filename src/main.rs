@@ -2621,7 +2621,9 @@ fn proxy_origin(session_id: &str) -> String {
 
 fn proxy_origin_prefix(target: &Url, session_base: &Url, session_id: &str) -> String {
     if target.origin() == session_base.origin() {
-        return format!("/p/{session_id}");
+        // Keep primary-origin resources at the session-host root. This makes
+        // root-relative navigation and SPA history URLs resolve to the upstream.
+        return String::new();
     }
     let origin = target.origin().ascii_serialization();
     let authority = origin.strip_prefix(&format!("{}://", target.scheme())).unwrap_or("");
@@ -2723,9 +2725,9 @@ fn rewrite_worker_javascript(
         const path=url.pathname+url.search+url.hash;
         if(url.origin===self.location.origin){{
           if(url.pathname===prefix||url.pathname.startsWith(prefix+"/"))return url.href;
-          return prefix+path;
+          return url.href;
         }}
-        if(url.origin===primaryOrigin)return prefix+path;
+        if(url.origin===primaryOrigin)return path;
         return prefix+"/_/"+url.protocol.slice(0,-1)+"/"+url.host+path;
       }}
       if(self.fetch){{
@@ -3474,7 +3476,7 @@ mod tests {
         let base = Url::parse("https://example.com/account/").unwrap();
         assert_eq!(
             rewrite_url(&base, &base, "session123", "../settings?tab=security"),
-            Some("http://session123.localhost:5000/p/session123/settings?tab=security".to_owned())
+            Some("http://session123.localhost:5000/settings?tab=security".to_owned())
         );
         assert_eq!(
             rewrite_url(&base, &base, "session123", "https://cdn.example/image.png"),
@@ -3487,7 +3489,7 @@ mod tests {
         let target = Url::parse("https://example.com/account/settings?tab=security#sessions").unwrap();
         assert_eq!(
             local_url(&target, "session123"),
-            "http://session123.localhost:5000/p/session123/account/settings?tab=security#sessions"
+            "http://session123.localhost:5000/account/settings?tab=security#sessions"
         );
     }
 
@@ -3496,7 +3498,7 @@ mod tests {
         let target = Url::parse("https://example.com/?mode=compact#top").unwrap();
         assert_eq!(
             local_url(&target, "session123"),
-            "http://session123.localhost:5000/p/session123/?mode=compact#top"
+            "http://session123.localhost:5000/?mode=compact#top"
         );
     }
 
@@ -3582,7 +3584,7 @@ mod tests {
             &Url::parse("https://example.com/").unwrap(),
             "session123",
         ).unwrap();
-        assert!(output.contains("/p/session123/images/bg.png"));
+        assert!(output.contains("/images/bg.png"));
         assert!(output.contains("/p/session123/_/https/cdn.example/theme.css"));
     }
 
@@ -3599,7 +3601,7 @@ mod tests {
         assert!(output.contains("X-Intercept-Proxy-Mode"));
         assert!(output.contains("XMLHttpRequest"));
         assert!(output.contains("importScripts"));
-        assert!(output.contains("/p/"));
+        assert!(output.contains("if(url.origin===primaryOrigin)return path;"));
     }
 
     #[test]

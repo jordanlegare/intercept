@@ -281,9 +281,9 @@
     if (url.origin === location.origin) {
       if (url.pathname === sessionPrefix || url.pathname.startsWith(sessionPrefix + "/")) return url.href;
       if (url.pathname === "/assets/controller.js" || url.pathname === "/assets/intercept.css") return url.href;
-      return sessionPrefix + path;
+      return url.href;
     }
-    if (url.origin === upstreamOrigin) return sessionPrefix + path;
+    if (url.origin === upstreamOrigin) return path;
     return sessionPrefix + "/_/" + url.protocol.slice(0, -1) + "/" + url.host + path;
   }
 
