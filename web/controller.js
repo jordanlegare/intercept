@@ -411,6 +411,26 @@
     window.Worker.prototype = NativeWorker.prototype;
   }
 
+  if (window.SharedWorker) {
+    const NativeSharedWorker = window.SharedWorker;
+    window.SharedWorker = function(url, options) {
+      const routed = routeToProxy(url);
+      if (!routed) throw new DOMException("Intercept only proxies HTTP and HTTPS shared-worker scripts.", "SecurityError");
+      return new NativeSharedWorker(routed, options);
+    };
+    window.SharedWorker.prototype = NativeSharedWorker.prototype;
+  }
+
+  if (navigator.serviceWorker && navigator.serviceWorker.register) {
+    const nativeRegister = navigator.serviceWorker.register.bind(navigator.serviceWorker);
+    navigator.serviceWorker.register = function(scriptURL, options) {
+      const routed = routeToProxy(scriptURL);
+      if (!routed) return Promise.reject(new TypeError("Intercept only registers HTTP and HTTPS service workers."));
+      record("service_worker_register", routed, "Service worker script routed through this session");
+      return nativeRegister(routed, options);
+    };
+  }
+
   const nativeOpenWindow = window.open;
   window.open = function(url, ...rest) {
     const routed = routeToProxy(url);
