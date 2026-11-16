@@ -31,7 +31,7 @@
 </head>
 <body>
 <main>
-  <div class="mark">LOCAL HTTP RELAY · 127.0.0.1:5000</div>
+  <div class="mark">LOCAL HTTP RELAY · 127.0.0.1:5000 / localhost:5000</div>
   <h1>INTERCEPT<span style="color:#73d1ff">_</span></h1>
   <p>Launch multiple independent HTTP or HTTPS sessions from this dashboard. Every launch opens in its own browser tab with a dedicated <code>.localhost</code> origin. Keep this dashboard open to start more sessions or reopen any active session; the Intercept server stays running throughout.</p>
   <form id="launch">
@@ -124,7 +124,7 @@
     // do not block it after the asynchronous session-creation request.
     const sessionTab = window.open("about:blank", "_blank");
     if (!sessionTab) {
-      message.textContent = "The browser blocked the new tab. Allow pop-ups for 127.0.0.1:5000 and try again.";
+      message.textContent = "The browser blocked the new tab. Allow pop-ups for this dashboard origin and try again.";
       return;
     }
     sessionTab.opener = null;
