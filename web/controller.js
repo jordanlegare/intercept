@@ -820,6 +820,7 @@
       const headers = new Headers(routedRequest.headers);
       headers.set("X-Intercept-Proxy-Mode", "ajax");
       headers.set("X-Intercept-Body-Diagnostic", bodyDetail);
+      headers.set("X-Intercept-Transport-Diagnostic", "window-fetch");
       const inputContext = addInputCorrelation(headers);
       const markedRequest = new Request(routedRequest, {headers});
       record(
@@ -863,6 +864,7 @@
         // Add internal metadata last, after page code has configured headers.
         nativeXhrSetRequestHeader.call(this, "X-Intercept-Proxy-Mode", "ajax");
         nativeXhrSetRequestHeader.call(this, "X-Intercept-Body-Diagnostic", bodyDetail);
+        nativeXhrSetRequestHeader.call(this, "X-Intercept-Transport-Diagnostic", "window-xhr");
         if (inputContext) {
           nativeXhrSetRequestHeader.call(this, "X-Intercept-Input-Id", inputContext.id);
           nativeXhrSetRequestHeader.call(

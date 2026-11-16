@@ -3122,6 +3122,7 @@ fn rewrite_worker_javascript(
           const headers=new Headers(request.headers);
           headers.set("X-Intercept-Proxy-Mode","ajax");
           headers.set("X-Intercept-Body-Diagnostic",bodyDetail);
+          headers.set("X-Intercept-Transport-Diagnostic","worker-fetch");
           reportDispatch(routed,method+" · "+bodyDetail+" · transport=worker-fetch");
           return nativeFetch(new Request(request,{{headers}}));
         }};
@@ -3142,6 +3143,7 @@ fn rewrite_worker_javascript(
             try{{
               nativeSet.call(this,"X-Intercept-Proxy-Mode","ajax");
               nativeSet.call(this,"X-Intercept-Body-Diagnostic",bodyDetail);
+              nativeSet.call(this,"X-Intercept-Transport-Diagnostic","worker-xhr");
             }}catch(_e){{}}
             if(meta)reportDispatch(meta.url,meta.method+" · "+bodyDetail+" · transport=worker-xhr");
             return nativeSend.apply(this,args);
@@ -3424,6 +3426,9 @@ fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -
     let browser_body = header_text("x-intercept-body-diagnostic", 120)
         .map(|value| format!(" · browser_body={value}"))
         .unwrap_or_else(|| " · browser_body=absent".to_owned());
+    let transport = header_text("x-intercept-transport-diagnostic", 40)
+        .map(|value| format!(" · transport={value}"))
+        .unwrap_or_else(|| " · transport=unidentified".to_owned());
     let content_type = header_text("content-type", 100)
         .map(|value| format!(" · content_type={value}"))
         .unwrap_or_default();
@@ -3462,7 +3467,7 @@ fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -
     // clues when a browser request reaches Rust without a matching
     // browser-side ajax_dispatch event.
     format!(
-        "method={method} · body_bytes={} · dispatch_marker={dispatch_marker}{browser_body} · sec_fetch_dest={fetch_dest} · sec_fetch_mode={fetch_mode} · sec_fetch_site={fetch_site} · x_requested_with={requested_with} · content_length_out={}{}{}{}{} · cookie_header_in={cookie_header_in} · json={json_state}{client_headers}",
+        "method={method} · body_bytes={} · dispatch_marker={dispatch_marker}{browser_body}{transport} · sec_fetch_dest={fetch_dest} · sec_fetch_mode={fetch_mode} · sec_fetch_site={fetch_site} · x_requested_with={requested_with} · content_length_out={}{}{}{}{} · cookie_header_in={cookie_header_in} · json={json_state}{client_headers}",
         body.len(),
         body.len(),
         content_type,
@@ -3498,7 +3503,7 @@ fn should_skip_request_header(name: &HeaderName) -> bool {
             | "te" | "trailer" | "transfer-encoding" | "upgrade" | "content-length"
             | "accept-encoding" | "cookie" | "x-intercept-cookie-token" | "x-intercept-cookie-updated" | "x-intercept-proxy-mode"
             | "x-intercept-input-id" | "x-intercept-input-target"
-            | "x-intercept-body-diagnostic"
+            | "x-intercept-body-diagnostic" | "x-intercept-transport-diagnostic"
     )
 }
 
@@ -3660,6 +3665,10 @@ mod tests {
             "x-intercept-body-diagnostic",
             HeaderValue::from_static("body_arg=string body_arg_bytes=12"),
         );
+        headers.insert(
+            "x-intercept-transport-diagnostic",
+            HeaderValue::from_static("worker-fetch"),
+        );
 
         let unmarked = ajax_request_diagnostics(&Method::POST, &headers, b"");
         assert!(unmarked.contains("body_bytes=0"));
@@ -3673,6 +3682,7 @@ mod tests {
         let marked = ajax_request_diagnostics(&Method::POST, &headers, br#"{"q":"test"}"#);
         assert!(marked.contains("dispatch_marker=present"));
         assert!(marked.contains("body_bytes=12"));
+        assert!(marked.contains("transport=worker-fetch"));
     }
 
     #[test]
