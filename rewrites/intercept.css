@@ -63,9 +63,6 @@
   font-weight: 700;
 }
 
-html { scroll-padding-bottom: 90px; }
-body { padding-bottom: 78px !important; }
-
 #intercept-toolbar #intercept-notice {
   margin-top: 6px;
   color: #8fa1b7;
@@ -106,4 +103,34 @@ body { padding-bottom: 78px !important; }
     flex-basis: 100%;
     text-align: center;
   }
+}
+
+
+/* Session-level authority frame: kept outside the page's CSS tree. */
+.intercept-ui-host {
+  display: block !important;
+  position: fixed !important;
+  inset: auto 0 0 !important;
+  height: 148px !important;
+  z-index: 2147483647 !important;
+  pointer-events: none !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
+.intercept-authority-frame {
+  display: block !important;
+  width: 100% !important;
+  height: 148px !important;
+  border: 0 !important;
+  pointer-events: auto !important;
+  background: #080e16 !important;
+}
+
+html.intercept-session-page {
+  scroll-padding-bottom: 158px !important;
+}
+
+body.intercept-session-page {
+  padding-bottom: 148px !important;
 }

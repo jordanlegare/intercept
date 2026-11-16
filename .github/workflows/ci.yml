@@ -23,7 +23,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check browser controller syntax
-        run: node --check web/controller.js
+        run: |
+          node --check web/controller.js
+          node --check web/authority.js
       - name: Test
         run: cargo test --all-targets
       - name: Clippy

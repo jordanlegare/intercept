@@ -7,27 +7,15 @@
   if (!sessionId || !upstreamOrigin) return;
 
   const sessionPrefix = "/p/" + encodeURIComponent(sessionId);
-  const apiPrefix = "/api/sessions/" + encodeURIComponent(sessionId);
-  const api = suffix => apiPrefix + suffix;
   const rawFetch = window.fetch.bind(window);
   const nativeAdd = EventTarget.prototype.addEventListener;
   const queue = [];
   const eventBuffer = [];
-  const CONTROL_REQUEST_TIMEOUT_MS = 5000;
+  let authorityFrame = null;
   let gateState = "waiting";
   let replaying = false;
   let lastListenerReport = 0;
-  let statusPollInFlight = false;
-  let eventPollInFlight = false;
   let eventFlushInFlight = false;
-  let startInFlight = false;
-  let countdownDeadline = 0;
-
-  const noticeNode = () => document.getElementById("intercept-notice");
-  const stateNode = () => document.getElementById("intercept-state");
-  const countdownNode = () => document.getElementById("intercept-countdown");
-  const delayInput = () => document.getElementById("intercept-delay");
-  const startButton = () => document.getElementById("intercept-start");
 
   function selectorFor(node) {
     if (!(node instanceof Element)) return String(node && node.nodeName || "unknown");
@@ -48,29 +36,14 @@
     if (eventBuffer.length > 120) eventBuffer.shift();
   }
 
-  async function controlFetch(suffix, options = {}, timeoutMs = CONTROL_REQUEST_TIMEOUT_MS) {
-    const controller = new AbortController();
-    let timedOut = false;
-    const timeoutId = window.setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, timeoutMs);
-    try {
-      return await rawFetch(api(suffix), {...options, signal: controller.signal});
-    } catch (error) {
-      if (timedOut) throw new Error("control request timed out after " + timeoutMs + " ms");
-      throw error;
-    } finally {
-      window.clearTimeout(timeoutId);
-    }
-  }
+
 
   async function flushEvents() {
     if (!eventBuffer.length || eventFlushInFlight) return;
     eventFlushInFlight = true;
     const batch = eventBuffer.splice(0, 100);
     try {
-      const response = await controlFetch("/events", {
+      const response = await rawFetch("/_intercept/events", {
         method: "POST",
         headers: {"content-type": "application/json"},
         body: JSON.stringify(batch),
@@ -86,8 +59,12 @@
   }
 
   function showNotice(message) {
-    const node = noticeNode();
-    if (node) node.textContent = message;
+    if (!authorityFrame || !authorityFrame.contentWindow) return;
+    authorityFrame.contentWindow.postMessage({
+      type: "intercept:notice",
+      session_id: sessionId,
+      message: String(message).slice(0, 500)
+    }, "http://127.0.0.1:5000");
   }
 
   function routeToProxy(value) {
@@ -101,8 +78,7 @@
     const path = url.pathname + url.search + url.hash;
     if (url.origin === location.origin) {
       if (url.pathname === sessionPrefix || url.pathname.startsWith(sessionPrefix + "/")) return url.href;
-      if (url.pathname === apiPrefix || url.pathname.startsWith(apiPrefix + "/") ||
-          url.pathname === "/assets/controller.js" || url.pathname === "/assets/intercept.css") return url.href;
+      if (url.pathname === "/assets/controller.js" || url.pathname === "/assets/intercept.css") return url.href;
       return sessionPrefix + path;
     }
     if (url.origin === upstreamOrigin) return sessionPrefix + path;
@@ -401,129 +377,80 @@
     window.Worker.prototype = NativeWorker.prototype;
   }
 
+  if (window.SharedWorker) {
+    const NativeSharedWorker = window.SharedWorker;
+    window.SharedWorker = function(url, options) {
+      const routed = routeToProxy(url);
+      if (!routed) throw new DOMException("Intercept only proxies HTTP and HTTPS shared-worker scripts.", "SecurityError");
+      return new NativeSharedWorker(routed, options);
+    };
+    window.SharedWorker.prototype = NativeSharedWorker.prototype;
+  }
+
+  if (navigator.serviceWorker && navigator.serviceWorker.register) {
+    const nativeRegister = navigator.serviceWorker.register.bind(navigator.serviceWorker);
+    navigator.serviceWorker.register = function(scriptURL, options) {
+      const routed = routeToProxy(scriptURL);
+      if (!routed) return Promise.reject(new TypeError("Intercept only registers HTTP and HTTPS service workers."));
+      record("service_worker_register", routed, "Service worker script routed through this session");
+      return nativeRegister(routed, options);
+    };
+  }
+
   const nativeOpenWindow = window.open;
   window.open = function(url, ...rest) {
     const routed = routeToProxy(url);
     return nativeOpenWindow.call(this, routed || url, ...rest);
   };
 
-  function renderGateState() {
-    const status = stateNode();
-    const button = startButton();
-    const input = delayInput();
-    if (status) status.textContent = gateState === "waiting" ? "WAITING" :
-      gateState === "running" ? "AUTHORIZATION COUNTDOWN" : "AUTHORIZED";
-    if (button) button.disabled = gateState !== "waiting" || startInFlight;
-    if (input) input.disabled = gateState !== "waiting" || startInFlight;
-  }
-
-  function updateCountdown() {
-    const countdown = countdownNode();
-    if (!countdown) return;
-    if (gateState === "waiting") {
-      countdown.textContent = "NOT STARTED";
-    } else if (gateState === "released") {
-      countdown.textContent = "00:00.00";
-    } else if (!countdownDeadline) {
-      countdown.textContent = "SYNCING...";
-    } else {
-      const remaining = Math.max(0, countdownDeadline - performance.now());
-      countdown.textContent = (Math.ceil(remaining / 10) / 100).toFixed(2) + "s";
-    }
-  }
-
-  function applyStatus(data) {
-    if (!data || !["waiting", "running", "released"].includes(data.state)) {
-      throw new Error("invalid status response");
-    }
-    gateState = data.state;
-    countdownDeadline = gateState === "running"
-      ? performance.now() + Math.max(0, Number(data.remaining_ms) || 0)
-      : 0;
-    renderGateState();
-    updateCountdown();
-    if (gateState === "released") releaseQueuedActions();
-  }
-
-  async function pollStatus() {
-    if (statusPollInFlight) return;
-    statusPollInFlight = true;
-    try {
-      const response = await controlFetch("/status", {cache: "no-store"});
-      if (!response.ok) throw new Error("status " + response.status);
-      applyStatus(await response.json());
-    } catch (error) {
-      if (stateNode()) stateNode().textContent = "CONTROL LINK DEGRADED";
-      if (gateState !== "running" && countdownNode()) {
-        countdownNode().textContent = String(error.message || error).slice(0, 80);
-      }
-    } finally {
-      statusPollInFlight = false;
-    }
-  }
-
-  async function pollEvents() {
-    if (eventPollInFlight) return;
-    eventPollInFlight = true;
-    try {
-      const response = await controlFetch("/events", {cache: "no-store"});
-      if (!response.ok) throw new Error("events " + response.status);
-      const events = await response.json();
-      const summary = document.getElementById("intercept-events-summary");
-      const list = document.getElementById("intercept-events-list");
-      if (summary) summary.textContent = "EVENT STREAM · " + events.length + " retained";
-      if (list) {
-        list.textContent = events.slice(-30).reverse().map(item => {
-          const time = new Date(Number(item.at_unix_ms)).toLocaleTimeString();
-          return "[" + time + "] " + item.kind + " · " + item.detail + " · " + item.target;
-        }).join("\n") || "No events recorded yet.";
-      }
-    } catch (_) {
-      // Event history is observational; a missed refresh must not stall authority.
-    } finally {
-      eventPollInFlight = false;
-    }
-  }
-
-  nativeAdd.call(document, "click", async event => {
-    const button = event.target instanceof Element ? event.target.closest("#intercept-start") : null;
-    if (!button || button.disabled || startInFlight) return;
-    const seconds = Number(delayInput() && delayInput().value);
-    if (!Number.isFinite(seconds) || seconds < 0.000000001 || seconds > 86400) {
-      if (stateNode()) stateNode().textContent = "INVALID DELAY";
+  function initializeToolbar() {
+    const placeholder = document.getElementById("intercept-toolbar");
+    if (!placeholder || !document.body) {
+      console.error("Intercept could not initialize its authority frame.");
       return;
     }
-    startInFlight = true;
-    renderGateState();
-    try {
-      const response = await controlFetch("/start", {
-        method: "POST",
-        headers: {"content-type": "application/json"},
-        body: JSON.stringify({delay_seconds: seconds})
-      }, 10000);
-      if (!response.ok) throw new Error(await response.text() || "Timer could not start");
-      applyStatus(await response.json());
-      record("timer_started", "intercept-toolbar", String(seconds) + " seconds");
-    } catch (error) {
-      if (stateNode()) stateNode().textContent = "START NOT CONFIRMED";
-      if (countdownNode() && gateState !== "running") {
-        countdownNode().textContent = String(error.message || error).slice(0, 80);
+    const host = document.createElement("div");
+    host.id = "intercept-ui-host";
+    host.className = "intercept-ui-host";
+    const root = host.attachShadow({mode: "closed"});
+    const stylesheet = document.createElement("link");
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = "/assets/intercept.css";
+    root.appendChild(stylesheet);
+    const frame = document.createElement("iframe");
+    frame.className = "intercept-authority-frame";
+    frame.title = "Intercept authority controls";
+    frame.src = "http://127.0.0.1:5000/authority/" + encodeURIComponent(sessionId);
+    frame.setAttribute("sandbox", "allow-scripts allow-same-origin");
+    authorityFrame = frame;
+    frame.referrerPolicy = "no-referrer";
+    root.appendChild(frame);
+    placeholder.remove();
+    document.documentElement.appendChild(host);
+    document.documentElement.classList.add("intercept-session-page");
+    document.body.classList.add("intercept-session-page");
+    nativeAdd.call(window, "message", event => {
+      const data = event.data;
+      if (event.origin !== "http://127.0.0.1:5000"
+          || !authorityFrame
+          || event.source !== authorityFrame.contentWindow
+          || !data
+          || data.type !== "intercept:authority-status"
+          || data.session_id !== sessionId
+          || !["waiting", "running", "released"].includes(data.state)) {
+        return;
       }
-      record("timer_start_error", "intercept-toolbar", String(error.message || error));
-      // The server may have accepted the start even if its response was lost.
-      // A status refresh reconciles the UI before another start is enabled.
-      pollStatus();
-    } finally {
-      startInFlight = false;
-      renderGateState();
-    }
-  }, true);
+      gateState = data.state;
+      if (gateState === "released") releaseQueuedActions();
+      record("authority_status_received", "authority-frame", gateState);
+    });
+    record("controller_loaded", "document", "Isolated cross-origin authority frame initialized");
+    window.setInterval(flushEvents, 1200);
+  }
 
-  pollStatus();
-  pollEvents();
-  record("controller_loaded", "document", "Browser event observer active");
-  window.setInterval(pollStatus, 400);
-  window.setInterval(pollEvents, 1800);
-  window.setInterval(flushEvents, 1200);
-  window.setInterval(updateCountdown, 100);
+  if (document.readyState === "loading") {
+    nativeAdd.call(document, "DOMContentLoaded", initializeToolbar, {once: true});
+  } else {
+    initializeToolbar();
+  }
 })();
