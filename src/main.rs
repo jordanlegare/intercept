@@ -3397,11 +3397,25 @@ fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -
             .map(|value| clean_field(value.to_owned(), limit))
             .filter(|value| !value.is_empty())
     };
+    let header_or_absent = |name: &str, limit: usize| {
+        header_text(name, limit).unwrap_or_else(|| "absent".to_owned())
+    };
     let host_only = |name: &str| {
         header_text(name, 2048)
             .and_then(|value| Url::parse(&value).ok())
             .and_then(|url| url.host_str().map(str::to_owned))
     };
+    let dispatch_marker = if header_text("x-intercept-proxy-mode", 32)
+        .is_some_and(|value| value.eq_ignore_ascii_case("ajax"))
+    {
+        "present"
+    } else {
+        "absent"
+    };
+    let fetch_dest = header_or_absent("sec-fetch-dest", 24);
+    let fetch_mode = header_or_absent("sec-fetch-mode", 24);
+    let fetch_site = header_or_absent("sec-fetch-site", 24);
+    let requested_with = header_or_absent("x-requested-with", 32);
     let content_type = header_text("content-type", 100)
         .map(|value| format!(" · content_type={value}"))
         .unwrap_or_default();
@@ -3436,8 +3450,11 @@ fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -
         )
     }).collect::<String>();
 
+    // Keep the dispatch marker and Fetch Metadata first: these are the key
+    // clues when a browser request reaches Rust without a matching
+    // browser-side ajax_dispatch event.
     format!(
-        "method={method} · body_bytes={} · content_length_out={}{}{}{}{} · cookie_header_in={cookie_header_in} · json={json_state}{client_headers}",
+        "method={method} · body_bytes={} · dispatch_marker={dispatch_marker} · sec_fetch_dest={fetch_dest} · sec_fetch_mode={fetch_mode} · sec_fetch_site={fetch_site} · x_requested_with={requested_with} · content_length_out={}{}{}{}{} · cookie_header_in={cookie_header_in} · json={json_state}{client_headers}",
         body.len(),
         body.len(),
         content_type,
@@ -3621,6 +3638,27 @@ mod tests {
             cookie_jar: Arc::new(SessionCookieJar::default()),
             cookie_tokens: StdMutex::new(HashMap::new()),
         }
+    }
+
+    #[test]
+    fn ajax_request_diagnostics_expose_dispatch_marker_and_fetch_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
+        headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+
+        let unmarked = ajax_request_diagnostics(&Method::POST, &headers, b"");
+        assert!(unmarked.contains("body_bytes=0"));
+        assert!(unmarked.contains("dispatch_marker=absent"));
+        assert!(unmarked.contains("sec_fetch_dest=empty"));
+        assert!(unmarked.contains("sec_fetch_mode=cors"));
+        assert!(unmarked.contains("sec_fetch_site=same-origin"));
+
+        headers.insert("x-intercept-proxy-mode", HeaderValue::from_static("ajax"));
+        let marked = ajax_request_diagnostics(&Method::POST, &headers, br#"{"q":"test"}"#);
+        assert!(marked.contains("dispatch_marker=present"));
+        assert!(marked.contains("body_bytes=12"));
     }
 
     #[test]
