@@ -255,6 +255,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/assets/controller.js", get(controller_js))
         .route("/assets/intercept.css", get(intercept_css))
         .route("/assets/authority.js", get(authority_js))
+        .route("/_intercept/events", post(record_session_events))
         .route("/api/sessions", post(create_session))
         .route("/api/sessions/{id}/start", post(start_timer).options(api_preflight))
         .route("/api/sessions/{id}/status", get(session_status).options(api_preflight))
@@ -323,6 +324,27 @@ async fn authority_js() -> impl IntoResponse {
     )
 }
 
+async fn record_session_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(inputs): Json<Vec<EventInput>>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let host = headers.get(header::HOST).and_then(|value| value.to_str().ok()).unwrap_or("");
+    let suffix = format!(".localhost:{SESSION_PORT}");
+    let id = host.strip_suffix(&suffix)
+        .ok_or((StatusCode::MISDIRECTED_REQUEST, "Event telemetry requires the session origin".into()))?;
+    let session = find_session(&state, id).await?;
+    for input in inputs.into_iter().take(100) {
+        push_event(
+            &session,
+            &input.kind,
+            input.target.unwrap_or_default(),
+            input.detail.unwrap_or_default(),
+        ).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn host_and_cors_guard(
     State(state): State<AppState>,
     request: Request<Body>,
@@ -364,6 +386,18 @@ async fn host_and_cors_guard(
     if path == "/assets/controller.js" || path == "/assets/intercept.css" {
         let Some(id) = host.strip_suffix(&format!(".localhost:{SESSION_PORT}")) else {
             return plain(StatusCode::MISDIRECTED_REQUEST, "Session assets require a dedicated session origin");
+        };
+        if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || state.sessions.read().await.get(id).is_none()
+        {
+            return plain(StatusCode::NOT_FOUND, "Unknown or expired session");
+        }
+        return next.run(request).await;
+    }
+
+    if path == "/_intercept/events" {
+        let Some(id) = host.strip_suffix(&format!(".localhost:{SESSION_PORT}")) else {
+            return plain(StatusCode::MISDIRECTED_REQUEST, "Event telemetry requires a session origin");
         };
         if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
             || state.sessions.read().await.get(id).is_none()
