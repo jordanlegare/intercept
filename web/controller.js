@@ -867,7 +867,9 @@
       const frame = document.createElement("iframe");
       frame.className = "intercept-authority-frame";
       frame.title = "Intercept authority controls";
-      frame.setAttribute("sandbox", "allow-scripts allow-same-origin");
+      // The trusted local authority frame needs user-initiated downloads for event export.
+      // Do not grant allow-downloads-without-user-activation.
+      frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-downloads");
       frame.referrerPolicy = "no-referrer";
       frame.style.setProperty("display", "block", "important");
       frame.style.setProperty("width", "100%", "important");
