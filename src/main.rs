@@ -40,7 +40,9 @@ const MIN_DELAY_NANOS: f64 = 0.000_000_001;
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHE_ENTRY_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_ASSET_CACHE_SECONDS: u64 = 300;
-const UPSTREAM_TIMEOUT_SECONDS: u64 = 30;
+// Regular document/resource requests buffer and may rewrite the complete body.
+// Allow large upstream bundles more than the old 30-second total deadline.
+const UPSTREAM_TIMEOUT_SECONDS: u64 = 120;
 // Long-lived AJAX streams (notably EventSource) may remain open for hours.
 const AJAX_STREAM_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 const SHUTDOWN_GRACE_SECONDS: u64 = 5;
@@ -835,8 +837,12 @@ async fn proxy(
                 }
                 Err(error) => {
                     warn!(
-                        %error,
+                        error = ?error,
+                        timed_out = error.is_timeout(),
+                        decode_error = error.is_decode(),
                         url = %upstream_url,
+                        status = %status,
+                        bytes_received = bytes.len(),
                         elapsed_ms = request_started.elapsed().as_millis(),
                         "Failed while reading upstream response"
                     );
