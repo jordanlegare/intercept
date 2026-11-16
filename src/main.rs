@@ -153,9 +153,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Intercept listening at http://{LISTEN}");
     info!("This service is loopback-only; it is not a network-wide transparent proxy.");
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
-        let _ = shutdown_rx.await;
-    });
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.await;
+        })
+        .into_future();
     tokio::pin!(server);
 
     tokio::select! {
