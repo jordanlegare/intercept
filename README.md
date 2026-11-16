@@ -42,6 +42,7 @@ One reqwest Client is created per upstream origin and reused. Each new origin is
 ## Authority behavior
 
 - The proxied page keeps its original layout, with a fixed **INTERCEPT AUTHORITY** banner at the bottom. The banner shows WAITING / AUTHORIZATION COUNTDOWN / AUTHORIZED, a decimal-seconds delay input, **[START]**, the countdown, a notice, and a collapsible event stream.
+- Authority status, event polling, and event uploads are serialized and time-bounded so a stalled local API request cannot accumulate overlapping controller requests. The displayed countdown advances locally between status responses; the Rust timer remains authoritative for releasing queued actions and state-changing requests.
 - The controller observes pointer, click, change, input, and keydown activity; reports selected event-listener registrations; and records fetch, XHR, sendBeacon, and proxied HTTP request metadata. It does not record input values or request bodies.
 - While authorization is pending, ordinary anchor navigation and form submission are held in a bounded browser queue (50 actions) and replayed when the Rust timer releases the session. The Rust gate independently holds POST, PUT, PATCH, and DELETE requests.
 - Network URLs created at runtime through fetch, XHR, sendBeacon, EventSource, workers, window.open, dynamic URL attributes, and CSS setters are routed through the same local server. Static JavaScript module imports and dynamic imports are rewritten as well.
