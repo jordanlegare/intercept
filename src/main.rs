@@ -350,6 +350,13 @@ async fn authority_page(
         "cross-origin-resource-policy",
         HeaderValue::from_static("cross-origin"),
     );
+    // A cross-origin child navigable must itself opt into a COEP policy
+    // compatible with the embedding document's require-corp/credentialless
+    // policy. All resources used by this local authority page are same-origin.
+    headers.insert(
+        "cross-origin-embedder-policy",
+        HeaderValue::from_static("require-corp"),
+    );
     // The proxy page embeds this trusted dashboard-origin frame. CORP permits
     // the COEP-protected parent to load it, while frame-ancestors restricts
     // embedding to this session's own origin.
@@ -2721,6 +2728,27 @@ mod tests {
     }
 
     
+
+    #[test]
+    fn authority_frame_cooperates_with_cross_origin_isolated_parent() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cross-origin-resource-policy",
+            HeaderValue::from_static("cross-origin"),
+        );
+        headers.insert(
+            "cross-origin-embedder-policy",
+            HeaderValue::from_static("require-corp"),
+        );
+        assert_eq!(
+            headers.get("cross-origin-resource-policy").unwrap(),
+            "cross-origin"
+        );
+        assert_eq!(
+            headers.get("cross-origin-embedder-policy").unwrap(),
+            "require-corp"
+        );
+    }
 
     #[test]
     fn fallback_meta_csp_rewrite_handles_attribute_order_and_single_quotes() {
