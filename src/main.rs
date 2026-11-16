@@ -18,7 +18,7 @@ use axum::{
     },
     middleware::{self, Next},
     response::{Html, IntoResponse},
-    routing::{any, get, post},
+    routing::{any, delete, get, post},
     Json, Router,
 };
 use futures_util::StreamExt;
@@ -109,6 +109,8 @@ struct Session {
     cache: Mutex<ResourceCache>,
     gate: Mutex<GateState>,
     gate_tx: watch::Sender<GateState>,
+    cancel_tx: watch::Sender<bool>,
+    cancelled: AtomicBool,
     events: Mutex<VecDeque<ActionEvent>>,
     policy: AuthorizationPolicy,
     rules: Vec<AuthorizationRule>,
@@ -289,6 +291,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/assets/authority.js", get(authority_js))
         .route("/_intercept/events", post(record_session_events))
         .route("/api/sessions", get(list_sessions).post(create_session))
+        .route("/api/sessions/{id}", delete(delete_session).options(api_preflight))
         .route("/api/sessions/{id}/start", post(start_timer).options(api_preflight))
         .route("/api/sessions/{id}/status", get(session_status).options(api_preflight))
         .route("/api/sessions/{id}/events", get(get_events).post(record_events).options(api_preflight))
@@ -600,6 +603,38 @@ async fn list_sessions(State(state): State<AppState>) -> Json<SessionsResponse> 
     })
 }
 
+async fn delete_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err((StatusCode::BAD_REQUEST, "Invalid session id".into()));
+    }
+
+    let session = state.sessions.write().await.remove(&id)
+        .ok_or((StatusCode::NOT_FOUND, "Unknown or expired session".into()))?;
+
+    // Revoke the session before releasing its retained clients and cache.
+    // Existing requests observe the cancellation signal and stop forwarding.
+    session.cancelled.store(true, Ordering::Release);
+    session.cancel_tx.send_replace(true);
+
+    let active_requests = session.max_inflight
+        .saturating_sub(session.inflight.available_permits());
+    session.clients.lock().await.clear();
+    let mut cache = session.cache.lock().await;
+    cache.entries.clear();
+    cache.bytes = 0;
+    drop(cache);
+
+    info!(
+        session = %id,
+        active_requests,
+        "Live proxy session terminated"
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn create_session(
     State(state): State<AppState>,
     Json(input): Json<CreateSession>,
@@ -638,13 +673,17 @@ async fn create_session(
     let id = Uuid::new_v4().simple().to_string();
     let mut clients = HashMap::new();
     clients.insert(origin_key(&target), client);
+    let (gate_tx, _) = watch::channel(GateState::Waiting);
+    let (cancel_tx, _) = watch::channel(false);
     let session = Arc::new(Session {
         id: id.clone(),
         base_url: target,
         clients: Mutex::new(clients),
         cache: Mutex::new(ResourceCache::default()),
         gate: Mutex::new(GateState::Waiting),
-        gate_tx: watch::channel(GateState::Waiting).0,
+        gate_tx,
+        cancel_tx,
+        cancelled: AtomicBool::new(false),
         events: Mutex::new(VecDeque::new()),
         policy,
         rules: input.rules,
@@ -687,8 +726,13 @@ async fn prune_sessions(state: &AppState) {
     let mut sessions = state.sessions.write().await;
     let before = sessions.len();
     sessions.retain(|_, session| {
-        now.saturating_sub(session.last_accessed_ms.load(Ordering::Relaxed)) < idle_limit
-            || session.inflight.available_permits() < session.max_inflight
+        let keep = now.saturating_sub(session.last_accessed_ms.load(Ordering::Relaxed)) < idle_limit
+            || session.inflight.available_permits() < session.max_inflight;
+        if !keep {
+            session.cancelled.store(true, Ordering::Release);
+            session.cancel_tx.send_replace(true);
+        }
+        keep
     });
     let expired = before.saturating_sub(sessions.len());
     if expired > 0 {
@@ -851,7 +895,15 @@ async fn start_timer(
 
     let timer_session = Arc::clone(&session);
     tokio::spawn(async move {
-        sleep_until(deadline).await;
+        let mut cancellation = timer_session.cancel_tx.subscribe();
+        if *cancellation.borrow_and_update() {
+            return;
+        }
+        tokio::select! {
+            biased;
+            _ = cancellation.wait_for(|cancelled| *cancelled) => return,
+            _ = sleep_until(deadline) => {}
+        }
         let mut gate = timer_session.gate.lock().await;
         if matches!(*gate, GateState::Running { .. }) {
             *gate = GateState::Released;
@@ -1018,19 +1070,41 @@ async fn status_for(session: &Session) -> StatusResponse {
     }
 }
 
-async fn wait_for_authorization(session: &Session) {
+async fn wait_for_session_termination(session: &Session) {
+    if session.cancelled.load(Ordering::Acquire) {
+        return;
+    }
+    let mut cancellation = session.cancel_tx.subscribe();
+    if !session.cancelled.load(Ordering::Acquire) {
+        let _ = cancellation.wait_for(|cancelled| *cancelled).await;
+    }
+}
+
+async fn wait_for_authorization(session: &Session) -> bool {
     let mut updates = session.gate_tx.subscribe();
+    let mut cancellation = session.cancel_tx.subscribe();
     loop {
+        if *cancellation.borrow_and_update() {
+            return false;
+        }
         let state = *updates.borrow_and_update();
         match state {
             GateState::Waiting => {
-                if updates.changed().await.is_err() {
-                    return;
+                tokio::select! {
+                    biased;
+                    _ = cancellation.wait_for(|cancelled| *cancelled) => return false,
+                    changed = updates.changed() => {
+                        if changed.is_err() {
+                            return false;
+                        }
+                    }
                 }
             }
-            GateState::Released => return,
+            GateState::Released => return true,
             GateState::Running { deadline } => {
                 tokio::select! {
+                    biased;
+                    _ = cancellation.wait_for(|cancelled| *cancelled) => return false,
                     _ = sleep_until(deadline) => {
                         let released = {
                             let mut gate = session.gate.lock().await;
@@ -1047,7 +1121,7 @@ async fn wait_for_authorization(session: &Session) {
                     }
                     changed = updates.changed() => {
                         if changed.is_err() {
-                            return;
+                            return false;
                         }
                     }
                 }
@@ -1083,9 +1157,14 @@ async fn ajax_passthrough(
     context: ProxyRequestContext,
 ) -> Response<Body> {
     let ProxyRequestContext { request_id, started_at: request_started, permit: request_permit } = context;
-    let client = match client_for(session, &upstream_url).await {
-        Ok(client) => client,
-        Err((status, message)) => return plain(status, &message),
+    let client = tokio::select! {
+        _ = wait_for_session_termination(session) => {
+            return plain(StatusCode::GONE, "Session terminated");
+        }
+        result = client_for(session, &upstream_url) => match result {
+            Ok(client) => client,
+            Err((status, message)) => return plain(status, &message),
+        }
     };
     let method = match reqwest::Method::from_bytes(request_method.as_str().as_bytes()) {
         Ok(method) => method,
@@ -1119,13 +1198,15 @@ async fn ajax_passthrough(
 
     // Request uploads remain bounded by MAX_REQUEST_BODY. Responses are streamed
     // and are not subject to the document pipeline's 32 MiB buffering limit.
-    let upstream = match builder
-        .header(header::ACCEPT_ENCODING, "identity")
-        .timeout(Duration::from_secs(AJAX_STREAM_TIMEOUT_SECONDS))
-        .body(request_body)
-        .send()
-        .await
-    {
+    let upstream = tokio::select! {
+        _ = wait_for_session_termination(session) => {
+            return plain(StatusCode::GONE, "Session terminated");
+        }
+        result = builder
+            .header(header::ACCEPT_ENCODING, "identity")
+            .timeout(Duration::from_secs(AJAX_STREAM_TIMEOUT_SECONDS))
+            .body(request_body)
+            .send() => match result {
         Ok(response) => response,
         Err(error) => {
             warn!(
@@ -1143,6 +1224,7 @@ async fn ajax_passthrough(
             ).await;
             return plain(StatusCode::BAD_GATEWAY, "AJAX upstream request failed");
         }
+    }
     };
 
     let status = upstream.status();
@@ -1204,7 +1286,13 @@ async fn ajax_passthrough(
     );
 
     let stream_url = upstream_url.to_string();
-    let body_stream = upstream.bytes_stream().map(move |chunk| {
+    let mut cancellation = session.cancel_tx.subscribe();
+    let cancelled = async move {
+        if !*cancellation.borrow_and_update() {
+            let _ = cancellation.wait_for(|cancelled| *cancelled).await;
+        }
+    };
+    let body_stream = upstream.bytes_stream().take_until(cancelled).map(move |chunk| {
         let _keep_request_slot = &request_permit;
         chunk.map_err(|error| {
             warn!(
@@ -1262,7 +1350,13 @@ async fn stream_regular_response(
     }
     let url = upstream_url.to_string();
     let stream_request_id = request_id.clone();
-    let body_stream = upstream.bytes_stream().map(move |chunk| {
+    let mut cancellation = session.cancel_tx.subscribe();
+    let cancelled = async move {
+        if !*cancellation.borrow_and_update() {
+            let _ = cancellation.wait_for(|cancelled| *cancelled).await;
+        }
+    };
+    let body_stream = upstream.bytes_stream().take_until(cancelled).map(move |chunk| {
         let _keep_request_slot = &request_permit;
         chunk.map_err(|error| {
             warn!(
@@ -1327,9 +1421,14 @@ async fn proxy(
         upstream_url.path().to_owned(),
         format!("rid={request_id} method={}", parts.method),
     ).await;
-    let body = match to_bytes(body, MAX_REQUEST_BODY).await {
-        Ok(body) => body,
-        Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "Request body exceeds the 8 MiB limit"),
+    let body = tokio::select! {
+        _ = wait_for_session_termination(&session) => {
+            return plain(StatusCode::GONE, "Session terminated");
+        }
+        result = to_bytes(body, MAX_REQUEST_BODY) => match result {
+            Ok(body) => body,
+            Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "Request body exceeds the 8 MiB limit"),
+        }
     };
 
     let accept_html = parts.headers.get(header::ACCEPT)
@@ -1346,8 +1445,10 @@ async fn proxy(
         && !ajax_request
         && is_document
         && session.bootstrap_pending.load(Ordering::Acquire);
-    if should_hold_request(&session, &parts.method, &upstream_url, bootstrap_document) {
-        wait_for_authorization(&session).await;
+    if should_hold_request(&session, &parts.method, &upstream_url, bootstrap_document)
+        && !wait_for_authorization(&session).await
+    {
+        return plain(StatusCode::GONE, "Session terminated");
     }
 
     // API/fetch/XHR responses are opaque application data: bypass the asset
@@ -1392,9 +1493,14 @@ async fn proxy(
         (cached.status, cached.headers, cached.body)
     } else {
         let upstream_started = Instant::now();
-        let client = match client_for(&session, &upstream_url).await {
-            Ok(client) => client,
-            Err((status, message)) => return plain(status, &message),
+        let client = tokio::select! {
+            _ = wait_for_session_termination(&session) => {
+                return plain(StatusCode::GONE, "Session terminated");
+            }
+            result = client_for(&session, &upstream_url) => match result {
+                Ok(client) => client,
+                Err((status, message)) => return plain(status, &message),
+            }
         };
         let method = match reqwest::Method::from_bytes(parts.method.as_str().as_bytes()) {
             Ok(method) => method,
@@ -1427,7 +1533,11 @@ async fn proxy(
         }
         builder = builder.header(header::ACCEPT_ENCODING, "identity").body(body);
 
-        let upstream = match builder.send().await {
+        let upstream = tokio::select! {
+            _ = wait_for_session_termination(&session) => {
+                return plain(StatusCode::GONE, "Session terminated");
+            }
+            result = builder.send() => match result {
             Ok(response) => response,
             Err(error) => {
                 warn!(
@@ -1439,6 +1549,7 @@ async fn proxy(
                 );
                 return plain(StatusCode::BAD_GATEWAY, "Upstream request failed");
             }
+        }
         };
 
         let status = upstream.status();
@@ -1473,7 +1584,14 @@ async fn proxy(
 
         let mut bytes = Vec::new();
         let mut stream = upstream.bytes_stream();
-        while let Some(next) = stream.next().await {
+        loop {
+            let next = tokio::select! {
+                _ = wait_for_session_termination(&session) => {
+                    return plain(StatusCode::GONE, "Session terminated");
+                }
+                next = stream.next() => next,
+            };
+            let Some(next) = next else { break };
             match next {
                 Ok(chunk) => {
                     if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BODY {
