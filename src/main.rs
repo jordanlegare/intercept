@@ -965,6 +965,7 @@ async fn ajax_passthrough(
 
     let mut response = Response::builder().status(status);
     let response_headers = response.headers_mut().expect("fresh response builder");
+    response_headers.insert("origin-agent-cluster", HeaderValue::from_static("?1"));
     for (name, value) in upstream_headers.iter() {
         if should_skip_response_header(name) {
             continue;
@@ -1044,6 +1045,7 @@ async fn stream_regular_response(
     let upstream_headers = upstream.headers().clone();
     let mut response = Response::builder().status(status);
     let headers = response.headers_mut().expect("fresh streaming response builder");
+    headers.insert("origin-agent-cluster", HeaderValue::from_static("?1"));
     for (name, value) in upstream_headers.iter() {
         if should_skip_response_header(name) {
             continue;
@@ -1403,6 +1405,7 @@ async fn proxy(
 
     let mut response = Response::builder().status(upstream_status);
     let headers = response.headers_mut().expect("fresh response builder");
+    headers.insert("origin-agent-cluster", HeaderValue::from_static("?1"));
     for (name, value) in upstream_headers.iter() {
         if should_skip_response_header(name)
             || (transformed && (
@@ -1501,9 +1504,15 @@ fn rewrite_referer(value: &HeaderValue, session: &Session) -> Option<HeaderValue
         return None;
     }
 
-    let upstream = if referer.host_str().is_some_and(|host| {
-        host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("localhost")
-    }) && referer.port() == Some(5000) {
+    let local_session_host = format!("{}.localhost", session.id);
+    let session_referer = referer.host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case(&local_session_host))
+        && referer.port() == Some(5000);
+    let legacy_session_referer = referer.host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("localhost"))
+        && referer.port() == Some(5000)
+        && referer.path().starts_with(&format!("/p/{}/", session.id));
+    let upstream = if session_referer || legacy_session_referer {
         let mut referer = referer;
         referer.set_fragment(None);
         let uri = referer.as_str().parse::<axum::http::Uri>().ok()?;
@@ -2078,6 +2087,33 @@ mod tests {
         headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
         headers.insert(header::ACCEPT, HeaderValue::from_static("text/html"));
         assert!(!is_ajax_request(&headers));
+    }
+
+    #[test]
+    fn translates_session_origin_referers_back_to_the_upstream_url() {
+        let session = Session {
+            id: "session1234567890abcdef1234567890".to_owned(),
+            base_url: Url::parse("https://example.com/start").unwrap(),
+            clients: Mutex::new(HashMap::new()),
+            cache: Mutex::new(ResourceCache::default()),
+            gate: Mutex::new(GateState::Waiting),
+            gate_tx: watch::channel(GateState::Waiting).0,
+            events: Mutex::new(VecDeque::new()),
+            policy: AuthorizationPolicy::Standard,
+            rules: Vec::new(),
+            bootstrap_pending: AtomicBool::new(false),
+            last_accessed_ms: AtomicU64::new(0),
+            start_delay_nanos: AtomicU64::new(0),
+            inflight: Arc::new(Semaphore::new(1)),
+            max_inflight: 1,
+        };
+        let referer = HeaderValue::from_str(
+            "http://session1234567890abcdef1234567890.localhost:5000/p/session1234567890abcdef1234567890/profile"
+        ).unwrap();
+        assert_eq!(
+            rewrite_referer(&referer, &session).unwrap(),
+            HeaderValue::from_static("https://example.com/profile")
+        );
     }
 
     #[test]
