@@ -524,7 +524,10 @@ async fn prune_sessions(state: &AppState) {
     let idle_limit = state.session_idle_timeout.as_millis() as u64;
     let mut sessions = state.sessions.write().await;
     let before = sessions.len();
-    sessions.retain(|_, session| now.saturating_sub(session.last_accessed_ms.load(Ordering::Relaxed)) < idle_limit);
+    sessions.retain(|_, session| {
+        now.saturating_sub(session.last_accessed_ms.load(Ordering::Relaxed)) < idle_limit
+            || session.inflight.available_permits() < session.max_inflight
+    });
     let expired = before.saturating_sub(sessions.len());
     if expired > 0 {
         info!(expired, active = sessions.len(), "Expired idle proxy sessions");
@@ -725,7 +728,8 @@ async fn session_metrics(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<SessionMetrics>, (StatusCode, String)> {
-    let session = find_session(&state, &id).await?;
+    let session = state.sessions.read().await.get(&id).cloned()
+        .ok_or((StatusCode::NOT_FOUND, "Unknown or expired session".into()))?;
     let cached_bytes = session.cache.lock().await.bytes;
     let upstream_origins = session.clients.lock().await.len();
     let last_accessed = session.last_accessed_ms.load(Ordering::Relaxed);
@@ -1118,6 +1122,9 @@ async fn proxy(
 
     let (parts, body) = request.into_parts();
     let ajax_request = is_ajax_request(&parts.headers);
+    let worker_script = parts.headers.get("sec-fetch-dest")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "worker" | "sharedworker" | "serviceworker"));
     push_event(
         &session,
         if ajax_request { "ajax_request" } else { "http_request" },
@@ -1326,6 +1333,7 @@ async fn proxy(
         let rewrite_base = upstream_url.clone();
         let rewrite_session_base = session.base_url.clone();
         let rewrite_session_id = id.clone();
+        let rewrite_worker_script = worker_script;
 
         let rewrite_result = tokio::task::spawn_blocking(move || {
             // Keep the CPU concurrency bounded to the configured worker count.
@@ -1353,12 +1361,18 @@ async fn proxy(
                 } else if rewrite_content_type.contains("javascript")
                     || rewrite_content_type.contains("ecmascript")
                 {
-                    match rewrite_javascript(text, &rewrite_base, &rewrite_session_base, &rewrite_session_id) {
+                    let result = if rewrite_worker_script {
+                        rewrite_worker_javascript(text, &rewrite_base, &rewrite_session_base, &rewrite_session_id)
+                    } else {
+                        rewrite_javascript(text, &rewrite_base, &rewrite_session_base, &rewrite_session_id)
+                    };
+                    match result {
                         Ok(rewritten) => {
                             body = rewritten.into_bytes();
                             transformed = true;
                         }
-                        Err(error) => warn!(%error, url = %rewrite_base, "JavaScript URL rewrite failed; returning original script"),
+                        Err(error) => warn!(%error, url = %rewrite_base, worker_script = rewrite_worker_script,
+                            "JavaScript URL rewrite failed; returning original script"),
                     }
                 }
             }
@@ -1799,6 +1813,61 @@ fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: 
     Ok(rewritten.into_owned())
 }
 
+fn rewrite_worker_javascript(
+    source: &str,
+    base: &Url,
+    session_base: &Url,
+    session_id: &str,
+) -> Result<String, String> {
+    let rewritten = rewrite_javascript(source, base, session_base, session_id)?;
+    let session = serde_json::to_string(session_id).map_err(|error| error.to_string())?;
+    let primary_origin = serde_json::to_string(&session_base.origin().ascii_serialization())
+        .map_err(|error| error.to_string())?;
+    let bootstrap = format!(r#"(function(){{
+      const sessionId={session};
+      const primaryOrigin={primary_origin};
+      const prefix="/p/"+encodeURIComponent(sessionId);
+      function route(value){{
+        let url;
+        try{{url=new URL(value instanceof URL?value.href:String(value),self.location.href)}}catch(_e){{return value}}
+        if(url.protocol!=="http:"&&url.protocol!=="https:")return url.href;
+        const path=url.pathname+url.search+url.hash;
+        if(url.origin===self.location.origin){{
+          if(url.pathname===prefix||url.pathname.startsWith(prefix+"/"))return url.href;
+          return prefix+path;
+        }}
+        if(url.origin===primaryOrigin)return prefix+path;
+        return prefix+"/_/"+url.protocol.slice(0,-1)+"/"+url.host+path;
+      }}
+      if(self.fetch){{
+        const nativeFetch=self.fetch.bind(self);
+        self.fetch=function(input,init){{
+          const source=input instanceof Request?input.url:input;
+          const routed=route(source);
+          let request;
+          if(input instanceof Request){{request=new Request(routed,input);if(init)request=new Request(request,init)}}
+          else request=new Request(routed,init);
+          const headers=new Headers(request.headers);
+          headers.set("X-Intercept-Proxy-Mode","ajax");
+          return nativeFetch(new Request(request,{{headers}}));
+        }};
+      }}
+      if(self.XMLHttpRequest){{
+        const proto=XMLHttpRequest.prototype;
+        const nativeOpen=proto.open;
+        const nativeSet=proto.setRequestHeader;
+        const nativeSend=proto.send;
+        proto.open=function(method,url,...rest){{return nativeOpen.call(this,method,route(url),...rest)}};
+        proto.send=function(...args){{try{{nativeSet.call(this,"X-Intercept-Proxy-Mode","ajax")}}catch(_e){{}}return nativeSend.apply(this,args)}};
+      }}
+      if(self.importScripts){{
+        const nativeImportScripts=self.importScripts.bind(self);
+        self.importScripts=(...urls)=>nativeImportScripts(...urls.map(route));
+      }}
+    }})();\n"#);
+    Ok(format!("{bootstrap}{rewritten}"))
+}
+
 fn rewrite_location(location: &str, current: &Url, session_base: &Url, session_id: &str) -> String {
     match current.join(location) {
         Ok(url) if matches!(url.scheme(), "http" | "https") => proxy_url(&url, session_base, session_id),
@@ -2064,11 +2133,11 @@ mod tests {
         let base = Url::parse("https://example.com/account/").unwrap();
         assert_eq!(
             rewrite_url(&base, &base, "session123", "../settings?tab=security"),
-            Some("/p/session123/settings?tab=security".to_owned())
+            Some("http://session123.localhost:5000/p/session123/settings?tab=security".to_owned())
         );
         assert_eq!(
             rewrite_url(&base, &base, "session123", "https://cdn.example/image.png"),
-            Some("/p/session123/_/https/cdn.example/image.png".to_owned())
+            Some("http://session123.localhost:5000/p/session123/_/https/cdn.example/image.png".to_owned())
         );
     }
 
@@ -2077,7 +2146,7 @@ mod tests {
         let target = Url::parse("https://example.com/account/settings?tab=security#sessions").unwrap();
         assert_eq!(
             local_url(&target, "session123"),
-            "/p/session123/account/settings?tab=security#sessions"
+            "http://session123.localhost:5000/p/session123/account/settings?tab=security#sessions"
         );
     }
 
@@ -2086,7 +2155,7 @@ mod tests {
         let target = Url::parse("https://example.com/?mode=compact#top").unwrap();
         assert_eq!(
             local_url(&target, "session123"),
-            "/p/session123/?mode=compact#top"
+            "http://session123.localhost:5000/p/session123/?mode=compact#top"
         );
     }
 
@@ -2150,12 +2219,27 @@ mod tests {
     }
 
     #[test]
+    fn injects_worker_fetch_and_xhr_routing_bootstrap() {
+        let base = Url::parse("https://example.com/worker.js").unwrap();
+        let output = rewrite_worker_javascript(
+            "self.onmessage = () => fetch('/api/data');",
+            &base,
+            &Url::parse("https://example.com/").unwrap(),
+            "session123",
+        ).unwrap();
+        assert!(output.contains("X-Intercept-Proxy-Mode"));
+        assert!(output.contains("XMLHttpRequest"));
+        assert!(output.contains("importScripts"));
+        assert!(output.contains("/p/"));
+    }
+
+    #[test]
     fn rewrites_external_redirects_through_the_session() {
         let current = Url::parse("https://example.com/start").unwrap();
         let primary = Url::parse("https://example.com/").unwrap();
         assert_eq!(
             rewrite_location("https://accounts.example/login", &current, &primary, "session123"),
-            "/p/session123/_/https/accounts.example/login"
+            "http://session123.localhost:5000/p/session123/_/https/accounts.example/login"
         );
     }
 
@@ -2173,7 +2257,7 @@ mod tests {
         let external = Url::parse("https://cdn.example:8443/a.js").unwrap();
         assert_eq!(
             proxy_url(&external, &primary, "session123"),
-            "/p/session123/_/https/cdn.example:8443/a.js"
+            "http://session123.localhost:5000/p/session123/_/https/cdn.example:8443/a.js"
         );
     }
 }
