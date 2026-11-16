@@ -71,7 +71,7 @@ static HTML_SCRIPT_NONCE_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid HTML script nonce regex")
 });
 static HTML_META_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?is)<meta\\b[^>]*>")
+    Regex::new(r"(?is)<meta\b[^>]*>")
         .expect("valid HTML meta tag regex")
 });
 static CSS_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
