@@ -440,11 +440,6 @@
         return;
       }
       gateState = data.state;
-      countdownDeadline = gateState === "running"
-        ? performance.now() + Math.max(0, Number(data.remaining_ms) || 0)
-        : 0;
-      renderGateState();
-      updateCountdown();
       if (gateState === "released") releaseQueuedActions();
       record("authority_status_received", "authority-frame", gateState);
     });
