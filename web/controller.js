@@ -605,14 +605,21 @@
   function isYouTubeSearchEndpoint(source) {
     try {
       const upstream = new URL(upstreamOrigin);
+      // Relative API paths belong to the upstream site, not the proxy's
+      // localhost document URL. Resolving against document.baseURI makes
+      // /youtubei/v1/search appear to be a localhost endpoint and skips
+      // the YouTube fallback entirely.
       const candidate = new URL(
         source instanceof Request ? source.url : String(source),
-        document.baseURI
+        upstream
       );
-      const upstreamHost = upstream.hostname.toLowerCase();
-      const isYouTubeHost = upstreamHost === "youtube.com"
-        || upstreamHost.endsWith(".youtube.com");
-      return isYouTubeHost && candidate.pathname === "/youtubei/v1/search";
+      const isYouTubeHost = host => {
+        const normalized = host.toLowerCase();
+        return normalized === "youtube.com" || normalized.endsWith(".youtube.com");
+      };
+      return isYouTubeHost(upstream.hostname)
+        && isYouTubeHost(candidate.hostname)
+        && candidate.pathname === "/youtubei/v1/search";
     } catch (_) {
       return false;
     }
