@@ -1750,30 +1750,37 @@ async fn ajax_passthrough(
     let upstream_elapsed_ms = request_started.elapsed().as_millis();
 
     // Preserve the upstream response stream while sampling only the first
-    // chunk of textual error responses. Google video endpoints commonly return
-    // a short XML error document for 403 responses; its Code/Message fields
-    // distinguish signature, IP, and policy failures that a status alone hides.
+    // chunk of textual error responses. Record why a preview is absent so an
+    // empty body, a read failure, and an intentionally skipped sample are
+    // distinguishable in the event stream. The sampled bytes are replayed
+    // unchanged before the remainder of the upstream stream.
     let mut error_prefix = None;
     let mut error_preview = None;
+    let mut error_sampled_bytes = 0usize;
+    let mut error_read_failed = false;
     let error_content_type = upstream_headers.get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_owned();
-    if !status.is_success()
+    let should_sample_error = !status.is_success()
         && (error_content_type.starts_with("text/")
             || error_content_type.contains("xml")
-            || error_content_type.contains("json"))
-    {
+            || error_content_type.contains("json"));
+    if should_sample_error {
         match upstream.chunk().await {
             Ok(Some(chunk)) => {
-                error_preview = Some(clean_field(
-                    String::from_utf8_lossy(&chunk[..chunk.len().min(512)]).into_owned(),
-                    240,
-                ));
+                error_sampled_bytes = chunk.len();
+                if !chunk.is_empty() {
+                    error_preview = Some(clean_field(
+                        String::from_utf8_lossy(&chunk[..chunk.len().min(512)]).into_owned(),
+                        240,
+                    ));
+                }
                 error_prefix = Some(chunk);
             }
             Ok(None) => {}
             Err(error) => {
+                error_read_failed = true;
                 debug!(
                     host = %upstream_host,
                     path = %upstream_path,
@@ -1783,6 +1790,11 @@ async fn ajax_passthrough(
             }
         }
     }
+    let error_body_state = error_body_state(
+        should_sample_error,
+        error_sampled_bytes,
+        error_read_failed,
+    );
 
     let mut response = Response::builder().status(status);
     let response_headers = response.headers_mut().expect("fresh response builder");
@@ -1826,19 +1838,22 @@ async fn ajax_passthrough(
     }
 
     let response_diagnostics = if !status.is_success() {
-        let request_id_header = upstream_headers.get("x-guploader-uploadid")
-            .and_then(|value| value.to_str().ok())
-            .map(|value| format!(" · guploader={}", clean_field(value.to_owned(), 80)))
-            .unwrap_or_default();
-        let content_type = if error_content_type.is_empty() {
-            String::new()
-        } else {
-            format!(" · type={}", clean_field(error_content_type.clone(), 80))
-        };
+        let content_type = diagnostic_header(&upstream_headers, "content-type", "type", 80);
+        let content_length = diagnostic_header(&upstream_headers, "content-length", "content_length", 24);
+        let server = diagnostic_header(&upstream_headers, "server", "server", 80);
+        let retry_after = diagnostic_header(&upstream_headers, "retry-after", "retry_after", 80);
+        let request_id_header = diagnostic_header(
+            &upstream_headers,
+            "x-guploader-uploadid",
+            "guploader",
+            80,
+        );
         let preview = error_preview
             .map(|value| format!(" · upstream={value}"))
             .unwrap_or_default();
-        format!("{content_type}{request_id_header}{preview}")
+        format!(
+            " · body_state={error_body_state} · body_bytes={error_sampled_bytes}{content_length}{server}{retry_after}{request_id_header}{content_type}{preview}"
+        )
     } else {
         String::new()
     };
@@ -3252,6 +3267,28 @@ fn clean_field(value: String, max: usize) -> String {
     value.chars().filter(|ch| !ch.is_control()).take(max).collect()
 }
 
+fn error_body_state(sampled: bool, sampled_bytes: usize, read_failed: bool) -> &'static str {
+    if !sampled {
+        "not_sampled"
+    } else if read_failed {
+        "read_error"
+    } else if sampled_bytes == 0 {
+        "empty"
+    } else {
+        "sampled"
+    }
+}
+
+fn diagnostic_header(headers: &HeaderMap, name: &str, label: &str, max: usize) -> String {
+    headers.get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| format!(
+            " · {label}={}",
+            clean_field(value.to_owned(), max)
+        ))
+        .unwrap_or_default()
+}
+
 fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3292,6 +3329,39 @@ mod tests {
             cookie_jar: Arc::new(SessionCookieJar::default()),
             cookie_tokens: StdMutex::new(HashMap::new()),
         }
+    }
+
+    #[test]
+    fn classifies_upstream_error_body_sampling_states() {
+        assert_eq!(error_body_state(false, 0, false), "not_sampled");
+        assert_eq!(error_body_state(true, 0, false), "empty");
+        assert_eq!(error_body_state(true, 12, false), "sampled");
+        assert_eq!(error_body_state(true, 0, true), "read_error");
+        assert_eq!(error_body_state(true, 12, true), "read_error");
+    }
+
+    #[test]
+    fn formats_only_present_sanitized_upstream_diagnostic_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-length", HeaderValue::from_static("0"));
+        headers.insert("server", HeaderValue::from_static("gvs  "));
+        headers.insert("retry-after", HeaderValue::from_static("5"));
+        assert_eq!(
+            diagnostic_header(&headers, "content-length", "content_length", 24),
+            " · content_length=0"
+        );
+        assert_eq!(
+            diagnostic_header(&headers, "server", "server", 80),
+            " · server=gvs  "
+        );
+        assert_eq!(
+            diagnostic_header(&headers, "retry-after", "retry_after", 80),
+            " · retry_after=5"
+        );
+        assert_eq!(
+            diagnostic_header(&headers, "x-guploader-uploadid", "guploader", 80),
+            ""
+        );
     }
 
     #[test]
