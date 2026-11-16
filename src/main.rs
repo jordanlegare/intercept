@@ -2070,14 +2070,17 @@ async fn proxy(
         let rewrite_session_base = session.base_url.clone();
         let rewrite_session_id = id.clone();
         let rewrite_cookie_seed = session.cookie_jar.document_cookie_header(&upstream_url);
-        let rewrite_cookie_token = Uuid::new_v4().simple().to_string();
-        {
+        let rewrite_cookie_token = if rewrite_content_type.contains("text/html") {
+            let token = Uuid::new_v4().simple().to_string();
             let mut tokens = session.cookie_tokens.lock().unwrap_or_else(|error| error.into_inner());
             if tokens.len() >= 512 {
                 if let Some(oldest) = tokens.keys().next().cloned() { tokens.remove(&oldest); }
             }
-            tokens.insert(rewrite_cookie_token.clone(), upstream_url.origin().ascii_serialization());
-        }
+            tokens.insert(token.clone(), upstream_url.origin().ascii_serialization());
+            token
+        } else {
+            String::new()
+        };
         let rewrite_worker_script = worker_script;
 
         let rewrite_result = tokio::task::spawn_blocking(move || {
@@ -2996,7 +2999,7 @@ fn should_skip_request_header(name: &HeaderName) -> bool {
         name.as_str(),
         "host" | "connection" | "keep-alive" | "proxy-authenticate" | "proxy-authorization"
             | "te" | "trailer" | "transfer-encoding" | "upgrade" | "content-length"
-            | "accept-encoding" | "cookie" | "x-intercept-proxy-mode"
+            | "accept-encoding" | "cookie" | "x-intercept-cookie-token" | "x-intercept-proxy-mode"
             | "x-intercept-input-id" | "x-intercept-input-target"
     )
 }
