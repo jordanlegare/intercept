@@ -2142,16 +2142,6 @@ async fn proxy(
     let worker_script = parts.headers.get("sec-fetch-dest")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "worker" | "sharedworker" | "serviceworker"));
-    push_event(
-        &session,
-        if ajax_request { "ajax_request" } else { "http_request" },
-        upstream_url.path().to_owned(),
-        format!(
-            "rid={request_id} method={}{}",
-            parts.method,
-            input_trace.as_ref().map(|trace| format!(" · {trace}")).unwrap_or_default()
-        ),
-    ).await;
     let body = tokio::select! {
         _ = wait_for_session_termination(&session) => {
             return plain(StatusCode::GONE, "Session terminated");
@@ -2161,6 +2151,25 @@ async fn proxy(
             Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "Request body exceeds the 8 MiB limit"),
         }
     };
+    let request_detail = if ajax_request {
+        format!(
+            "rid={request_id} {}{}",
+            ajax_request_diagnostics(&parts.method, &parts.headers, &body),
+            input_trace.as_ref().map(|trace| format!(" · {trace}")).unwrap_or_default()
+        )
+    } else {
+        format!(
+            "rid={request_id} method={}{}",
+            parts.method,
+            input_trace.as_ref().map(|trace| format!(" · {trace}")).unwrap_or_default()
+        )
+    };
+    push_event(
+        &session,
+        if ajax_request { "ajax_request" } else { "http_request" },
+        upstream_url.path().to_owned(),
+        request_detail,
+    ).await;
 
     let accept_html = parts.headers.get(header::ACCEPT)
         .and_then(|value| value.to_str().ok())
@@ -3316,6 +3325,63 @@ fn rewrite_csp(policy: &str, session_id: &str) -> String {
     rewritten.join("; ")
 }
 
+fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -> String {
+    let header_text = |name: &str, limit: usize| {
+        headers.get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), limit))
+            .filter(|value| !value.is_empty())
+    };
+    let host_only = |name: &str| {
+        header_text(name, 2048)
+            .and_then(|value| Url::parse(&value).ok())
+            .and_then(|url| url.host_str().map(str::to_owned))
+    };
+    let content_type = header_text("content-type", 100)
+        .map(|value| format!(" · content_type={value}"))
+        .unwrap_or_default();
+    let declared_length = header_text("content-length", 24)
+        .map(|value| format!(" · content_length_in={value}"))
+        .unwrap_or_default();
+    let origin = host_only("origin")
+        .map(|host| format!(" · origin_host={host}"))
+        .unwrap_or_else(|| " · origin_host=absent".to_owned());
+    let referer = host_only("referer")
+        .map(|host| format!(" · referer_host={host}"))
+        .unwrap_or_else(|| " · referer_host=absent".to_owned());
+    let cookie = headers.get(header::COOKIE)
+        .map(|value| format!("present({}B)", value.as_bytes().len()))
+        .unwrap_or_else(|| "absent".to_owned());
+    let json_state = match header_text("content-type", 160)
+        .map(|value| value.to_ascii_lowercase())
+        .filter(|value| value.contains("application/json") || value.contains("+json"))
+    {
+        Some(_) if serde_json::from_slice::<serde_json::Value>(body).is_ok() => "valid",
+        Some(_) => "invalid",
+        None => "not_checked",
+    };
+    let client_headers = [
+        ("yt_client_name", "x-youtube-client-name"),
+        ("yt_client_version", "x-youtube-client-version"),
+        ("yt_visitor_id", "x-goog-visitor-id"),
+    ].into_iter().map(|(label, name)| {
+        format!(
+            " · {label}={}",
+            if headers.contains_key(name) { "present" } else { "absent" }
+        )
+    }).collect::<String>();
+
+    format!(
+        "method={method} · body_bytes={} · content_length_out={}{}{}{} · cookie={cookie} · json={json_state}{client_headers}",
+        body.len(),
+        body.len(),
+        content_type,
+        declared_length,
+        origin,
+        referer,
+    )
+}
+
 fn input_event_trace(headers: &HeaderMap) -> Option<String> {
     let id = headers.get("x-intercept-input-id")
         .and_then(|value| value.to_str().ok())?;
@@ -3612,6 +3678,52 @@ mod tests {
         ] {
             assert!(!is_internal_authority_event(kind), "{kind} is meaningful activity");
         }
+    }
+
+    #[test]
+    fn ajax_request_diagnostics_reports_safe_request_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("13"));
+        headers.insert(header::ORIGIN, HeaderValue::from_static("https://www.youtube.com"));
+        headers.insert(header::REFERER, HeaderValue::from_static("https://www.youtube.com/results"));
+        headers.insert(header::COOKIE, HeaderValue::from_static("SID=secret; PREF=private"));
+        headers.insert("x-youtube-client-name", HeaderValue::from_static("1"));
+        headers.insert("x-youtube-client-version", HeaderValue::from_static("2.20261116.00.00"));
+
+        let detail = ajax_request_diagnostics(
+            &Method::POST,
+            &headers,
+            br#"{"query":"a"}"#,
+        );
+
+        assert!(detail.contains("method=POST"));
+        assert!(detail.contains("body_bytes=13"));
+        assert!(detail.contains("content_length_out=13"));
+        assert!(detail.contains("content_type=application/json"));
+        assert!(detail.contains("content_length_in=13"));
+        assert!(detail.contains("origin_host=www.youtube.com"));
+        assert!(detail.contains("referer_host=www.youtube.com"));
+        assert!(detail.contains("cookie=present("));
+        assert!(detail.contains("json=valid"));
+        assert!(detail.contains("yt_client_name=present"));
+        assert!(detail.contains("yt_client_version=present"));
+        assert!(!detail.contains("SID=secret"));
+        assert!(!detail.contains("PREF=private"));
+        assert!(!detail.contains("2.20261116.00.00"));
+    }
+
+    #[test]
+    fn ajax_request_diagnostics_marks_invalid_json_and_missing_metadata() {
+        let headers = HeaderMap::new();
+        let detail = ajax_request_diagnostics(&Method::POST, &headers, b"{broken");
+
+        assert!(detail.contains("content_length_out=7"));
+        assert!(detail.contains("origin_host=absent"));
+        assert!(detail.contains("referer_host=absent"));
+        assert!(detail.contains("cookie=absent"));
+        assert!(detail.contains("json=not_checked"));
+        assert!(detail.contains("yt_client_name=absent"));
     }
 
     #[test]
