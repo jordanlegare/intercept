@@ -4,7 +4,7 @@ Intercept is a loopback reverse proxy that loads websites through Rust, routes H
 
 ## Status
 
-This is a localhost reverse-proxy workflow, not a CONNECT/MITM proxy. A session opens at http://<session-id>.localhost:5000/p/<session-id>/.... Each session has a distinct browser origin, and its dashboard/authority controls remain on http://127.0.0.1:5000. The submitted website is the primary upstream origin; linked public HTTP/HTTPS origins are routed through origin-qualified paths beneath the same session origin.
+This is a localhost reverse-proxy workflow, not a CONNECT/MITM proxy. A session opens at http://<session-id>.localhost:5000/p/<session-id>/.... Each session has a distinct browser origin, and its dashboard/authority controls are available at http://127.0.0.1:5000 or http://localhost:5000. The submitted website is the primary upstream origin; linked public HTTP/HTTPS origins are routed through origin-qualified paths beneath the same session origin.
 
 ## Run
 
@@ -14,7 +14,7 @@ Install a recent stable Rust toolchain, then run:
     cargo test
     cargo run
 
-Open http://127.0.0.1:5000, enter the complete upstream URL (including any path and query string), and choose **Open new session tab**. Each launch creates an independent server-side session and opens it in a separate browser tab; the launcher remains open so you can start more sessions without restarting Intercept. The **Active Sessions** list shows sessions currently held by the process and lets you reopen one in another tab. The session opens the exact resource rather than resetting to the site's homepage. The session URL retains the destination path, query, and browser-side fragment. The browser sees a unique `.localhost` host for each session; the trusted authority panel is loaded in a cross-origin iframe. Allow pop-ups for `127.0.0.1:5000` so each launch can open its own tab. Select an authorization policy before opening:
+Open http://127.0.0.1:5000 or http://localhost:5000, enter the complete upstream URL (including any path and query string), and choose **Open new session tab**. Each launch creates an independent server-side session and opens it in a separate browser tab; the launcher remains open so you can start more sessions without restarting Intercept. The **Active Sessions** list shows sessions currently held by the process and lets you reopen one in another tab. The session opens the exact resource rather than resetting to the site's homepage. The session URL retains the destination path, query, and browser-side fragment. The browser sees a unique `.localhost` host for each session; the trusted authority panel is loaded in a cross-origin iframe. Allow pop-ups for the dashboard origin you use so each launch can open its own tab. Select an authorization policy before opening:
 
 1. **Standard** holds POST, PUT, PATCH, and DELETE while allowing GET, HEAD, and OPTIONS.
 2. **Strict** permits the initial document bootstrap, then holds all upstream requests until the timer starts and expires.
@@ -24,12 +24,12 @@ Open http://127.0.0.1:5000, enter the complete upstream URL (including any path 
    ```
 4. In the authority panel, enter a delay in seconds (0.000000001 to 86400; fractional values are supported) and press **[START]**. Rust owns the deadline and remains authoritative. Repeating the same Start request is idempotent; a different delay is rejected.
 
-The listener is hard-bound to 127.0.0.1:5000. It is not intended to be exposed on a LAN or the public internet.
+The server listens on the IPv4 and IPv6 loopback interfaces where available, and accepts the dashboard hostnames `127.0.0.1:5000` and `localhost:5000`. It is not intended to be exposed on a LAN or the public internet.
 
 ## Request path
 
     Browser
-      |  HTTP to 127.0.0.1:5000
+      |  HTTP to 127.0.0.1:5000 or localhost:5000
       v
     Axum loopback server
       - dashboard + session/timer API
@@ -46,7 +46,7 @@ One reqwest Client is created per upstream origin and reused. Each new origin is
 ## Authority behavior
 
 - The proxied page keeps its original layout. A fixed cross-origin authority iframe appears at the bottom with WAITING / AUTHORIZATION COUNTDOWN / AUTHORIZED, a decimal-seconds delay input, **[START]**, the countdown, a notice, an event stream, and session resource metrics.
-- The iframe is hosted on the dashboard origin, isolated from the proxied page by the browser's same-origin policy and a closed Shadow DOM host. The session origin cannot access the dashboard control API; API requests are accepted only on the dashboard Host and same-origin requests.
+- The iframe is hosted on the dashboard origin, isolated from the proxied page by the browser's same-origin policy and a closed Shadow DOM host. The session origin cannot access the dashboard control API; API requests are accepted only on either trusted dashboard hostname, with Origin required to match the corresponding hostname.
 - Authority status, event polling, and event uploads have full-response deadlines and in-flight guards. The countdown advances locally between server status responses; Rust's monotonic timer remains authoritative. Start retries using the same delay are idempotent.
 - The controller observes pointer, click, change, input, and keydown activity; reports selected event-listener registrations; and records fetch, XHR, sendBeacon, and proxied HTTP request metadata. It does not record input values or request bodies.
 - While authorization is pending, ordinary anchor navigation and form submission are held in a bounded browser queue (50 actions) and replayed when the Rust timer releases the session. The Rust gate independently enforces Standard, Strict, or Custom policy for every routed upstream request.
@@ -77,7 +77,7 @@ The rewrites/ directory contains the authority-banner stylesheet and the extensi
 
 ## Configuration
 
-The default listener is intentionally fixed to 127.0.0.1:5000. Restarting the process clears sessions and timers. Logs use the RUST_LOG environment variable (default: intercept=info) and include per-request correlation IDs.
+The server remains loopback-only and accepts both `127.0.0.1:5000` and `localhost:5000`. Restarting the process clears sessions and timers. Logs use the RUST_LOG environment variable (default: intercept=info) and include per-request correlation IDs.
 
 Resource-limit environment variables:
 
