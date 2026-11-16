@@ -1635,11 +1635,15 @@ async fn ajax_passthrough(
 
     let status = upstream.status();
     let upstream_headers = upstream.headers().clone();
+    let upstream_set_cookie = upstream_headers.contains_key(header::SET_COOKIE);
     let upstream_elapsed_ms = request_started.elapsed().as_millis();
 
     let mut response = Response::builder().status(status);
     let response_headers = response.headers_mut().expect("fresh response builder");
     response_headers.insert("origin-agent-cluster", HeaderValue::from_static("?1"));
+    if upstream_set_cookie {
+        response_headers.insert("x-intercept-cookie-updated", HeaderValue::from_static("1"));
+    }
     for (name, value) in upstream_headers.iter() {
         if should_skip_response_header(name) {
             continue;
@@ -2999,7 +3003,7 @@ fn should_skip_request_header(name: &HeaderName) -> bool {
         name.as_str(),
         "host" | "connection" | "keep-alive" | "proxy-authenticate" | "proxy-authorization"
             | "te" | "trailer" | "transfer-encoding" | "upgrade" | "content-length"
-            | "accept-encoding" | "cookie" | "x-intercept-cookie-token" | "x-intercept-proxy-mode"
+            | "accept-encoding" | "cookie" | "x-intercept-cookie-token" | "x-intercept-cookie-updated" | "x-intercept-proxy-mode"
             | "x-intercept-input-id" | "x-intercept-input-target"
     )
 }
@@ -3008,7 +3012,7 @@ fn should_skip_response_header(name: &HeaderName) -> bool {
     matches!(
         name.as_str(),
         "connection" | "keep-alive" | "proxy-authenticate" | "proxy-authorization"
-            | "te" | "trailer" | "transfer-encoding" | "upgrade" | "origin-agent-cluster" | "set-cookie"
+            | "te" | "trailer" | "transfer-encoding" | "upgrade" | "origin-agent-cluster" | "set-cookie" | "x-intercept-cookie-updated"
     )
 }
 
