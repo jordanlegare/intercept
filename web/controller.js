@@ -411,22 +411,24 @@
     }
     const host = document.createElement("div");
     host.id = "intercept-ui-host";
-    host.style.cssText = "position:fixed;inset:auto 0 0;height:148px;z-index:2147483647;pointer-events:none;";
+    host.className = "intercept-ui-host";
     const root = host.attachShadow({mode: "closed"});
+    const stylesheet = document.createElement("link");
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = "/assets/intercept.css";
+    root.appendChild(stylesheet);
     const frame = document.createElement("iframe");
+    frame.className = "intercept-authority-frame";
     frame.title = "Intercept authority controls";
     frame.src = "http://127.0.0.1:5000/authority/" + encodeURIComponent(sessionId);
     frame.setAttribute("sandbox", "allow-scripts allow-same-origin");
     authorityFrame = frame;
     frame.referrerPolicy = "no-referrer";
-    frame.style.cssText = "display:block;width:100%;height:148px;border:0;pointer-events:auto;background:#080e16;";
     root.appendChild(frame);
     placeholder.remove();
-    const oldStylesheet = document.querySelector('link[href="/assets/intercept.css"]');
-    if (oldStylesheet) oldStylesheet.remove();
     document.body.appendChild(host);
-    document.documentElement.style.setProperty("scroll-padding-bottom", "158px", "important");
-    document.body.style.setProperty("padding-bottom", "148px", "important");
+    document.documentElement.classList.add("intercept-session-page");
+    document.body.classList.add("intercept-session-page");
     nativeAdd.call(window, "message", event => {
       const data = event.data;
       if (event.origin !== "http://127.0.0.1:5000"
