@@ -492,7 +492,7 @@
       // Critical positioning is applied directly as a fallback if the page's
       // Content-Security-Policy or stylesheet loading prevents the CSS asset.
       toolbarHost.style.setProperty("position", "fixed", "important");
-      toolbarHost.style.setProperty("inset", "auto 0 0", "important");
+      toolbarHost.style.setProperty("inset", "0 0 auto", "important");
       toolbarHost.style.setProperty("display", "block", "important");
       toolbarHost.style.setProperty("height", "148px", "important");
       toolbarHost.style.setProperty("z-index", "2147483647", "important");
