@@ -498,9 +498,11 @@ async fn proxy(
     };
     let cache_hit = cached.is_some();
 
+    let mut upstream_elapsed_ms = 0u128;
     let (upstream_status, upstream_headers, mut response_body) = if let Some(cached) = cached {
         (cached.status, cached.headers, cached.body)
     } else {
+        let upstream_started = Instant::now();
         let client = match client_for(&session, &upstream_url).await {
             Ok(client) => client,
             Err((status, message)) => return plain(status, &message),
@@ -578,6 +580,7 @@ async fn proxy(
                 }
             }
         }
+        upstream_elapsed_ms = upstream_started.elapsed().as_millis();
 
         if let Some(key) = cache_key.as_deref() {
             if !bypass_cache {
@@ -587,6 +590,7 @@ async fn proxy(
         (status, headers, bytes)
     };
 
+    let rewrite_started = Instant::now();
     let content_type = upstream_headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -625,6 +629,7 @@ async fn proxy(
             }
         }
     }
+    let rewrite_elapsed_ms = rewrite_started.elapsed().as_millis();
 
     let mut response = Response::builder().status(upstream_status);
     let headers = response.headers_mut().expect("fresh response builder");
@@ -676,6 +681,8 @@ async fn proxy(
         url = %upstream_url,
         status = %upstream_status,
         cache_hit,
+        upstream_elapsed_ms,
+        rewrite_elapsed_ms,
         response_bytes = response_body.len(),
         elapsed_ms = request_started.elapsed().as_millis(),
         "Proxy request completed"
