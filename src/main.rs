@@ -1624,12 +1624,14 @@ async fn proxy(
     } else {
         None
     };
-    let bypass_cache = parts.headers
-        .get(header::CACHE_CONTROL)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.contains("no-cache") || value.contains("no-store"));
+    // A request-level no-cache directive means fetch a fresh representation,
+    // not that the fresh response must be discarded. no-store is the directive
+    // that prohibits both lookup and storage.
+    let bypass_cache_lookup = request_requires_revalidation(&parts.headers)
+        || request_forbids_cache_storage(&parts.headers);
+    let prohibit_cache_store = request_forbids_cache_storage(&parts.headers);
 
-    let cached = if bypass_cache {
+    let cached = if bypass_cache_lookup {
         None
     } else if let Some(key) = cache_key.as_deref() {
         cache_get(&session, key).await
@@ -1768,7 +1770,7 @@ async fn proxy(
         upstream_elapsed_ms = upstream_started.elapsed().as_millis();
 
         if let Some(key) = cache_key.as_deref() {
-            if !bypass_cache {
+            if !prohibit_cache_store {
                 cache_put(&session, key, status, &headers, &bytes).await;
             }
         }
@@ -1992,17 +1994,68 @@ fn rewrite_referer(value: &HeaderValue, session: &Session) -> Option<HeaderValue
 }
 
 fn resource_cache_key(url: &Url, headers: &HeaderMap) -> String {
-    let value = |name: header::HeaderName| {
-        headers.get(name).and_then(|value| value.to_str().ok()).unwrap_or("").to_owned()
-    };
-    format!(
-        "{}\n{}\n{}\n{}\n{}",
-        url,
-        value(header::ACCEPT),
-        value(header::ACCEPT_LANGUAGE),
-        value(header::COOKIE),
-        value(header::USER_AGENT)
-    )
+    // Cache identity must cover every request header that an upstream server
+    // could name in Vary. Sort the pairs because HeaderMap iteration order is
+    // not a stable cache-key ordering across independently built requests.
+    let mut variants = headers.iter()
+        .filter(|(name, _)| !matches!(
+            name.as_str(),
+            "cache-control" | "pragma" | "if-none-match" | "if-modified-since" | "accept-encoding"
+        ))
+        .map(|(name, value)| {
+            let encoded = value.as_bytes().iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            format!("{}:{}:{}", name.as_str(), value.as_bytes().len(), encoded)
+        })
+        .collect::<Vec<_>>();
+
+    // The upstream request always uses identity encoding, regardless of the
+    // browser's advertised compression support. Represent that fixed value
+    // explicitly so Vary: Accept-Encoding is safe and does not fragment keys.
+    variants.push("accept-encoding:8:6964656e74697479".to_owned());
+    variants.sort_unstable();
+    format!("{}\n{}", url, variants.join("\n"))
+}
+
+fn cache_control_has_directive(headers: &HeaderMap, directive: &str) -> bool {
+    headers.get(header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|control| control.split(',').any(|part| {
+            part.trim().split('=').next().unwrap_or("").trim()
+                .eq_ignore_ascii_case(directive)
+        }))
+}
+
+fn request_requires_revalidation(headers: &HeaderMap) -> bool {
+    cache_control_has_directive(headers, "no-cache")
+        || headers.get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|control| control.split(',').any(|part| {
+                part.trim().split_once('=').is_some_and(|(name, value)| {
+                    name.trim().eq_ignore_ascii_case("max-age")
+                        && value.trim().trim_matches('"').trim() == "0"
+                })
+            }))
+        || headers.get(header::PRAGMA)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.split(',').any(|part| {
+                part.trim().eq_ignore_ascii_case("no-cache")
+            }))
+}
+
+fn request_forbids_cache_storage(headers: &HeaderMap) -> bool {
+    cache_control_has_directive(headers, "no-store")
+}
+
+fn vary_header_is_supported(vary: &str) -> bool {
+    if vary.trim().is_empty() {
+        return true;
+    }
+    vary.split(',').all(|field| {
+        let field = field.trim();
+        field != "*" && !field.is_empty() && HeaderName::from_bytes(field.as_bytes()).is_ok()
+    })
 }
 
 async fn cache_get(session: &Session, key: &str) -> Option<CachedResponse> {
@@ -2038,9 +2091,9 @@ async fn cache_put(
         return;
     }
     let vary = headers.get(header::VARY).and_then(|value| value.to_str().ok()).unwrap_or("");
-    if vary.trim() == "*" || vary.split(',').any(|name| {
-        !matches!(name.trim().to_ascii_lowercase().as_str(), "accept" | "accept-language" | "user-agent")
-    }) {
+    // resource_cache_key includes every incoming request header, so arbitrary
+    // valid Vary fields are isolated safely. Vary: * is never reusable.
+    if !vary_header_is_supported(vary) {
         return;
     }
 
@@ -2802,6 +2855,70 @@ mod tests {
         let mut event_headers = HeaderMap::new();
         event_headers.insert(header::ACCEPT, HeaderValue::from_static("text/event-stream"));
         assert!(is_ajax_request(&event_headers));
+    }
+
+    #[test]
+    fn cache_key_includes_varyable_request_headers_in_stable_order() {
+        let url = Url::parse("https://cdn.example/assets/image.webp").unwrap();
+        let mut first = HeaderMap::new();
+        first.insert(header::ACCEPT, HeaderValue::from_static("image/avif,image/webp"));
+        first.insert("sec-fetch-dest", HeaderValue::from_static("image"));
+        first.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip, br"));
+
+        let mut same_representation = HeaderMap::new();
+        same_representation.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        same_representation.insert("sec-fetch-dest", HeaderValue::from_static("image"));
+        same_representation.insert(header::ACCEPT, HeaderValue::from_static("image/avif,image/webp"));
+
+        // Accept-Encoding is normalized to the proxy's fixed upstream value.
+        assert_eq!(
+            resource_cache_key(&url, &first),
+            resource_cache_key(&url, &same_representation)
+        );
+
+        let mut another_variant = same_representation.clone();
+        another_variant.insert("sec-fetch-dest", HeaderValue::from_static("script"));
+        assert_ne!(
+            resource_cache_key(&url, &first),
+            resource_cache_key(&url, &another_variant)
+        );
+    }
+
+    #[test]
+    fn cache_key_ignores_request_revalidation_directives() {
+        let url = Url::parse("https://cdn.example/assets/site.css").unwrap();
+        let normal = HeaderMap::new();
+        let mut reload = HeaderMap::new();
+        reload.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        reload.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+        assert_eq!(
+            resource_cache_key(&url, &normal),
+            resource_cache_key(&url, &reload)
+        );
+    }
+
+    #[test]
+    fn request_no_cache_forces_origin_fetch_but_no_store_forbids_storage() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        assert!(request_requires_revalidation(&headers));
+        assert!(!request_forbids_cache_storage(&headers));
+
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("max-age=0"));
+        assert!(request_requires_revalidation(&headers));
+        assert!(!request_forbids_cache_storage(&headers));
+
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        assert!(request_forbids_cache_storage(&headers));
+    }
+
+    #[test]
+    fn supports_arbitrary_valid_vary_fields_but_rejects_star() {
+        assert!(vary_header_is_supported(""));
+        assert!(vary_header_is_supported("Accept-Encoding, Sec-Fetch-Dest, Origin"));
+        assert!(!vary_header_is_supported("*"));
+        assert!(!vary_header_is_supported("Accept, *"));
+        assert!(!vary_header_is_supported("not a header name"));
     }
 
     #[test]
