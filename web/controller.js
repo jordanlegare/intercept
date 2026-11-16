@@ -7,30 +7,15 @@
   if (!sessionId || !upstreamOrigin) return;
 
   const sessionPrefix = "/p/" + encodeURIComponent(sessionId);
-  const apiPrefix = "http://127.0.0.1:5000/api/sessions/" + encodeURIComponent(sessionId);
-  const api = suffix => apiPrefix + suffix;
   const rawFetch = window.fetch.bind(window);
   const nativeAdd = EventTarget.prototype.addEventListener;
   const queue = [];
   const eventBuffer = [];
-  let toolbarRoot = null;
   let authorityFrame = null;
-  const CONTROL_REQUEST_TIMEOUT_MS = 5000;
   let gateState = "waiting";
   let replaying = false;
   let lastListenerReport = 0;
-  let statusPollInFlight = false;
-  let eventPollInFlight = false;
   let eventFlushInFlight = false;
-  let startInFlight = false;
-  let countdownDeadline = 0;
-
-  const uiNode = id => toolbarRoot && toolbarRoot.querySelector("#" + id);
-  const noticeNode = () => uiNode("intercept-notice");
-  const stateNode = () => uiNode("intercept-state");
-  const countdownNode = () => uiNode("intercept-countdown");
-  const delayInput = () => uiNode("intercept-delay");
-  const startButton = () => uiNode("intercept-start");
 
   function selectorFor(node) {
     if (!(node instanceof Element)) return String(node && node.nodeName || "unknown");
@@ -51,30 +36,7 @@
     if (eventBuffer.length > 120) eventBuffer.shift();
   }
 
-  async function controlFetch(suffix, options = {}, timeoutMs = CONTROL_REQUEST_TIMEOUT_MS) {
-    const controller = new AbortController();
-    let timedOut = false;
-    const timeoutId = window.setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, timeoutMs);
-    try {
-      const response = await rawFetch(api(suffix), {...options, signal: controller.signal});
-      // Keep the watchdog active until the complete body has been consumed.
-      const body = await response.text();
-      return {
-        ok: response.ok,
-        status: response.status,
-        text: async () => body,
-        json: async () => body ? JSON.parse(body) : null
-      };
-    } catch (error) {
-      if (timedOut) throw new Error("control request timed out after " + timeoutMs + " ms");
-      throw error;
-    } finally {
-      window.clearTimeout(timeoutId);
-    }
-  }
+
 
   async function flushEvents() {
     if (!eventBuffer.length || eventFlushInFlight) return;
@@ -97,8 +59,12 @@
   }
 
   function showNotice(message) {
-    const node = noticeNode();
-    if (node) node.textContent = message;
+    if (!authorityFrame || !authorityFrame.contentWindow) return;
+    authorityFrame.contentWindow.postMessage({
+      type: "intercept:notice",
+      session_id: sessionId,
+      message: String(message).slice(0, 500)
+    }, "http://127.0.0.1:5000");
   }
 
   function routeToProxy(value) {
@@ -437,120 +403,6 @@
     const routed = routeToProxy(url);
     return nativeOpenWindow.call(this, routed || url, ...rest);
   };
-
-  function renderGateState() {
-    const status = stateNode();
-    const button = startButton();
-    const input = delayInput();
-    if (status) status.textContent = gateState === "waiting" ? "WAITING" :
-      gateState === "running" ? "AUTHORIZATION COUNTDOWN" : "AUTHORIZED";
-    if (button) button.disabled = gateState !== "waiting" || startInFlight;
-    if (input) input.disabled = gateState !== "waiting" || startInFlight;
-  }
-
-  function updateCountdown() {
-    const countdown = countdownNode();
-    if (!countdown) return;
-    if (gateState === "waiting") {
-      countdown.textContent = "NOT STARTED";
-    } else if (gateState === "released") {
-      countdown.textContent = "00:00.00";
-    } else if (!countdownDeadline) {
-      countdown.textContent = "SYNCING...";
-    } else {
-      const remaining = Math.max(0, countdownDeadline - performance.now());
-      countdown.textContent = (Math.ceil(remaining / 10) / 100).toFixed(2) + "s";
-    }
-  }
-
-  function applyStatus(data) {
-    if (!data || !["waiting", "running", "released"].includes(data.state)) {
-      throw new Error("invalid status response");
-    }
-    gateState = data.state;
-    countdownDeadline = gateState === "running"
-      ? performance.now() + Math.max(0, Number(data.remaining_ms) || 0)
-      : 0;
-    renderGateState();
-    updateCountdown();
-    if (gateState === "released") releaseQueuedActions();
-  }
-
-  async function pollStatus() {
-    if (statusPollInFlight) return;
-    statusPollInFlight = true;
-    try {
-      const response = await controlFetch("/status", {cache: "no-store"});
-      if (!response.ok) throw new Error("status " + response.status);
-      applyStatus(await response.json());
-    } catch (error) {
-      if (stateNode()) stateNode().textContent = "CONTROL LINK DEGRADED";
-      if (gateState !== "running" && countdownNode()) {
-        countdownNode().textContent = String(error.message || error).slice(0, 80);
-      }
-    } finally {
-      statusPollInFlight = false;
-    }
-  }
-
-  async function pollEvents() {
-    if (eventPollInFlight) return;
-    eventPollInFlight = true;
-    try {
-      const response = await controlFetch("/events", {cache: "no-store"});
-      if (!response.ok) throw new Error("events " + response.status);
-      const events = await response.json();
-      const summary = uiNode("intercept-events-summary");
-      const list = uiNode("intercept-events-list");
-      if (summary) summary.textContent = "EVENT STREAM · " + events.length + " retained";
-      if (list) {
-        list.textContent = events.slice(-30).reverse().map(item => {
-          const time = new Date(Number(item.at_unix_ms)).toLocaleTimeString();
-          return "[" + time + "] " + item.kind + " · " + item.detail + " · " + item.target;
-        }).join("\n") || "No events recorded yet.";
-      }
-    } catch (_) {
-      // Event history is observational; a missed refresh must not stall authority.
-    } finally {
-      eventPollInFlight = false;
-    }
-  }
-
-  async function handleStartClick(event) {
-    const button = event.target instanceof Element ? event.target.closest("#intercept-start") : null;
-    if (!button || button.disabled || startInFlight) return;
-    const seconds = Number(delayInput() && delayInput().value);
-    if (!Number.isFinite(seconds) || seconds < 0.000000001 || seconds > 86400) {
-      if (stateNode()) stateNode().textContent = "INVALID DELAY";
-      return;
-    }
-    record("start_click_received", "intercept-toolbar", "User activated START");
-    showNotice("START CLICK RECEIVED · contacting local authority…");
-    startInFlight = true;
-    renderGateState();
-    try {
-      const response = await controlFetch("/start", {
-        method: "POST",
-        headers: {"content-type": "application/json"},
-        body: JSON.stringify({delay_seconds: seconds})
-      }, 10000);
-      if (!response.ok) throw new Error(await response.text() || "Timer could not start");
-      applyStatus(await response.json());
-      record("timer_started", "intercept-toolbar", String(seconds) + " seconds");
-    } catch (error) {
-      if (stateNode()) stateNode().textContent = "START NOT CONFIRMED";
-      if (countdownNode() && gateState !== "running") {
-        countdownNode().textContent = String(error.message || error).slice(0, 80);
-      }
-      record("timer_start_error", "intercept-toolbar", String(error.message || error));
-      // The server may have accepted the start even if its response was lost.
-      // A status refresh reconciles the UI before another start is enabled.
-      pollStatus();
-    } finally {
-      startInFlight = false;
-      renderGateState();
-    }
-  }
 
   function initializeToolbar() {
     const placeholder = document.getElementById("intercept-toolbar");
