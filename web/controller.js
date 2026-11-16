@@ -27,7 +27,21 @@
     return parts.join("").slice(0, 180);
   }
 
+  // These are proxy-control-plane diagnostics, not page activity. Excluding
+  // them prevents the status poll and iframe lifecycle from filling the event
+  // stream with Intercept's own housekeeping.
+  const INTERNAL_AUTHORITY_EVENTS = new Set([
+    "authority_status_received",
+    "authority_frame_load",
+    "authority_frame_error",
+    "authority_frame_retry",
+    "authority_frame_ready",
+    "authority_host_removed",
+    "controller_loaded"
+  ]);
+
   function record(kind, target, detail) {
+    if (INTERNAL_AUTHORITY_EVENTS.has(kind)) return;
     eventBuffer.push({
       kind: String(kind).slice(0, 80),
       target: String(target || "").slice(0, 240),
