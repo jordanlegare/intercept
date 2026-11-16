@@ -22,10 +22,12 @@ jobs:
         run: cargo fmt --all
       - name: Check formatting
         run: cargo fmt --all -- --check
-      - name: Check browser controller syntax
+      - name: Check browser script syntax
         run: |
           node --check web/controller.js
           node --check web/authority.js
+          node -e 'const fs=require("node:fs"); const html=fs.readFileSync("web/index.html","utf8"); const open=html.indexOf("<script"); const start=open < 0 ? -1 : html.indexOf(">",open)+1; const end=start > 0 ? html.indexOf("</script>",start) : -1; if (start <= 0 || end < start) throw new Error("No inline dashboard script found"); fs.writeFileSync("/tmp/intercept-dashboard-inline.js",html.slice(start,end));'
+          node --check /tmp/intercept-dashboard-inline.js
       - name: Test
         run: cargo test --all-targets
       - name: Clippy

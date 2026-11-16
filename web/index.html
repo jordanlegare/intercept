@@ -25,12 +25,42 @@
     #sessions a{color:#a9dcff;text-decoration:none;overflow-wrap:anywhere}
     #sessions a:hover{text-decoration:underline}
     .session-meta{font-size:10px;color:#8ea2bc;white-space:nowrap}
-    .session-actions{display:flex;align-items:center;gap:12px}
+    .session-actions{display:flex;align-items:center;gap:9px}
+    .browse-cache{width:34px;height:32px;margin:0;padding:4px;background:#182a3b;border:1px solid #38536d;color:#9edcff;font-size:18px;line-height:1}
+    .browse-cache:hover{background:#243d56}
     .terminate-session{width:auto;margin:0;padding:7px 10px;background:#351922;border:1px solid #81404d;color:#ffc1cb;font-size:10px;letter-spacing:.08em}
     .terminate-session:hover{background:#542330}
     .terminate-session:disabled{opacity:.5;cursor:wait}
     .empty{font-size:11px;color:#8192a9}
-    @media(max-width:620px){#sessions li{align-items:flex-start;flex-direction:column;gap:6px}.sessions-heading{flex-wrap:wrap}.session-actions{width:100%;justify-content:space-between}}
+    #cache-dialog{width:min(1060px,calc(100vw - 28px));max-width:none;max-height:min(820px,calc(100vh - 28px));padding:0;border:1px solid #38506c;background:#0d141e;color:#e9eef7;box-shadow:0 28px 90px #000b}
+    #cache-dialog::backdrop{background:#03070dcc;backdrop-filter:blur(4px)}
+    .cache-window{display:flex;flex-direction:column;min-height:540px;max-height:min(820px,calc(100vh - 28px))}
+    .cache-header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 20px;border-bottom:1px solid #29384e;background:#111c2a}
+    .cache-title{font-size:14px;letter-spacing:.14em;color:#b8e7ff}
+    .cache-subtitle{font-size:10px;color:#8298b2;margin-top:5px}
+    #cache-close{width:auto;margin:0;padding:6px 11px;background:#1a2a3e;border:1px solid #34465e;color:#c7d8ea;font-size:16px}
+    .cache-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 20px;border-bottom:1px solid #29384e;font-size:11px;color:#9fb2c8}
+    #cache-summary{overflow-wrap:anywhere}
+    .cache-layout{display:grid;grid-template-columns:minmax(190px,250px) minmax(0,1fr);flex:1;min-height:0}
+    #cache-folders{overflow:auto;border-right:1px solid #29384e;padding:12px 8px;background:#0a111a}
+    .cache-folder{display:block;width:100%;margin:0;padding:8px 10px;background:transparent;border:0;color:#a9bfd6;text-align:left;font-size:11px;letter-spacing:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .cache-folder:hover,.cache-folder.active{background:#1b2d41;color:#b8e7ff}
+    .cache-main{display:flex;flex-direction:column;min-width:0;min-height:0}
+    #cache-path{padding:11px 15px;border-bottom:1px solid #29384e;color:#a9dcff;font-size:11px;overflow-wrap:anywhere}
+    #cache-files{overflow:auto;min-height:110px;max-height:250px;padding:7px 10px;border-bottom:1px solid #29384e}
+    .cache-file{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;width:100%;margin:0;padding:9px 10px;background:transparent;border:0;color:#dce8f7;text-align:left;font-size:11px;letter-spacing:0}
+    .cache-file:hover,.cache-file.active{background:#17283a}
+    .cache-file-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .cache-file-size{font-size:10px;color:#8298b2;white-space:nowrap}
+    .cache-file-meta{display:block;color:#8298b2;font-size:9px;margin-top:4px}
+    #cache-preview{display:flex;flex-direction:column;min-height:0;flex:1}
+    .cache-preview-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;border-bottom:1px solid #29384e;color:#9fb2c8;font-size:10px}
+    #cache-preview-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    #cache-download{width:auto;margin:0;padding:6px 10px;background:#1b2d41;border:1px solid #38536d;color:#cdeaff;font-size:10px}
+    #cache-preview-content{overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:14px;margin:0;color:#cbd7e5;font-size:10px;line-height:1.5;min-height:120px}
+    .cache-empty{padding:16px;color:#8298b2;font-size:11px}
+    @media(max-width:680px){.cache-layout{grid-template-columns:130px minmax(0,1fr)}.cache-window{min-height:460px}.cache-toolbar{align-items:flex-start;flex-direction:column}.cache-folder{font-size:10px;padding:8px 6px}}
+    @media(max-width:430px){.cache-layout{grid-template-columns:105px minmax(0,1fr)}.cache-header{padding:12px}.cache-toolbar{padding:9px 12px}}
   </style>
 </head>
 <body>
@@ -57,6 +87,36 @@
   </div>
   <ul id="sessions" aria-live="polite"><li class="empty">Loading active sessions…</li></ul>
 
+  <dialog id="cache-dialog" aria-labelledby="cache-dialog-title">
+    <div class="cache-window">
+      <header class="cache-header">
+        <div>
+          <div class="cache-title" id="cache-dialog-title">SESSION CACHE BROWSER</div>
+          <div class="cache-subtitle" id="cache-session-label">In-memory resource cache</div>
+        </div>
+        <button id="cache-close" type="button" aria-label="Close cache browser">×</button>
+      </header>
+      <div class="cache-toolbar">
+        <span id="cache-summary">Loading cached resources…</span>
+        <span>VOLATILE RAM · SESSION-LOCAL</span>
+      </div>
+      <div class="cache-layout">
+        <nav id="cache-folders" aria-label="Cached resource folders"></nav>
+        <section class="cache-main">
+          <div id="cache-path">/</div>
+          <div id="cache-files" aria-live="polite"><div class="cache-empty">Loading files…</div></div>
+          <section id="cache-preview">
+            <div class="cache-preview-head">
+              <span id="cache-preview-title">Select a cached file to inspect it</span>
+              <button id="cache-download" type="button" disabled>DOWNLOAD</button>
+            </div>
+            <pre id="cache-preview-content">Cached text resources appear here as plain text. Binary resources can be downloaded for inspection.</pre>
+          </section>
+        </section>
+      </div>
+    </div>
+  </dialog>
+
   <div class="rule"></div>
   <p class="small">Standard holds state-changing methods. Strict permits the first document bootstrap and then holds all upstream requests. Custom applies host/path/method rules and defaults unmatched requests to Standard. Rust enforces each policy independently for every session.</p>
   <p class="small">The browser talks HTTP to this loopback app; Rust makes verified HTTPS connections upstream. Each session has a distinct <code>session-id.localhost</code> origin, separate from the dashboard and authority API. This is not transparent interception of arbitrary HTTPS tabs and requires no browser CA.</p>
@@ -70,6 +130,191 @@
   const sessionsList = document.querySelector("#sessions");
   const sessionCount = document.querySelector("#session-count");
   const refreshButton = document.querySelector("#refresh-sessions");
+  const cacheDialog = document.querySelector("#cache-dialog");
+  const cacheClose = document.querySelector("#cache-close");
+  const cacheSummary = document.querySelector("#cache-summary");
+  const cacheSessionLabel = document.querySelector("#cache-session-label");
+  const cacheFolders = document.querySelector("#cache-folders");
+  const cachePath = document.querySelector("#cache-path");
+  const cacheFiles = document.querySelector("#cache-files");
+  const cachePreviewTitle = document.querySelector("#cache-preview-title");
+  const cachePreviewContent = document.querySelector("#cache-preview-content");
+  const cacheDownload = document.querySelector("#cache-download");
+  let activeCacheSession = null;
+  let activeCacheEntries = [];
+  let activeCacheDirectory = "";
+  let selectedCacheFile = null;
+  let selectedCacheBytes = null;
+
+  function formatBytes(bytes) {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";
+    return (bytes / (1024 * 1024)).toFixed(2) + " MiB";
+  }
+
+  function parentDirectory(path) {
+    const parts = path.split("/");
+    parts.pop();
+    return parts.join("/");
+  }
+
+  function renderCacheBrowser() {
+    cacheFolders.replaceChildren();
+    const directories = new Set([""]);
+    for (const entry of activeCacheEntries) {
+      const parts = entry.virtual_path.split("/");
+      for (let index = 1; index < parts.length; index++) {
+        directories.add(parts.slice(0, index).join("/"));
+      }
+    }
+
+    const sortedDirectories = [...directories].sort((a, b) => {
+      if (!a) return -1;
+      if (!b) return 1;
+      return a.localeCompare(b);
+    });
+    for (const directory of sortedDirectories) {
+      const depth = directory ? directory.split("/").length - 1 : 0;
+      const folder = document.createElement("button");
+      folder.type = "button";
+      folder.className = "cache-folder" + (directory === activeCacheDirectory ? " active" : "");
+      folder.style.paddingLeft = (10 + depth * 12) + "px";
+      folder.textContent = directory ? "📁 " + directory.split("/").pop() : "▣  CACHE ROOT";
+      folder.title = directory || "Cache root";
+      folder.addEventListener("click", () => {
+        activeCacheDirectory = directory;
+        selectedCacheFile = null;
+        selectedCacheBytes = null;
+        resetCachePreview();
+        renderCacheBrowser();
+      });
+      cacheFolders.append(folder);
+    }
+
+    const visibleFiles = activeCacheEntries.filter(entry =>
+      parentDirectory(entry.virtual_path) === activeCacheDirectory
+    );
+    cachePath.textContent = "/" + activeCacheDirectory;
+    cacheFiles.replaceChildren();
+    if (!visibleFiles.length) {
+      const empty = document.createElement("div");
+      empty.className = "cache-empty";
+      empty.textContent = activeCacheEntries.length
+        ? "No files in this folder."
+        : "This session has no cached files yet. Browse the site to populate the asset cache.";
+      cacheFiles.append(empty);
+      return;
+    }
+
+    for (const entry of visibleFiles) {
+      const file = document.createElement("button");
+      file.type = "button";
+      file.className = "cache-file" + (selectedCacheFile?.id === entry.id ? " active" : "");
+      const left = document.createElement("span");
+      left.className = "cache-file-name";
+      left.textContent = "▤  " + entry.file_name;
+      const right = document.createElement("span");
+      right.className = "cache-file-size";
+      right.textContent = formatBytes(entry.size_bytes);
+      const meta = document.createElement("span");
+      meta.className = "cache-file-meta";
+      meta.textContent = entry.content_type + " · HTTP " + entry.status + " · expires in " +
+        Math.max(0, Math.ceil(entry.expires_in_ms / 1000)) + "s";
+      const label = document.createElement("span");
+      label.style.gridColumn = "1 / -1";
+      label.append(meta);
+      file.append(left, right, label);
+      file.addEventListener("click", () => inspectCachedFile(entry));
+      cacheFiles.append(file);
+    }
+  }
+
+  function resetCachePreview() {
+    cachePreviewTitle.textContent = "Select a cached file to inspect it";
+    cachePreviewContent.textContent = "Cached text resources appear here as plain text. Binary resources can be downloaded for inspection.";
+    cacheDownload.disabled = true;
+    selectedCacheFile = null;
+    selectedCacheBytes = null;
+  }
+
+  async function inspectCachedFile(entry) {
+    selectedCacheFile = entry;
+    selectedCacheBytes = null;
+    cachePreviewTitle.textContent = entry.virtual_path + " · loading…";
+    cachePreviewContent.textContent = "Reading cached bytes…";
+    cacheDownload.disabled = true;
+    renderCacheBrowser();
+    try {
+      const response = await fetch(
+        "/api/sessions/" + encodeURIComponent(activeCacheSession.id) +
+        "/cache/content?file_id=" + encodeURIComponent(entry.id),
+        {cache:"no-store"}
+      );
+      if (!response.ok) throw new Error(await response.text() || "Could not read cached file");
+      selectedCacheBytes = await response.arrayBuffer();
+      cachePreviewTitle.textContent = entry.virtual_path + " · " + entry.content_type + " · " + formatBytes(entry.size_bytes);
+      const type = entry.content_type.toLowerCase();
+      const isText = type.startsWith("text/") || type.includes("javascript") ||
+        type.includes("json") || type.includes("xml") || type.includes("svg") ||
+        type.includes("yaml") || type.includes("toml");
+      if (isText) {
+        cachePreviewContent.textContent = new TextDecoder("utf-8", {fatal:false}).decode(selectedCacheBytes);
+      } else {
+        cachePreviewContent.textContent = "Binary resource (" + entry.content_type + "). " +
+          formatBytes(entry.size_bytes) + " are cached in memory. Use DOWNLOAD to inspect the original bytes.";
+      }
+      cacheDownload.disabled = false;
+      renderCacheBrowser();
+    } catch (error) {
+      cachePreviewTitle.textContent = entry.virtual_path;
+      cachePreviewContent.textContent = error.message || String(error);
+      cacheDownload.disabled = true;
+    }
+  }
+
+  function openCacheBrowser(session) {
+    activeCacheSession = session;
+    activeCacheEntries = [];
+    activeCacheDirectory = "";
+    selectedCacheFile = null;
+    selectedCacheBytes = null;
+    cacheSessionLabel.textContent = session.target_url + " · " + session.id;
+    cacheSummary.textContent = "Loading session cache…";
+    cacheFolders.replaceChildren();
+    cacheFiles.replaceChildren();
+    resetCachePreview();
+    if (!cacheDialog.open) cacheDialog.showModal();
+
+    fetch("/api/sessions/" + encodeURIComponent(session.id) + "/cache", {cache:"no-store"})
+      .then(async response => {
+        if (!response.ok) throw new Error(await response.text() || "Could not load session cache");
+        return response.json();
+      })
+      .then(data => {
+        activeCacheEntries = data.entries;
+        cacheSummary.textContent = data.entries.length + " files · " +
+          formatBytes(data.cached_bytes) + " / " + formatBytes(data.max_cache_bytes);
+        renderCacheBrowser();
+      })
+      .catch(error => {
+        cacheSummary.textContent = "Cache unavailable";
+        cacheFiles.textContent = error.message || String(error);
+      });
+  }
+
+  cacheClose.addEventListener("click", () => cacheDialog.close());
+  cacheDownload.addEventListener("click", () => {
+    if (!selectedCacheFile || !selectedCacheBytes) return;
+    const blob = new Blob([selectedCacheBytes], {type:"application/octet-stream"});
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = selectedCacheFile.file_name;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  });
 
   async function refreshSessions() {
     try {
@@ -98,6 +343,14 @@
         const meta = document.createElement("span");
         meta.className = "session-meta";
         meta.textContent = session.policy.toUpperCase() + " · " + session.state;
+        const browse = document.createElement("button");
+        browse.type = "button";
+        browse.className = "browse-cache";
+        browse.textContent = "📁";
+        browse.title = "Browse this session's in-memory cache";
+        browse.setAttribute("aria-label", "Browse cached files for " + session.target_url);
+        browse.addEventListener("click", () => openCacheBrowser(session));
+
         const terminate = document.createElement("button");
         terminate.type = "button";
         terminate.className = "terminate-session";
@@ -120,7 +373,7 @@
             message.textContent = error.message || String(error);
           }
         });
-        actions.append(meta, terminate);
+        actions.append(meta, browse, terminate);
         item.append(link, actions);
         sessionsList.append(item);
       }

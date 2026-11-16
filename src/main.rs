@@ -11,7 +11,7 @@ use std::{
 
 use axum::{
     body::{Body, to_bytes},
-    extract::{OriginalUri, Path, State},
+    extract::{OriginalUri, Path, Query, State},
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode,
         header,
@@ -129,6 +129,7 @@ struct ResourceCache {
 
 #[derive(Clone)]
 struct CachedResponse {
+    id: String,
     status: StatusCode,
     headers: HeaderMap,
     body: Vec<u8>,
@@ -176,6 +177,31 @@ struct SessionMetrics {
     active_requests: usize,
     max_inflight_requests: usize,
     last_activity_ago_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct CacheBrowserResponse {
+    session_id: String,
+    cached_bytes: usize,
+    max_cache_bytes: usize,
+    entries: Vec<CacheFileSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct CacheFileSummary {
+    id: String,
+    virtual_path: String,
+    file_name: String,
+    url: String,
+    content_type: String,
+    size_bytes: usize,
+    status: u16,
+    expires_in_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CacheContentQuery {
+    file_id: String,
 }
 
 struct ProxyRequestContext {
@@ -296,6 +322,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/status", get(session_status).options(api_preflight))
         .route("/api/sessions/{id}/events", get(get_events).post(record_events).options(api_preflight))
         .route("/api/sessions/{id}/metrics", get(session_metrics).options(api_preflight))
+        .route("/api/sessions/{id}/cache", get(session_cache_browser).options(api_preflight))
+        .route("/api/sessions/{id}/cache/content", get(session_cache_content).options(api_preflight))
         .route("/p/{id}", any(proxy))
         .route("/p/{id}/", any(proxy))
         .route("/p/{id}/{*path}", any(proxy))
@@ -975,6 +1003,117 @@ async fn session_metrics(
         max_inflight_requests: session.max_inflight,
         last_activity_ago_ms: (now_ms() as u64).saturating_sub(last_accessed),
     }))
+}
+
+async fn session_cache_browser(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<CacheBrowserResponse>, (StatusCode, String)> {
+    let session = find_session(&state, &id).await?;
+    let now = Instant::now();
+    let mut cache = session.cache.lock().await;
+
+    // Expired entries should not appear in the browser and must not count
+    // against the session's live cache budget.
+    cache.entries.retain(|_, entry| entry.expires_at > now);
+    cache.bytes = cache.entries.values().map(|entry| entry.body.len()).sum();
+
+    let mut entries = cache.entries.iter().filter_map(|(key, entry)| {
+        let url = key.split('\n').next()?;
+        let parsed = Url::parse(url).ok()?;
+        let (virtual_path, file_name) = cache_virtual_path(&parsed);
+        let content_type = entry.headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_owned();
+        Some(CacheFileSummary {
+            id: entry.id.clone(),
+            virtual_path,
+            file_name,
+            url: url.to_owned(),
+            content_type,
+            size_bytes: entry.body.len(),
+            status: entry.status.as_u16(),
+            expires_in_ms: entry.expires_at.saturating_duration_since(now).as_millis() as u64,
+        })
+    }).collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.virtual_path.cmp(&right.virtual_path)
+        .then_with(|| left.content_type.cmp(&right.content_type)));
+
+    Ok(Json(CacheBrowserResponse {
+        session_id: id,
+        cached_bytes: cache.bytes,
+        max_cache_bytes: MAX_CACHE_BYTES,
+        entries,
+    }))
+}
+
+async fn session_cache_content(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<CacheContentQuery>,
+) -> Result<Response<Body>, (StatusCode, String)> {
+    let session = find_session(&state, &id).await?;
+    let mut cache = session.cache.lock().await;
+    let key = cache.entries.iter()
+        .find(|(_, entry)| entry.id == query.file_id)
+        .map(|(key, _)| key.clone())
+        .ok_or((StatusCode::NOT_FOUND, "Cached file no longer exists or has expired".into()))?;
+
+    let expired = cache.entries.get(&key)
+        .is_some_and(|entry| entry.expires_at <= Instant::now());
+    if expired {
+        if let Some(entry) = cache.entries.remove(&key) {
+            cache.bytes = cache.bytes.saturating_sub(entry.body.len());
+        }
+        return Err((StatusCode::NOT_FOUND, "Cached file has expired".into()));
+    }
+    let entry = cache.entries.get(&key).cloned()
+        .ok_or((StatusCode::NOT_FOUND, "Cached file no longer exists".into()))?;
+    drop(cache);
+
+    // Always deliver cached bytes as an opaque download payload. In particular,
+    // never let cached HTML, SVG, or JavaScript execute on the trusted dashboard.
+    let mut response = Response::new(Body::from(entry.body));
+    *response.status_mut() = StatusCode::OK;
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    if let Some(content_type) = entry.headers.get(header::CONTENT_TYPE) {
+        if let Ok(value) = HeaderValue::from_str(content_type.to_str().unwrap_or("")) {
+            headers.insert("x-intercept-source-content-type", value);
+        }
+    }
+    Ok(response)
+}
+
+fn cache_virtual_path(url: &Url) -> (String, String) {
+    let host = url.host_str().unwrap_or("unknown");
+    let authority = match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    };
+    let root = format!("{}-{authority}", url.scheme());
+    let segments = url.path_segments()
+        .map(|segments| segments.filter(|segment| !segment.is_empty()).map(str::to_owned).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let directory_url = url.path().ends_with('/');
+    let file_name = if directory_url {
+        "index".to_owned()
+    } else {
+        segments.last().cloned().unwrap_or_else(|| "index".to_owned())
+    };
+    let parent_segments = if directory_url {
+        segments.as_slice()
+    } else {
+        &segments[..segments.len().saturating_sub(1)]
+    };
+
+    let mut components = vec![root];
+    components.extend(parent_segments.iter().cloned());
+    components.push(file_name.clone());
+    (components.join("/"), file_name)
 }
 
 async fn get_events(
@@ -1931,6 +2070,7 @@ async fn cache_put(
     }
     cache.bytes = cache.bytes.saturating_add(body.len());
     cache.entries.insert(key.to_owned(), CachedResponse {
+        id: Uuid::new_v4().simple().to_string(),
         status,
         headers: headers.clone(),
         body: body.to_vec(),
@@ -2662,6 +2802,24 @@ mod tests {
         let mut event_headers = HeaderMap::new();
         event_headers.insert(header::ACCEPT, HeaderValue::from_static("text/event-stream"));
         assert!(is_ajax_request(&event_headers));
+    }
+
+    #[test]
+    fn cache_browser_paths_group_resources_by_scheme_host_and_directory() {
+        let url = Url::parse("https://cdn.example:8443/assets/css/site.css?v=2").unwrap();
+        assert_eq!(
+            cache_virtual_path(&url),
+            ("https-cdn.example:8443/assets/css/site.css".to_owned(), "site.css".to_owned())
+        );
+    }
+
+    #[test]
+    fn cache_browser_paths_show_directory_resources_as_index_entries() {
+        let url = Url::parse("https://example.com/assets/").unwrap();
+        assert_eq!(
+            cache_virtual_path(&url),
+            ("https-example.com/assets/index".to_owned(), "index".to_owned())
+        );
     }
 
     #[test]
