@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{Arc, LazyLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -40,6 +41,8 @@ const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHE_ENTRY_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_ASSET_CACHE_SECONDS: u64 = 300;
 const UPSTREAM_TIMEOUT_SECONDS: u64 = 30;
+// Long-lived AJAX streams (notably EventSource) may remain open for hours.
+const AJAX_STREAM_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 const SHUTDOWN_GRACE_SECONDS: u64 = 5;
 
 static HTML_STYLE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -528,6 +531,162 @@ async fn wait_for_authorization(session: &Session) {
     }
 }
 
+fn is_ajax_request(headers: &HeaderMap) -> bool {
+    let value_is = |name: &str, expected: &str| {
+        headers.get(name)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+    };
+    let accepts_event_stream = headers.get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"));
+
+    value_is("x-intercept-proxy-mode", "ajax")
+        || value_is("x-requested-with", "xmlhttprequest")
+        || value_is("sec-fetch-dest", "empty")
+        || accepts_event_stream
+}
+
+async fn ajax_passthrough(
+    session: &Session,
+    upstream_url: Url,
+    request_method: Method,
+    request_headers: HeaderMap,
+    request_body: bytes::Bytes,
+    request_started: Instant,
+) -> Response<Body> {
+    let client = match client_for(session, &upstream_url).await {
+        Ok(client) => client,
+        Err((status, message)) => return plain(status, &message),
+    };
+    let method = match reqwest::Method::from_bytes(request_method.as_str().as_bytes()) {
+        Ok(method) => method,
+        Err(_) => return plain(StatusCode::METHOD_NOT_ALLOWED, "Unsupported HTTP method"),
+    };
+
+    let mut builder = client.request(method, upstream_url.clone());
+    for (name, value) in request_headers.iter() {
+        if should_skip_request_header(name) {
+            continue;
+        }
+        if name == header::ORIGIN {
+            if let Ok(origin) = HeaderValue::from_str(&session.base_url.origin().ascii_serialization()) {
+                builder = builder.header(name.clone(), origin);
+            }
+        } else if name == header::REFERER {
+            if let Some(referer) = rewrite_referer(value, session) {
+                builder = builder.header(name.clone(), referer);
+            }
+        } else if name.as_str() == "sec-fetch-site" {
+            let fetch_site = if upstream_url.origin() == session.base_url.origin() {
+                "same-origin"
+            } else {
+                "cross-site"
+            };
+            builder = builder.header(name.clone(), fetch_site);
+        } else {
+            builder = builder.header(name.clone(), value.clone());
+        }
+    }
+
+    // Request uploads remain bounded by MAX_REQUEST_BODY. Responses are streamed
+    // and are not subject to the document pipeline's 32 MiB buffering limit.
+    let upstream = match builder
+        .header(header::ACCEPT_ENCODING, "identity")
+        .timeout(Duration::from_secs(AJAX_STREAM_TIMEOUT_SECONDS))
+        .body(request_body)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            warn!(
+                error = ?error,
+                url = %upstream_url,
+                elapsed_ms = request_started.elapsed().as_millis(),
+                "AJAX upstream request failed"
+            );
+            push_event(
+                session,
+                "ajax_error",
+                upstream_url.path().to_owned(),
+                "upstream request failed".to_owned(),
+            ).await;
+            return plain(StatusCode::BAD_GATEWAY, "AJAX upstream request failed");
+        }
+    };
+
+    let status = upstream.status();
+    let upstream_headers = upstream.headers().clone();
+    let upstream_elapsed_ms = request_started.elapsed().as_millis();
+
+    let mut response = Response::builder().status(status);
+    let response_headers = response.headers_mut().expect("fresh response builder");
+    for (name, value) in upstream_headers.iter() {
+        if should_skip_response_header(name) {
+            continue;
+        }
+        if name == header::LOCATION {
+            if let Ok(location) = value.to_str() {
+                let rewritten = rewrite_location(
+                    location,
+                    &upstream_url,
+                    &session.base_url,
+                    &session.id,
+                );
+                if let Ok(value) = HeaderValue::from_str(&rewritten) {
+                    response_headers.append(name.clone(), value);
+                }
+            }
+        } else if name == header::SET_COOKIE {
+            if let Ok(cookie) = value.to_str() {
+                let rewritten = rewrite_set_cookie(
+                    cookie,
+                    &upstream_url,
+                    &session.base_url,
+                    &session.id,
+                );
+                if let Ok(value) = HeaderValue::from_str(&rewritten) {
+                    response_headers.append(name.clone(), value);
+                }
+            }
+        } else {
+            // Retain Content-Type, Content-Length, cache directives, retry hints,
+            // CORS metadata, and application-specific response headers unchanged.
+            response_headers.append(name.clone(), value.clone());
+        }
+    }
+
+    push_event(
+        session,
+        "ajax_response",
+        upstream_url.path().to_owned(),
+        format!("{} · headers in {}ms", status.as_u16(), upstream_elapsed_ms),
+    ).await;
+    debug!(
+        method = %request_method,
+        url = %upstream_url,
+        status = %status,
+        upstream_elapsed_ms,
+        streaming = true,
+        "AJAX passthrough response opened"
+    );
+
+    let stream_url = upstream_url.to_string();
+    let body_stream = upstream.bytes_stream().map(move |chunk| {
+        chunk.map_err(|error| {
+            warn!(
+                %error,
+                url = %stream_url,
+                "AJAX upstream response stream failed"
+            );
+            io::Error::other(error)
+        })
+    });
+    response.body(Body::from_stream(body_stream))
+        .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "Could not build AJAX passthrough response"))
+}
+
 async fn proxy(
     State(state): State<AppState>,
     Path(params): Path<HashMap<String, String>>,
@@ -552,9 +711,10 @@ async fn proxy(
     }
 
     let (parts, body) = request.into_parts();
+    let ajax_request = is_ajax_request(&parts.headers);
     push_event(
         &session,
-        "http_request",
+        if ajax_request { "ajax_request" } else { "http_request" },
         upstream_url.path().to_owned(),
         parts.method.as_str().to_owned(),
     ).await;
@@ -565,6 +725,20 @@ async fn proxy(
 
     if parts.method != Method::GET && parts.method != Method::HEAD && parts.method != Method::OPTIONS {
         wait_for_authorization(&session).await;
+    }
+
+    // API/fetch/XHR responses are opaque application data: bypass the asset
+    // cache and every HTML/CSS/JavaScript transformation, then stream upstream
+    // bytes directly to the browser.
+    if ajax_request {
+        return ajax_passthrough(
+            &session,
+            upstream_url,
+            parts.method,
+            parts.headers,
+            body,
+            request_started,
+        ).await;
     }
 
     let cache_key = if parts.method == Method::GET {
@@ -1237,7 +1411,7 @@ fn should_skip_request_header(name: &HeaderName) -> bool {
         name.as_str(),
         "host" | "connection" | "keep-alive" | "proxy-authenticate" | "proxy-authorization"
             | "te" | "trailer" | "transfer-encoding" | "upgrade" | "content-length"
-            | "accept-encoding" | "origin" | "referer"
+            | "accept-encoding" | "x-intercept-proxy-mode"
     )
 }
 
@@ -1321,6 +1495,39 @@ fn plain(status: StatusCode, message: &str) -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifies_fetch_metadata_ajax_requests() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
+        assert!(is_ajax_request(&headers));
+    }
+
+    #[test]
+    fn identifies_legacy_xhr_and_eventsource_requests() {
+        let mut xhr_headers = HeaderMap::new();
+        xhr_headers.insert("x-requested-with", HeaderValue::from_static("XMLHttpRequest"));
+        assert!(is_ajax_request(&xhr_headers));
+
+        let mut event_headers = HeaderMap::new();
+        event_headers.insert(header::ACCEPT, HeaderValue::from_static("text/event-stream"));
+        assert!(is_ajax_request(&event_headers));
+    }
+
+    #[test]
+    fn does_not_classify_document_navigation_as_ajax() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-fetch-dest", HeaderValue::from_static("document"));
+        headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
+        headers.insert(header::ACCEPT, HeaderValue::from_static("text/html"));
+        assert!(!is_ajax_request(&headers));
+    }
+
+    #[test]
+    fn forwards_origin_and_referer_for_upstream_translation() {
+        assert!(!should_skip_request_header(&header::ORIGIN));
+        assert!(!should_skip_request_header(&header::REFERER));
+    }
 
     #[test]
     fn accepts_fractional_timer_delays() {
