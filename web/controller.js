@@ -633,9 +633,6 @@
     }
   }
 
-  function isYouTubeSearchEndpoint(source) {
-    return youtubeSearchEndpointCheck(source).endpointMatch;
-  }
 
   function buildYouTubeSearchFallbackBody() {
     let context = null;
