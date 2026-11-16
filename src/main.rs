@@ -1768,13 +1768,13 @@ fn rewrite_html(
 
     let id_for_head = session_id.to_owned();
     let primary_origin = session_base.origin().ascii_serialization();
+    let controller_nonce = HTML_SCRIPT_NONCE_RE.captures(&html_with_styles_and_scripts).and_then(|captures| {
+        captures.get(1).or_else(|| captures.get(2)).map(|value| escape_html_attribute(value.as_str()))
+    });
     settings = settings.append_element_content_handler(element!("head", move |el| {
-        let nonce = el.get_attribute("nonce").unwrap_or_default();
-        let nonce_attr = if nonce.is_empty() {
-            String::new()
-        } else {
-            format!(r#" nonce="{}""#, escape_html_attribute(&nonce))
-        };
+        let nonce_attr = controller_nonce.as_ref()
+            .map(|nonce| format!(r#" nonce="{nonce}""#))
+            .unwrap_or_default();
         let head = format!(
             r#"<script data-intercept-controller="true" src="/assets/controller.js" data-session="{id_for_head}" data-upstream-origin="{primary_origin}"{nonce_attr}></script><link data-intercept-styles="true" rel="stylesheet" href="/assets/intercept.css">"#
         );
@@ -2494,6 +2494,24 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn rewrites_meta_csp_and_removes_strict_dynamic_for_the_session_controller() {
+        let base = Url::parse("https://example.com/").unwrap();
+        let html = r#"<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="script-src 'nonce-abc' 'strict-dynamic' https://cdn.example; default-src 'self'"></head><body></body></html>"#;
+        let result = rewrite_html(html, &base, &base, "session123").unwrap();
+        assert!(result.contains("script-src 'nonce-abc'"));
+        assert!(!result.contains("'strict-dynamic'"));
+        assert!(result.contains("http://session123.localhost:5000"));
+    }
+
+    #[test]
+    fn csp_rewrite_preserves_nonce_policy_without_strict_dynamic() {
+        let output = rewrite_csp("script-src 'nonce-abc' 'strict-dynamic' https://cdn.example", "session123");
+        assert!(output.contains("'nonce-abc'"));
+        assert!(!output.contains("'strict-dynamic'"));
+        assert!(output.contains("http://session123.localhost:5000"));
+    }
+
     fn rewrites_external_origins_in_csp_to_local_proxy_origin() {
         let policy = "default-src 'self' https://cdn.example; img-src https://images.example";
         let output = rewrite_csp(policy, "session1234567890abcdef1234567890");
