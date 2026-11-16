@@ -2000,7 +2000,7 @@ fn resource_cache_key(url: &Url, headers: &HeaderMap) -> String {
     let mut variants = headers.iter()
         .filter(|(name, _)| !matches!(
             name.as_str(),
-            "cache-control" | "pragma" | "if-none-match" | "if-modified-since"
+            "cache-control" | "pragma" | "if-none-match" | "if-modified-since" | "accept-encoding"
         ))
         .map(|(name, value)| {
             let encoded = value.as_bytes().iter()
@@ -2032,9 +2032,10 @@ fn request_requires_revalidation(headers: &HeaderMap) -> bool {
         || headers.get(header::CACHE_CONTROL)
             .and_then(|value| value.to_str().ok())
             .is_some_and(|control| control.split(',').any(|part| {
-                part.trim().strip_prefix("max-age=")
-                    .or_else(|| part.trim().strip_prefix("Max-Age="))
-                    .is_some_and(|value| value.trim_matches('"').trim() == "0")
+                part.trim().split_once('=').is_some_and(|(name, value)| {
+                    name.trim().eq_ignore_ascii_case("max-age")
+                        && value.trim().trim_matches('"').trim() == "0"
+                })
             }))
         || headers.get(header::PRAGMA)
             .and_then(|value| value.to_str().ok())
