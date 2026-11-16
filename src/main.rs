@@ -3344,12 +3344,12 @@ fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -
         .map(|value| format!(" · content_length_in={value}"))
         .unwrap_or_default();
     let origin = host_only("origin")
-        .map(|host| format!(" · origin_host={host}"))
-        .unwrap_or_else(|| " · origin_host=absent".to_owned());
+        .map(|host| format!(" · origin_host_in={host}"))
+        .unwrap_or_else(|| " · origin_host_in=absent".to_owned());
     let referer = host_only("referer")
-        .map(|host| format!(" · referer_host={host}"))
-        .unwrap_or_else(|| " · referer_host=absent".to_owned());
-    let cookie = headers.get(header::COOKIE)
+        .map(|host| format!(" · referer_host_in={host}"))
+        .unwrap_or_else(|| " · referer_host_in=absent".to_owned());
+    let cookie_header_in = headers.get(header::COOKIE)
         .map(|value| format!("present({}B)", value.as_bytes().len()))
         .unwrap_or_else(|| "absent".to_owned());
     let json_state = match header_text("content-type", 160)
@@ -3372,7 +3372,7 @@ fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -
     }).collect::<String>();
 
     format!(
-        "method={method} · body_bytes={} · content_length_out={}{}{}{} · cookie={cookie} · json={json_state}{client_headers}",
+        "method={method} · body_bytes={} · content_length_out={}{}{}{} · cookie_header_in={cookie_header_in} · json={json_state}{client_headers}",
         body.len(),
         body.len(),
         content_type,
@@ -3702,9 +3702,9 @@ mod tests {
         assert!(detail.contains("content_length_out=13"));
         assert!(detail.contains("content_type=application/json"));
         assert!(detail.contains("content_length_in=13"));
-        assert!(detail.contains("origin_host=www.youtube.com"));
-        assert!(detail.contains("referer_host=www.youtube.com"));
-        assert!(detail.contains("cookie=present("));
+        assert!(detail.contains("origin_host_in=www.youtube.com"));
+        assert!(detail.contains("referer_host_in=www.youtube.com"));
+        assert!(detail.contains("cookie_header_in=present("));
         assert!(detail.contains("json=valid"));
         assert!(detail.contains("yt_client_name=present"));
         assert!(detail.contains("yt_client_version=present"));
@@ -3722,7 +3722,7 @@ mod tests {
         assert!(detail.contains("content_length_out=7"));
         assert!(detail.contains("origin_host=absent"));
         assert!(detail.contains("referer_host=absent"));
-        assert!(detail.contains("cookie=absent"));
+        assert!(detail.contains("cookie_header_in=absent"));
         assert!(detail.contains("json=invalid"));
         assert!(detail.contains("yt_client_name=absent"));
     }
