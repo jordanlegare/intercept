@@ -349,8 +349,9 @@
   }
 
   function setInterceptAttribute(element, name, value) {
-    const isScriptSource = element instanceof window.HTMLScriptElement
-      && String(name).toLowerCase() === "src";
+    const isScriptSource = Boolean(window.HTMLScriptElement
+      && element instanceof window.HTMLScriptElement
+      && String(name).toLowerCase() === "src");
     const sinkValue = isScriptSource ? trustedScriptUrl(value) : value;
     return nativeSetAttribute.call(element, name, sinkValue);
   }
@@ -386,7 +387,8 @@
       ...descriptor,
       set(value) {
         const routed = routeToProxy(value) || value;
-        const sinkValue = proto === window.HTMLScriptElement.prototype && property === "src"
+        const sinkValue = window.HTMLScriptElement
+          && proto === window.HTMLScriptElement.prototype && property === "src"
           ? trustedScriptUrl(sinkValueString(routed))
           : routed;
         return descriptor.set.call(this, sinkValue);
