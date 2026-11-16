@@ -570,8 +570,8 @@ async fn cookie_bridge_get(
 ) -> Result<Json<CookieBridgeResponse>, (StatusCode, String)> {
     let id = session_id_from_host(&headers)?;
     let session = find_session(&state, &id).await?;
-    let upstream_url = cookie_bridge_target(&input.target, &session)?;
-    authorize_cookie_bridge_origin(&session, &headers, &upstream_url)?;
+    let capability_origin = cookie_bridge_capability_origin(&session, &headers)?;
+    let upstream_url = cookie_bridge_target(&input.target, &session, &capability_origin)?;
     Ok(Json(CookieBridgeResponse {
         cookie: session.cookie_jar.document_cookie_header(&upstream_url),
     }))
@@ -584,8 +584,8 @@ async fn cookie_bridge_set(
 ) -> Result<Json<CookieBridgeResponse>, (StatusCode, String)> {
     let id = session_id_from_host(&headers)?;
     let session = find_session(&state, &id).await?;
-    let upstream_url = cookie_bridge_target(&input.target, &session)?;
-    authorize_cookie_bridge_origin(&session, &headers, &upstream_url)?;
+    let capability_origin = cookie_bridge_capability_origin(&session, &headers)?;
+    let upstream_url = cookie_bridge_target(&input.target, &session, &capability_origin)?;
     session.cookie_jar.set_document_cookie(&input.cookie, &upstream_url)
         .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
     Ok(Json(CookieBridgeResponse {
@@ -603,11 +603,10 @@ fn session_id_from_host(headers: &HeaderMap) -> Result<String, (StatusCode, Stri
     Ok(id.to_owned())
 }
 
-fn authorize_cookie_bridge_origin(
+fn cookie_bridge_capability_origin(
     session: &Session,
     headers: &HeaderMap,
-    target: &Url,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<Url, (StatusCode, String)> {
     let token = headers.get("x-intercept-cookie-token")
         .and_then(|value| value.to_str().ok())
         .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -617,20 +616,55 @@ fn authorize_cookie_bridge_origin(
         .get(token)
         .cloned()
         .ok_or((StatusCode::FORBIDDEN, "Cookie bridge capability has expired".into()))?;
-    if target.origin().ascii_serialization() != allowed_origin {
-        return Err((StatusCode::FORBIDDEN, "A document may only access cookies for its own upstream origin".into()));
+    let origin = Url::parse(&allowed_origin)
+        .map_err(|_| (StatusCode::FORBIDDEN, "Cookie bridge capability contains an invalid origin".into()))?;
+    if !matches!(origin.scheme(), "http" | "https")
+        || origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+        || !is_public_destination(&origin)
+    {
+        return Err((StatusCode::FORBIDDEN, "Cookie bridge capability contains an invalid upstream origin".into()));
     }
-    Ok(())
+    Ok(origin)
 }
 
-fn cookie_bridge_target(target: &str, session: &Session) -> Result<Url, (StatusCode, String)> {
+fn cookie_bridge_target(
+    target: &str,
+    session: &Session,
+    capability_origin: &Url,
+) -> Result<Url, (StatusCode, String)> {
     if target.len() > 8192 || !target.starts_with('/') || target.starts_with("//") {
         return Err((StatusCode::BAD_REQUEST, "Cookie bridge target must be a local session path".into()));
     }
     let uri = target.parse::<axum::http::Uri>()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid cookie bridge target path".into()))?;
-    let upstream_url = upstream_url_for_request(&uri, session)
-        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+
+    // Secondary origins are represented by an explicit /_/https/{host}/...
+    // route. Resolve those through the normal proxy parser and require that
+    // the document capability names that exact origin.
+    let session_prefix = format!("/p/{}", session.id);
+    let routed_path = uri.path().strip_prefix(&session_prefix).unwrap_or(uri.path());
+    let is_encoded_origin = routed_path == "/_" || routed_path.starts_with("/_/");
+    let mut upstream_url = if is_encoded_origin {
+        let resolved = upstream_url_for_request(&uri, session)
+            .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+        if resolved.origin() != capability_origin.origin() {
+            return Err((StatusCode::FORBIDDEN, "A document may only access cookies for its own upstream origin".into()));
+        }
+        resolved
+    } else {
+        // Root-relative paths belong to the origin that issued this document's
+        // token, not necessarily the session's original URL host. This matters
+        // after redirects or canonical-host changes (for example youtube.com
+        // to www.youtube.com).
+        let mut resolved = capability_origin.clone();
+        resolved.set_path(uri.path());
+        resolved.set_query(uri.query());
+        resolved
+    };
+
+    upstream_url.set_fragment(None);
     if !is_public_destination(&upstream_url) {
         return Err((StatusCode::FORBIDDEN, "Cookie bridge target is not a public upstream URL".into()));
     }
@@ -3549,14 +3583,49 @@ mod tests {
     }
 
     #[test]
-    fn cookie_bridge_capability_is_bound_to_its_upstream_origin() {
+    fn cookie_bridge_root_paths_use_the_document_capability_origin_after_redirects() {
+        let session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        let token = "0123456789abcdef0123456789abcdef";
+        session.cookie_tokens.lock().unwrap().insert(token.to_owned(), "https://www.youtube.com".to_owned());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-intercept-cookie-token", HeaderValue::from_static(token));
+
+        let capability_origin = cookie_bridge_capability_origin(&session, &headers).unwrap();
+        let target = cookie_bridge_target("/results?search_query=infected+mushroom", &session, &capability_origin).unwrap();
+
+        assert_eq!(target.as_str(), "https://www.youtube.com/results?search_query=infected+mushroom");
+        assert_ne!(target.origin(), session.base_url.origin());
+    }
+
+    #[test]
+    fn cookie_bridge_encoded_secondary_origin_must_match_document_capability() {
+        let session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        let token = "0123456789abcdef0123456789abcdef";
+        session.cookie_tokens.lock().unwrap().insert(token.to_owned(), "https://www.youtube.com".to_owned());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-intercept-cookie-token", HeaderValue::from_static(token));
+        let capability_origin = cookie_bridge_capability_origin(&session, &headers).unwrap();
+
+        let allowed = format!("/p/{}/_/https/www.youtube.com/youtubei/v1/search", session.id);
+        let allowed_url = cookie_bridge_target(&allowed, &session, &capability_origin).unwrap();
+        assert_eq!(allowed_url.origin(), capability_origin.origin());
+
+        let denied = format!("/p/{}/_/https/attacker.example/private", session.id);
+        assert!(cookie_bridge_target(&denied, &session, &capability_origin).is_err());
+    }
+
+    #[test]
+    fn cookie_bridge_capability_is_required_and_bound_to_a_registered_origin() {
         let session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
         let token = "0123456789abcdef0123456789abcdef";
         session.cookie_tokens.lock().unwrap().insert(token.to_owned(), "https://example.com".to_owned());
         let mut headers = HeaderMap::new();
         headers.insert("x-intercept-cookie-token", HeaderValue::from_static(token));
-        assert!(authorize_cookie_bridge_origin(&session, &headers, &Url::parse("https://example.com/consent").unwrap()).is_ok());
-        assert!(authorize_cookie_bridge_origin(&session, &headers, &Url::parse("https://other.example/consent").unwrap()).is_err());
+        let origin = cookie_bridge_capability_origin(&session, &headers).unwrap();
+        assert_eq!(origin.origin().ascii_serialization(), "https://example.com");
+
+        headers.insert("x-intercept-cookie-token", HeaderValue::from_static("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert!(cookie_bridge_capability_origin(&session, &headers).is_err());
     }
 
     #[test]
