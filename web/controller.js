@@ -17,13 +17,16 @@
   let lastListenerReport = 0;
   let eventFlushInFlight = false;
 
-  const nativeLocalStorage = window.localStorage;
-  const nativeSessionStorage = window.sessionStorage;
+  let nativeLocalStorage = null;
+  let nativeSessionStorage = null;
+  try { nativeLocalStorage = window.localStorage; } catch (_) {}
+  try { nativeSessionStorage = window.sessionStorage; } catch (_) {}
   const cookieEndpoint = location.origin + "/_intercept/cookies";
   const cookieToken = String(script.dataset.cookieToken || "");
   script.removeAttribute("data-cookie-token");
   let cookieMirror = String(script.dataset.cookieSeed || "");
   let cookieWriteQueue = Promise.resolve();
+  let cookieWritesPending = 0;
 
   function scopedStorage(nativeStorage, kind) {
     const prefix = "__intercept_v1__:" + kind + ":" + encodeURIComponent(upstreamOrigin) + ":";
@@ -35,6 +38,20 @@
       }
       return keys;
     };
+    const bridgedStorageEvents = new WeakSet();
+    nativeAdd.call(window, "storage", event => {
+      if (bridgedStorageEvents.has(event) || event.storageArea !== nativeStorage) return;
+      event.stopImmediatePropagation();
+      if (!event.key || !event.key.startsWith(prefix)) return;
+      const scopedEvent = new StorageEvent("storage", {
+        key: event.key.slice(prefix.length),
+        oldValue: event.oldValue,
+        newValue: event.newValue,
+        url: event.url
+      });
+      bridgedStorageEvents.add(scopedEvent);
+      window.dispatchEvent(scopedEvent);
+    }, true);
     const target = Object.create(window.Storage ? window.Storage.prototype : Object.prototype);
     Object.defineProperties(target, {
       length: {configurable: true, enumerable: true, get: () => scopedKeys().length},
@@ -83,14 +100,18 @@
   }
 
   try {
-    Object.defineProperty(window, "localStorage", {
-      configurable: true,
-      value: scopedStorage(nativeLocalStorage, "local")
-    });
-    Object.defineProperty(window, "sessionStorage", {
-      configurable: true,
-      value: scopedStorage(nativeSessionStorage, "session")
-    });
+    if (nativeLocalStorage) {
+      Object.defineProperty(window, "localStorage", {
+        configurable: true,
+        value: scopedStorage(nativeLocalStorage, "local")
+      });
+    }
+    if (nativeSessionStorage) {
+      Object.defineProperty(window, "sessionStorage", {
+        configurable: true,
+        value: scopedStorage(nativeSessionStorage, "session")
+      });
+    }
   } catch (error) {
     recordStorageShimFailure(error);
   }
@@ -111,6 +132,7 @@
   }
 
   function queueCookieWrite(assignment) {
+    cookieWritesPending++;
     const body = JSON.stringify({target: location.pathname + location.search, cookie: String(assignment)});
     cookieWriteQueue = cookieWriteQueue.then(() => rawFetch(cookieEndpoint, {
       method: "POST",
@@ -126,16 +148,18 @@
     }).catch(error => {
       record("cookie_bridge_error", location.pathname, String(error && error.message || error));
       refreshCookieMirror();
+    }).finally(() => {
+      cookieWritesPending = Math.max(0, cookieWritesPending - 1);
     });
   }
 
   function refreshCookieMirror() {
     const target = encodeURIComponent(location.pathname + location.search);
-    rawFetch(cookieEndpoint + "?target=" + target, {
+    cookieWriteQueue.then(() => rawFetch(cookieEndpoint + "?target=" + target, {
       headers: {"X-Intercept-Cookie-Token": cookieToken},
       credentials: "same-origin",
       cache: "no-store"
-    }).then(response => {
+    })).then(response => {
       if (!response.ok) throw new Error("Cookie bridge refresh returned HTTP " + response.status);
       return response.json();
     }).then(data => {
@@ -466,7 +490,7 @@
   }
 
   nativeAdd.call(document, "click", event => {
-    if (gateState === "released" || replaying) return;
+    if ((gateState === "released" && cookieWritesPending === 0) || replaying) return;
     const anchor = event.target instanceof Element ? event.target.closest("a[href],area[href]") : null;
     if (!anchor) return;
     const href = anchor.href;
@@ -478,12 +502,15 @@
       record("navigation_blocked", selectorFor(anchor), href);
       return;
     }
-    queueAction(() => location.assign(routedHref), routedHref);
+    const navigate = () => location.assign(routedHref);
+    if (gateState === "released") Promise.resolve().then(() => cookieWriteQueue).then(navigate);
+    else queueAction(navigate, routedHref);
   }, true);
 
   nativeAdd.call(document, "submit", event => {
     const form = event.target;
-    if (!(form instanceof HTMLFormElement) || gateState === "released" || replaying) return;
+    if (!(form instanceof HTMLFormElement) || replaying
+        || (gateState === "released" && cookieWritesPending === 0)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     const routedAction = routeToProxy(form.action);
@@ -493,7 +520,7 @@
       return;
     }
     const submitter = event.submitter;
-    queueAction(() => {
+    const replaySubmit = () => {
       replaying = true;
       try {
         form.action = routedAction;
@@ -504,7 +531,9 @@
       } finally {
         window.setTimeout(() => { replaying = false; }, 0);
       }
-    }, form.method.toUpperCase() + " " + form.action);
+    };
+    if (gateState === "released") cookieWriteQueue.then(replaySubmit);
+    else queueAction(replaySubmit, form.method.toUpperCase() + " " + form.action);
   }, true);
 
   const nativeFetch = window.fetch.bind(window);
