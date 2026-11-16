@@ -558,7 +558,10 @@
       const inputContext = addInputCorrelation(headers);
       const markedRequest = new Request(routedRequest, {headers});
       record("ajax_routed", routed, method + inputCorrelationDetail(inputContext));
-      return cookieWriteQueue.then(() => nativeFetch(markedRequest));
+      return cookieWriteQueue.then(() => nativeFetch(markedRequest)).then(response => {
+        if (response.headers.get("X-Intercept-Cookie-Updated") === "1") refreshCookieMirror();
+        return response;
+      });
     } catch (error) {
       record("ajax_route_error", String(source), String(error && error.message || error));
       return Promise.reject(error);
@@ -578,6 +581,11 @@
   XMLHttpRequest.prototype.send = function(...args) {
     const meta = xhrMeta.get(this);
     if (meta) {
+      nativeAdd.call(this, "loadend", () => {
+        try {
+          if (this.getResponseHeader("X-Intercept-Cookie-Updated") === "1") refreshCookieMirror();
+        } catch (_) {}
+      });
       const inputContext = currentInputEvent();
       try {
         // Add internal metadata last, after page code has configured headers.
