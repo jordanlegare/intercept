@@ -35,7 +35,7 @@ The server listens on the IPv4 and IPv6 loopback interfaces where available, and
       - dashboard + session/timer API
       - multi-origin URL routing and response rewriting
       - bounded per-session static-resource cache
-      - minimal top authority banner
+      - minimal bottom authority banner
       - per-session authorization gate
               |  HTTP or verified HTTPS (rustls)
               v
@@ -45,7 +45,7 @@ One reqwest Client is created per upstream origin and reused. Each new origin is
 
 ## Authority behavior
 
-- The proxied page keeps its original layout. A fixed cross-origin authority iframe appears at the top with WAITING / AUTHORIZATION COUNTDOWN / AUTHORIZED, a decimal-seconds delay input, **[START]**, the countdown, a notice, an event stream, and session resource metrics.
+- The proxied page keeps its original layout. A fixed cross-origin authority iframe appears at the bottom with WAITING / AUTHORIZATION COUNTDOWN / AUTHORIZED, a decimal-seconds delay input, **[START]**, the countdown, a notice, an event stream, and session resource metrics.
 - The iframe is hosted on the dashboard origin, isolated from the proxied page by the browser's same-origin policy and a closed Shadow DOM host. The session origin cannot access the dashboard control API; API requests are accepted only on either trusted dashboard hostname, with Origin required to match the corresponding hostname.
 - Authority status, event polling, and event uploads have full-response deadlines and in-flight guards. The countdown advances locally between server status responses; Rust's monotonic timer remains authoritative. Start retries using the same delay are idempotent.
 - The controller observes pointer, click, change, input, and keydown activity; reports selected event-listener registrations; and records fetch, XHR, sendBeacon, and proxied HTTP request metadata. Recent input/change/Enter events receive short-lived IDs attached to subsequent fetch/XHR requests, allowing the event stream to correlate a typed interaction with its AJAX request and upstream response. It records target selectors and event IDs only, never input values or request bodies.
