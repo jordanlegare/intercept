@@ -884,7 +884,18 @@
         method + " · " + bodyDetail + inputCorrelationDetail(inputContext)
       );
       const fetchEventTarget = fetchEventPath(source);
-      return cookieWriteQueue.then(() => nativeFetch(markedRequest)).then(response => {
+      return cookieWriteQueue.then(() => {
+        // ajax_dispatch is recorded before cookie synchronization finishes.
+        // This marker proves the request has reached the actual native Fetch call.
+        if (fetchEventTarget === "/youtubei/v1/search") {
+          record(
+            "fetch_started",
+            fetchEventTarget,
+            method + " · " + bodyDetail
+          );
+        }
+        return nativeFetch(markedRequest);
+      }).then(response => {
         record(
           "fetch_response",
           fetchEventTarget,
