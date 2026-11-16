@@ -251,8 +251,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/", get(index))
+        .route("/authority/{id}", get(authority_page))
         .route("/assets/controller.js", get(controller_js))
         .route("/assets/intercept.css", get(intercept_css))
+        .route("/assets/authority.js", get(authority_js))
         .route("/api/sessions", post(create_session))
         .route("/api/sessions/{id}/start", post(start_timer).options(api_preflight))
         .route("/api/sessions/{id}/status", get(session_status).options(api_preflight))
@@ -299,6 +301,89 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+async fn api_preflight() -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
+async fn authority_page(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Html<String>, (StatusCode, String)> {
+    find_session(&state, &id).await?;
+    let page = include_str!("../web/authority.html").replace("__SESSION_ID__", &id);
+    Ok(Html(page))
+}
+
+async fn authority_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../web/authority.js"),
+    )
+}
+
+async fn host_and_cors_guard(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let path = request.uri().path();
+    let host = request.headers().get(header::HOST)
+        .and_then(|value| value.to_str().ok()).unwrap_or("");
+
+    // The dashboard and control API are deliberately reachable only through
+    // their own origin. Proxied pages use a unique <session>.localhost origin.
+    if path == "/" || path == "/api/sessions" || path.starts_with("/api/sessions/") {
+        if !host.eq_ignore_ascii_case(DASHBOARD_HOST) {
+            return plain(StatusCode::MISDIRECTED_REQUEST, "Use the trusted dashboard origin at 127.0.0.1:5000");
+        }
+        if request.headers().get(header::ORIGIN)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|origin| origin != "http://127.0.0.1:5000")
+        {
+            return plain(StatusCode::FORBIDDEN, "Cross-origin access to the trusted control API is denied");
+        }
+        return next.run(request).await;
+    }
+
+    if let Some(rest) = path.strip_prefix("/p/") {
+        let id = rest.split('/').next().unwrap_or("");
+        let expected_host = format!("{id}.localhost:{SESSION_PORT}");
+        if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !host.eq_ignore_ascii_case(&expected_host)
+        {
+            return plain(StatusCode::MISDIRECTED_REQUEST, "Session requests must use their dedicated localhost origin");
+        }
+        if state.sessions.read().await.get(id).is_none() {
+            return plain(StatusCode::NOT_FOUND, "Unknown or expired session");
+        }
+        return next.run(request).await;
+    }
+
+    if path == "/assets/controller.js" || path == "/assets/intercept.css" {
+        let Some(id) = host.strip_suffix(&format!(".localhost:{SESSION_PORT}")) else {
+            return plain(StatusCode::MISDIRECTED_REQUEST, "Session assets require a dedicated session origin");
+        };
+        if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || state.sessions.read().await.get(id).is_none()
+        {
+            return plain(StatusCode::NOT_FOUND, "Unknown or expired session");
+        }
+        return next.run(request).await;
+    }
+
+    if path == "/assets/authority.js" || path.starts_with("/authority/") {
+        if !host.eq_ignore_ascii_case(DASHBOARD_HOST) {
+            return plain(StatusCode::MISDIRECTED_REQUEST, "Authority resources are served only from the dashboard origin");
+        }
+        return next.run(request).await;
+    }
+
+    if !host.eq_ignore_ascii_case(DASHBOARD_HOST) {
+        return plain(StatusCode::MISDIRECTED_REQUEST, "Unknown host for this local service");
+    }
+    next.run(request).await
 }
 
 async fn index() -> Html<&'static str> {
@@ -534,23 +619,27 @@ async fn start_timer(
     let duration = timer_duration(input.delay_seconds)?;
     let session = find_session(&state, &id).await?;
     let deadline = Instant::now() + duration;
-    {
+    let should_spawn = {
         let mut gate = session.gate.lock().await;
         match *gate {
             GateState::Waiting => {
                 session.start_delay_nanos.store(duration.as_nanos() as u64, Ordering::Release);
                 *gate = GateState::Running { deadline };
                 session.gate_tx.send_replace(*gate);
+                true
             }
             GateState::Running { .. } | GateState::Released => {
-                // A retry with the same delay is idempotent: the original
-                // server-owned deadline is retained and no second timer is spawned.
+                // Retry the original request without changing the original deadline.
                 if session.start_delay_nanos.load(Ordering::Acquire) == duration.as_nanos() as u64 {
-                    return Ok(Json(status_for(&session).await));
+                    false
+                } else {
+                    return Err((StatusCode::CONFLICT, "The timer has already been started with a different delay".into()));
                 }
-                return Err((StatusCode::CONFLICT, "The timer has already been started with a different delay".into()));
             }
         }
+    };
+    if !should_spawn {
+        return Ok(Json(status_for(&session).await));
     }
 
     let timer_session = Arc::clone(&session);
@@ -929,7 +1018,18 @@ async fn proxy(
         Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "Request body exceeds the 8 MiB limit"),
     };
 
-    if parts.method != Method::GET && parts.method != Method::HEAD && parts.method != Method::OPTIONS {
+    let accept_html = parts.headers.get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"));
+    let is_document = parts.headers.get("sec-fetch-dest")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("document")) || accept_html;
+    let bootstrap_document = parts.method == Method::GET
+        && !ajax_request
+        && is_document
+        && upstream_url.path() == session.base_url.path()
+        && session.bootstrap_pending.swap(false, Ordering::AcqRel);
+    if should_hold_request(&session, &parts.method, &upstream_url, bootstrap_document) {
         wait_for_authorization(&session).await;
     }
 
@@ -1169,7 +1269,7 @@ async fn proxy(
             }
         } else if matches!(name.as_str(), "content-security-policy" | "content-security-policy-report-only") {
             if let Ok(policy) = value.to_str() {
-                if let Ok(value) = HeaderValue::from_str(&rewrite_csp(policy)) {
+                if let Ok(value) = HeaderValue::from_str(&rewrite_csp(policy, &session.id)) {
                     headers.append(name.clone(), value);
                 }
             }
@@ -1470,6 +1570,10 @@ fn rewrite_url(
     Some(proxy_url(&absolute, session_base, session_id))
 }
 
+fn proxy_origin(session_id: &str) -> String {
+    format!("http://{session_id}.localhost:{SESSION_PORT}")
+}
+
 fn proxy_origin_prefix(target: &Url, session_base: &Url, session_id: &str) -> String {
     if target.origin() == session_base.origin() {
         return format!("/p/{session_id}");
@@ -1480,7 +1584,7 @@ fn proxy_origin_prefix(target: &Url, session_base: &Url, session_id: &str) -> St
 }
 
 fn proxy_url(target: &Url, session_base: &Url, session_id: &str) -> String {
-    let mut result = format!("{}{}", proxy_origin_prefix(target, session_base, session_id), target.path());
+    let mut result = format!("{}{}{}", proxy_origin(session_id), proxy_origin_prefix(target, session_base, session_id), target.path());
     if let Some(query) = target.query() {
         result.push('?');
         result.push_str(query);
@@ -1583,8 +1687,9 @@ fn rewrite_set_cookie(cookie: &str, target: &Url, session_base: &Url, session_id
     parts.join("; ")
 }
 
-fn rewrite_csp(policy: &str) -> String {
-    const LOCAL_ORIGIN: &str = "http://127.0.0.1:5000";
+fn rewrite_csp(policy: &str, session_id: &str) -> String {
+    let local_origin = proxy_origin(session_id);
+    const DASHBOARD_ORIGIN: &str = "http://127.0.0.1:5000";
     const SOURCE_DIRECTIVES: &[&str] = &[
         "default-src", "script-src", "script-src-elem", "script-src-attr",
         "style-src", "style-src-elem", "style-src-attr", "img-src", "font-src",
@@ -1603,11 +1708,19 @@ fn rewrite_csp(policy: &str) -> String {
                 values.retain(|value| value != "'none'");
                 for value in &mut values {
                     if value.starts_with("http://") || value.starts_with("https://") || value.starts_with("*.") {
-                        *value = LOCAL_ORIGIN.to_owned();
+                        *value = local_origin.clone();
                     }
                 }
-                if !values.iter().any(|value| value == LOCAL_ORIGIN || value == "'self'") {
-                    values.push(LOCAL_ORIGIN.to_owned());
+                if !values.iter().any(|value| value == &local_origin || value == "'self'") {
+                    values.push(local_origin.clone());
+                }
+                if name.eq_ignore_ascii_case("default-src")
+                    || name.eq_ignore_ascii_case("frame-src")
+                    || name.eq_ignore_ascii_case("child-src")
+                {
+                    if !values.iter().any(|value| value == DASHBOARD_ORIGIN) {
+                        values.push(DASHBOARD_ORIGIN.to_owned());
+                    }
                 }
             }
             Some(if values.is_empty() { name.to_owned() } else { format!("{name} {}", values.join(" ")) })
@@ -1907,9 +2020,9 @@ mod tests {
     #[test]
     fn rewrites_external_origins_in_csp_to_local_proxy_origin() {
         let policy = "default-src 'self' https://cdn.example; img-src https://images.example";
-        let output = rewrite_csp(policy);
-        assert!(output.contains("default-src 'self' http://127.0.0.1:5000"));
-        assert!(output.contains("img-src http://127.0.0.1:5000"));
+        let output = rewrite_csp(policy, "session1234567890abcdef1234567890");
+        assert!(output.contains("default-src 'self' http://session1234567890abcdef1234567890.localhost:5000"));
+        assert!(output.contains("img-src http://session1234567890abcdef1234567890.localhost:5000"));
     }
 
     #[test]
