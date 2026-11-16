@@ -837,8 +837,12 @@
             + " · candidate_upstream_origin=" + youtubeSearchCheck.candidateIsUpstreamOrigin
         );
       }
+      // Use the original Fetch arguments as the authority for whether the
+      // caller supplied a body. Some browser Request implementations expose
+      // a non-null empty stream after Request reconstruction even when the
+      // original fetch() call omitted its body.
       if (routedRequest.method === "POST"
-          && bodyIsNull
+          && bodyDetail === "body_arg=none"
           && youtubeSearchCheck.endpointMatch) {
         const fallback = buildYouTubeSearchFallbackBody();
         if (fallback.body) {
