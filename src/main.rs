@@ -1630,7 +1630,7 @@ async fn ajax_passthrough(
                     format!(
                         "rid={request_id} client initialization failed · HTTP {} · {}",
                         status.as_u16(),
-                        clean_field(message, 180)
+                        clean_field(message.clone(), 180)
                     ),
                 ).await;
                 return plain(status, &message);
