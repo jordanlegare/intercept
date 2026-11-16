@@ -2512,6 +2512,7 @@ mod tests {
         assert!(output.contains("http://session123.localhost:5000"));
     }
 
+    #[test]
     fn rewrites_external_origins_in_csp_to_local_proxy_origin() {
         let policy = "default-src 'self' https://cdn.example; img-src https://images.example";
         let output = rewrite_csp(policy, "session1234567890abcdef1234567890");
