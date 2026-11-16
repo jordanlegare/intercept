@@ -155,7 +155,7 @@
 
   function refreshCookieMirror() {
     const target = encodeURIComponent(location.pathname + location.search);
-    cookieWriteQueue.then(() => rawFetch(cookieEndpoint + "?target=" + target, {
+    return cookieWriteQueue.then(() => rawFetch(cookieEndpoint + "?target=" + target, {
       headers: {"X-Intercept-Cookie-Token": cookieToken},
       credentials: "same-origin",
       cache: "no-store"
@@ -559,7 +559,9 @@
       const markedRequest = new Request(routedRequest, {headers});
       record("ajax_routed", routed, method + inputCorrelationDetail(inputContext));
       return cookieWriteQueue.then(() => nativeFetch(markedRequest)).then(response => {
-        if (response.headers.get("X-Intercept-Cookie-Updated") === "1") refreshCookieMirror();
+        if (response.headers.get("X-Intercept-Cookie-Updated") === "1") {
+          return refreshCookieMirror().then(() => response);
+        }
         return response;
       });
     } catch (error) {
