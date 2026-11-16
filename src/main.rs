@@ -1010,9 +1010,10 @@ async fn ajax_passthrough(
         session,
         "ajax_response",
         upstream_url.path().to_owned(),
-        format!("{} · headers in {}ms", status.as_u16(), upstream_elapsed_ms),
+        format!("rid={request_id} · {} · headers in {}ms", status.as_u16(), upstream_elapsed_ms),
     ).await;
     debug!(
+        request_id = %request_id,
         method = %request_method,
         url = %upstream_url,
         status = %status,
