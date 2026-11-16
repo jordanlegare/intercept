@@ -585,9 +585,28 @@ async fn cookie_bridge_set(
     let id = session_id_from_host(&headers)?;
     let session = find_session(&state, &id).await?;
     let capability_origin = cookie_bridge_capability_origin(&session, &headers)?;
-    let upstream_url = cookie_bridge_target(&input.target, &session, &capability_origin)?;
+    let upstream_url = cookie_bridge_target(&input.target, &session, &capability_origin)
+        .map_err(|(status, message)| {
+            // Never log the query string or cookie assignment; the path and
+            // validation reason are sufficient to diagnose malformed targets.
+            warn!(
+                status = %status,
+                target_path = %input.target.split('?').next().unwrap_or(""),
+                reason = %message,
+                "Cookie bridge target rejected"
+            );
+            (status, message)
+        })?;
     session.cookie_jar.set_document_cookie(&input.cookie, &upstream_url)
-        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+        .map_err(|message| {
+            warn!(
+                upstream_host = upstream_url.host_str().unwrap_or_default(),
+                cookie_bytes = input.cookie.len(),
+                reason = %message,
+                "Document cookie assignment rejected"
+            );
+            (StatusCode::BAD_REQUEST, message)
+        })?;
     Ok(Json(CookieBridgeResponse {
         cookie: session.cookie_jar.document_cookie_header(&upstream_url),
     }))
