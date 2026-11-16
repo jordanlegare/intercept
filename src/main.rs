@@ -414,6 +414,13 @@ async fn host_and_cors_guard(
         return next.run(request).await;
     }
 
+    if let Some(id) = host.strip_suffix(&format!(".localhost:{SESSION_PORT}")) {
+        if id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && state.sessions.read().await.contains_key(id)
+        {
+            return next.run(request).await;
+        }
+    }
     if !host.eq_ignore_ascii_case(DASHBOARD_HOST) {
         return plain(StatusCode::MISDIRECTED_REQUEST, "Unknown host for this local service");
     }
@@ -1066,12 +1073,13 @@ async fn stream_regular_response(
         }
     }
     let url = upstream_url.to_string();
+    let stream_request_id = request_id.clone();
     let body_stream = upstream.bytes_stream().map(move |chunk| {
         let _keep_request_slot = &request_permit;
         chunk.map_err(|error| {
             warn!(
                 %error,
-                request_id = %request_id,
+                request_id = %stream_request_id,
                 url = %url,
                 elapsed_ms = request_started.elapsed().as_millis(),
                 "Opaque upstream response stream failed"
