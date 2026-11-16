@@ -883,6 +883,8 @@ async fn ajax_passthrough(
     request_headers: HeaderMap,
     request_body: bytes::Bytes,
     request_started: Instant,
+    request_id: String,
+    request_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Response<Body> {
     let client = match client_for(session, &upstream_url).await {
         Ok(client) => client,
@@ -931,6 +933,7 @@ async fn ajax_passthrough(
         Err(error) => {
             warn!(
                 error = ?error,
+                request_id = %request_id,
                 url = %upstream_url,
                 elapsed_ms = request_started.elapsed().as_millis(),
                 "AJAX upstream request failed"
@@ -939,7 +942,7 @@ async fn ajax_passthrough(
                 session,
                 "ajax_error",
                 upstream_url.path().to_owned(),
-                "upstream request failed".to_owned(),
+                format!("rid={request_id} upstream request failed"),
             ).await;
             return plain(StatusCode::BAD_GATEWAY, "AJAX upstream request failed");
         }
@@ -1003,9 +1006,11 @@ async fn ajax_passthrough(
 
     let stream_url = upstream_url.to_string();
     let body_stream = upstream.bytes_stream().map(move |chunk| {
+        let _keep_request_slot = &request_permit;
         chunk.map_err(|error| {
             warn!(
                 %error,
+                request_id = %request_id,
                 url = %stream_url,
                 "AJAX upstream response stream failed"
             );
@@ -1016,6 +1021,71 @@ async fn ajax_passthrough(
         .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "Could not build AJAX passthrough response"))
 }
 
+async fn stream_regular_response(
+    upstream: reqwest::Response,
+    session: &Session,
+    upstream_url: &Url,
+    request_started: Instant,
+    request_id: String,
+    request_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Response<Body> {
+    let status = upstream.status();
+    let upstream_headers = upstream.headers().clone();
+    let mut response = Response::builder().status(status);
+    let headers = response.headers_mut().expect("fresh streaming response builder");
+    for (name, value) in upstream_headers.iter() {
+        if should_skip_response_header(name) {
+            continue;
+        }
+        if name == header::LOCATION {
+            if let Ok(location) = value.to_str() {
+                let rewritten = rewrite_location(location, upstream_url, &session.base_url, &session.id);
+                if let Ok(value) = HeaderValue::from_str(&rewritten) {
+                    headers.append(name.clone(), value);
+                }
+            }
+        } else if name == header::SET_COOKIE {
+            if let Ok(cookie) = value.to_str() {
+                let rewritten = rewrite_set_cookie(cookie, upstream_url, &session.base_url, &session.id);
+                if let Ok(value) = HeaderValue::from_str(&rewritten) {
+                    headers.append(name.clone(), value);
+                }
+            }
+        } else if matches!(name.as_str(), "content-security-policy" | "content-security-policy-report-only") {
+            if let Ok(policy) = value.to_str() {
+                if let Ok(value) = HeaderValue::from_str(&rewrite_csp(policy, &session.id)) {
+                    headers.append(name.clone(), value);
+                }
+            }
+        } else {
+            headers.append(name.clone(), value.clone());
+        }
+    }
+    let url = upstream_url.to_string();
+    let body_stream = upstream.bytes_stream().map(move |chunk| {
+        let _keep_request_slot = &request_permit;
+        chunk.map_err(|error| {
+            warn!(
+                %error,
+                request_id = %request_id,
+                url = %url,
+                elapsed_ms = request_started.elapsed().as_millis(),
+                "Opaque upstream response stream failed"
+            );
+            io::Error::other(error)
+        })
+    });
+    debug!(
+        request_id = %request_id,
+        url = %upstream_url,
+        status = %status,
+        streaming = true,
+        "Opaque upstream response streaming"
+    );
+    response.body(Body::from_stream(body_stream))
+        .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "Could not build streaming response"))
+}
+
 async fn proxy(
     State(state): State<AppState>,
     Path(params): Path<HashMap<String, String>>,
@@ -1023,6 +1093,7 @@ async fn proxy(
     request: Request<Body>,
 ) -> Response<Body> {
     let request_started = Instant::now();
+    let request_id = Uuid::new_v4().simple().to_string();
     let Some(id) = params.get("id") else {
         return plain(StatusCode::BAD_REQUEST, "Missing session id");
     };
@@ -1031,10 +1102,16 @@ async fn proxy(
         Err((status, message)) => return plain(status, &message),
     };
 
+    let request_permit = match session.inflight.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => return plain(StatusCode::TOO_MANY_REQUESTS, "Session request concurrency limit reached"),
+    };
     let upstream_url = match upstream_url_for_request(&uri, &session) {
         Ok(url) => url,
         Err(message) => return plain(StatusCode::BAD_REQUEST, &message),
     };
+    debug!(request_id = %request_id, method = %request.method(), path = %upstream_url.path(),
+        "Proxy request routed");
     if !matches!(upstream_url.scheme(), "http" | "https") || !is_public_destination(&upstream_url) {
         return plain(StatusCode::FORBIDDEN, "Only public HTTP and HTTPS destinations are allowed");
     }
@@ -1045,7 +1122,7 @@ async fn proxy(
         &session,
         if ajax_request { "ajax_request" } else { "http_request" },
         upstream_url.path().to_owned(),
-        parts.method.as_str().to_owned(),
+        format!("rid={request_id} method={}", parts.method),
     ).await;
     let body = match to_bytes(body, MAX_REQUEST_BODY).await {
         Ok(body) => body,
@@ -1078,6 +1155,8 @@ async fn proxy(
             parts.headers,
             body,
             request_started,
+            request_id.clone(),
+            request_permit,
         ).await;
     }
 
@@ -1145,6 +1224,7 @@ async fn proxy(
             Err(error) => {
                 warn!(
                     error = ?error,
+                    request_id = %request_id,
                     url = %upstream_url,
                     elapsed_ms = request_started.elapsed().as_millis(),
                     "Upstream request failed"
@@ -1155,9 +1235,29 @@ async fn proxy(
 
         let status = upstream.status();
         let headers = upstream.headers().clone();
+        let response_content_type = headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()).unwrap_or("").to_ascii_lowercase();
+        let response_needs_rewrite = response_content_type.contains("text/html")
+            || response_content_type.contains("text/css")
+            || response_content_type.contains("javascript")
+            || response_content_type.contains("ecmascript");
+        let stream_opaque = !response_needs_rewrite && (
+            !is_cacheable_asset(&response_content_type)
+                || upstream.content_length().is_some_and(|length| length > MAX_CACHE_ENTRY_BYTES as u64)
+        );
+        if stream_opaque {
+            return stream_regular_response(
+                upstream,
+                &session,
+                &upstream_url,
+                request_started,
+                request_id,
+                request_permit,
+            ).await;
+        }
         if let Some(length) = upstream.content_length() {
             if length > MAX_RESPONSE_BODY as u64 {
-                return plain(StatusCode::PAYLOAD_TOO_LARGE, "Upstream response exceeds the 32 MiB limit");
+                return plain(StatusCode::PAYLOAD_TOO_LARGE, "Upstream response exceeds the 32 MiB buffering limit");
             }
         }
 
@@ -1176,6 +1276,7 @@ async fn proxy(
                         error = ?error,
                         timed_out = error.is_timeout(),
                         decode_error = error.is_decode(),
+                        request_id = %request_id,
                         url = %upstream_url,
                         status = %status,
                         bytes_received = bytes.len(),
@@ -1193,6 +1294,12 @@ async fn proxy(
                 cache_put(&session, key, status, &headers, &bytes).await;
             }
         }
+        push_event(
+            &session,
+            "upstream_body_received",
+            upstream_url.path().to_owned(),
+            format!("rid={request_id} status={} bytes={}", status.as_u16(), bytes.len()),
+        ).await;
         (status, headers, bytes)
     };
 
@@ -1325,6 +1432,7 @@ async fn proxy(
         upstream_elapsed_ms,
         rewrite_elapsed_ms,
         response_bytes = response_body.len(),
+        request_id = %request_id,
         elapsed_ms = request_started.elapsed().as_millis(),
         "Proxy request completed"
     );
