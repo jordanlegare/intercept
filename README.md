@@ -41,18 +41,19 @@ One reqwest Client is created per upstream origin and reused. Each new origin is
 
 ## Authority behavior
 
-- The proxied page is left visually intact. Intercept adds only a fixed authority banner at the bottom with a decimal-seconds input, **[START]**, state, and countdown.
-- HTML links, forms, scripts, images, media, srcset, inline CSS, and style blocks are rewritten to local session paths. External CSS url() and @import references are rewritten too.
+- The proxied page keeps its original layout, with a fixed **INTERCEPT AUTHORITY** banner at the bottom. The banner shows WAITING / AUTHORIZATION COUNTDOWN / AUTHORIZED, a decimal-seconds delay input, **[START]**, the countdown, a notice, and a collapsible event stream.
+- The controller observes pointer, click, change, input, and keydown activity; reports selected event-listener registrations; and records fetch, XHR, sendBeacon, and proxied HTTP request metadata. It does not record input values or request bodies.
+- While authorization is pending, ordinary anchor navigation and form submission are held in a bounded browser queue (50 actions) and replayed when the Rust timer releases the session. The Rust gate independently holds POST, PUT, PATCH, and DELETE requests.
 - Network URLs created at runtime through fetch, XHR, sendBeacon, EventSource, workers, window.open, dynamic URL attributes, and CSS setters are routed through the same local server. Static JavaScript module imports and dynamic imports are rewritten as well.
 - Each upstream origin has its own pooled, DNS-pinned client. Cookies are scoped to that origin's local proxy path so cookies from different hosts do not collide.
 - Static assets are cached per session in memory (64 MiB total; 8 MiB per entry; five-minute default TTL). HTML and API responses are fetched live so login state and application data are not served stale.
 - Rust holds POST, PUT, PATCH, and DELETE requests from every proxied origin until the timer expires. Request bodies are buffered up to 8 MiB; responses are limited to 32 MiB. GET, HEAD, and OPTIONS requests are allowed while the timer is pending.
 
-This is a method-based HTTP authorization gate, not a universal JavaScript sandbox. Page-side JavaScript can still perform local effects before a request, and applications can mutate state through GET endpoints. Those behaviors are not blocked. The timer is authoritative for the mutating HTTP methods listed above.
+This is not a universal JavaScript sandbox and cannot suspend arbitrary JavaScript execution. The event stream is observational; it records event metadata, not values. The browser queue defers ordinary anchor navigation and form submission, while the Rust proxy is authoritative for POST, PUT, PATCH, and DELETE. A page's custom click handler may still perform local JavaScript side effects before making a request, and applications can mutate state through GET endpoints. Those behaviors are not universally blocked.
 
 ## Rewrite directory
 
-The rewrites/ directory contains the authority-banner stylesheet and the extension point for future site-specific rewrite rules. The HTML/CSS/JavaScript transformers change network URLs only to route resources through the active session, then append the banner. The injected JavaScript shim handles runtime-generated HTTP requests without observing page events or changing page UI.
+The rewrites/ directory contains the authority-banner stylesheet and the extension point for future site-specific rewrite rules. The HTML/CSS/JavaScript transformers change network URLs only to route resources through the active session, then append the banner. The injected JavaScript controller routes runtime-generated HTTP requests, observes page-action metadata, and defers link/form navigation until timer authorization.
 
 ## Boundaries and limitations
 
