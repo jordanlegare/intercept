@@ -14,6 +14,7 @@
   const queue = [];
   const eventBuffer = [];
   let toolbarRoot = null;
+  let authorityFrame = null;
   const CONTROL_REQUEST_TIMEOUT_MS = 5000;
   let gateState = "waiting";
   let replaying = false;
@@ -565,6 +566,7 @@
     frame.title = "Intercept authority controls";
     frame.src = "http://127.0.0.1:5000/authority/" + encodeURIComponent(sessionId);
     frame.setAttribute("sandbox", "allow-scripts allow-same-origin");
+    authorityFrame = frame;
     frame.referrerPolicy = "no-referrer";
     frame.style.cssText = "display:block;width:100%;height:148px;border:0;pointer-events:auto;background:#080e16;";
     root.appendChild(frame);
@@ -574,6 +576,26 @@
     document.body.appendChild(host);
     document.documentElement.style.setProperty("scroll-padding-bottom", "158px", "important");
     document.body.style.setProperty("padding-bottom", "148px", "important");
+    nativeAdd.call(window, "message", event => {
+      const data = event.data;
+      if (event.origin !== "http://127.0.0.1:5000"
+          || !authorityFrame
+          || event.source !== authorityFrame.contentWindow
+          || !data
+          || data.type !== "intercept:authority-status"
+          || data.session_id !== sessionId
+          || !["waiting", "running", "released"].includes(data.state)) {
+        return;
+      }
+      gateState = data.state;
+      countdownDeadline = gateState === "running"
+        ? performance.now() + Math.max(0, Number(data.remaining_ms) || 0)
+        : 0;
+      renderGateState();
+      updateCountdown();
+      if (gateState === "released") releaseQueuedActions();
+      record("authority_status_received", "authority-frame", gateState);
+    });
     record("controller_loaded", "document", "Isolated cross-origin authority frame initialized");
     window.setInterval(flushEvents, 1200);
   }
