@@ -296,15 +296,29 @@
     record("fetch", String(source), method);
     if (!routed) return Promise.reject(new TypeError("Intercept only proxies HTTP and HTTPS requests."));
     try {
-      const routedInput = input instanceof Request ? new Request(routed, input) : routed;
-      return nativeFetch.call(this, routedInput, init);
+      // Mark the request explicitly instead of relying on browser-specific
+      // Fetch Metadata support. Preserve Request/init overrides and bodies.
+      let routedRequest;
+      if (input instanceof Request) {
+        routedRequest = new Request(routed, input);
+        if (init) routedRequest = new Request(routedRequest, init);
+      } else {
+        routedRequest = new Request(routed, init);
+      }
+      const headers = new Headers(routedRequest.headers);
+      headers.set("X-Intercept-Proxy-Mode", "ajax");
+      const markedRequest = new Request(routedRequest, {headers});
+      record("ajax_routed", routed, method);
+      return nativeFetch(markedRequest);
     } catch (error) {
+      record("ajax_route_error", String(source), String(error && error.message || error));
       return Promise.reject(error);
     }
   };
 
   const xhrMeta = new WeakMap();
   const nativeXhrOpen = XMLHttpRequest.prototype.open;
+  const nativeXhrSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
   const nativeXhrSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open = function(method, url, ...rest) {
     const routed = routeToProxy(url);
@@ -314,7 +328,16 @@
   };
   XMLHttpRequest.prototype.send = function(...args) {
     const meta = xhrMeta.get(this);
-    if (meta) record("xhr", meta.url, meta.method);
+    if (meta) {
+      try {
+        // Add the internal marker last, after page code has configured headers.
+        nativeXhrSetRequestHeader.call(this, "X-Intercept-Proxy-Mode", "ajax");
+      } catch (error) {
+        record("xhr_marker_error", meta.url, String(error && error.message || error));
+      }
+      record("xhr", meta.url, meta.method);
+      record("ajax_routed", meta.url, meta.method);
+    }
     return nativeXhrSend.apply(this, args);
   };
 

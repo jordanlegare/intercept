@@ -535,7 +535,9 @@ fn is_ajax_request(headers: &HeaderMap) -> bool {
     let value_is = |name: &str, expected: &str| {
         headers.get(name)
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+            .is_some_and(|value| {
+                value.split(',').any(|token| token.trim().eq_ignore_ascii_case(expected))
+            })
     };
     let accepts_event_stream = headers.get(header::ACCEPT)
         .and_then(|value| value.to_str().ok())
@@ -1495,6 +1497,21 @@ fn plain(status: StatusCode, message: &str) -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifies_explicit_controller_ajax_marker() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-intercept-proxy-mode", HeaderValue::from_static("ajax"));
+        assert!(is_ajax_request(&headers));
+
+        // Multiple values can occur when XMLHttpRequest appends to an existing
+        // same-name application header.
+        headers.insert(
+            "x-intercept-proxy-mode",
+            HeaderValue::from_static("application, ajax"),
+        );
+        assert!(is_ajax_request(&headers));
+    }
 
     #[test]
     fn identifies_fetch_metadata_ajax_requests() {
