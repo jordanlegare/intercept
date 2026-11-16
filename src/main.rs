@@ -1797,13 +1797,14 @@ async fn ajax_passthrough(
     let body_stream = upstream.bytes_stream().take_until(cancelled).map(move |chunk| {
         let _keep_request_slot = &request_permit;
         chunk.map_err(|error| {
+            let safe_error = error.without_url().to_string();
             warn!(
-                %error,
+                error = %safe_error,
                 request_id = %request_id,
                 target = %stream_target,
                 "AJAX upstream response stream failed"
             );
-            io::Error::other(error)
+            io::Error::other(safe_error)
         })
     });
     response.body(Body::from_stream(body_stream))
