@@ -432,7 +432,10 @@
       }
       authorityRetryCount += 1;
       record("authority_frame_retry", "authority-frame", "Attempt " + authorityRetryCount);
-      authorityFrame.src = authorityUrl(authorityRetryCount);
+      // This is our trusted dashboard iframe, not an upstream resource.
+      // Bypass the page's patched iframe.src setter so 127.0.0.1 is not sent
+      // through routeToProxy() and rejected by the public-destination guard.
+      nativeSetAttribute.call(authorityFrame, "src", authorityUrl(authorityRetryCount));
       scheduleAuthorityRetry();
     }, 9000);
   }
@@ -513,7 +516,9 @@
       });
       authorityFrame = frame;
       toolbarRoot.appendChild(frame);
-      frame.src = authorityUrl(0);
+      // The controller patches HTMLIFrameElement.src for upstream page
+      // content. The trusted authority frame must stay on the dashboard host.
+      nativeSetAttribute.call(frame, "src", authorityUrl(0));
       scheduleAuthorityRetry();
     }
 
