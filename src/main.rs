@@ -2114,10 +2114,10 @@ fn rewrite_csp(policy: &str, session_id: &str) -> String {
                 // authorize those blocks when style-src falls back to default-src.
                 // Permit inline CSS only; script execution remains governed by the
                 // original script directives and their nonce/hash requirements.
-                if is_style_src || is_style_element {
-                    if !values.iter().any(|value| value.eq_ignore_ascii_case("'unsafe-inline'")) {
-                        values.push("'unsafe-inline'".to_owned());
-                    }
+                if (is_style_src || is_style_element)
+                    && !values.iter().any(|value| value.eq_ignore_ascii_case("'unsafe-inline'"))
+                {
+                    values.push("'unsafe-inline'".to_owned());
                 }
                 for value in &mut values {
                     if value.starts_with("http://") || value.starts_with("https://") || value.starts_with("*.") {
