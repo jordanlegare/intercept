@@ -1613,13 +1613,28 @@ async fn ajax_passthrough(
     context: ProxyRequestContext,
 ) -> Response<Body> {
     let ProxyRequestContext { request_id, started_at: request_started, permit: request_permit } = context;
+    let upstream_host = upstream_url.host_str().unwrap_or_default().to_owned();
+    let upstream_path = upstream_url.path().to_owned();
+    let range_requested = request_headers.contains_key(header::RANGE);
     let client = tokio::select! {
         _ = wait_for_session_termination(session) => {
             return plain(StatusCode::GONE, "Session terminated");
         }
         result = client_for(session, &upstream_url) => match result {
             Ok(client) => client,
-            Err((status, message)) => return plain(status, &message),
+            Err((status, message)) => {
+                push_event(
+                    session,
+                    "ajax_error",
+                    format!("{upstream_host}{upstream_path}"),
+                    format!(
+                        "rid={request_id} client initialization failed · HTTP {} · {}",
+                        status.as_u16(),
+                        clean_field(message, 180)
+                    ),
+                ).await;
+                return plain(status, &message);
+            }
         }
     };
     let method = match reqwest::Method::from_bytes(request_method.as_str().as_bytes()) {
@@ -1665,19 +1680,39 @@ async fn ajax_passthrough(
             .send() => match result {
         Ok(response) => response,
         Err(error) => {
+            let failure_kind = if error.is_timeout() {
+                "timeout"
+            } else if error.is_connect() {
+                "connect"
+            } else if error.is_body() {
+                "body"
+            } else if error.is_decode() {
+                "decode"
+            } else if error.is_redirect() {
+                "redirect"
+            } else {
+                "request"
+            };
+            // Signed media URLs carry expiring authorization in their query.
+            // Strip the URL before logging and report only its host/path.
+            let safe_error = error.without_url().to_string();
             warn!(
-                error = ?error,
+                error_kind = failure_kind,
+                error = %safe_error,
                 request_id = %request_id,
-                url = %upstream_url,
+                host = %upstream_host,
+                path = %upstream_path,
+                range_requested,
                 elapsed_ms = request_started.elapsed().as_millis(),
                 "AJAX upstream request failed"
             );
             push_event(
                 session,
                 "ajax_error",
-                upstream_url.path().to_owned(),
+                format!("{upstream_host}{upstream_path}"),
                 format!(
-                    "rid={request_id} upstream request failed{}",
+                    "rid={request_id} {failure_kind} failure · range={range_requested} · {}{}",
+                    clean_field(safe_error, 180),
                     input_trace.as_ref().map(|trace| format!(" · {trace}")).unwrap_or_default()
                 ),
             ).await;
@@ -1735,7 +1770,7 @@ async fn ajax_passthrough(
     push_event(
         session,
         "ajax_response",
-        upstream_url.path().to_owned(),
+        format!("{upstream_host}{upstream_path}"),
         format!(
             "rid={request_id} · {} · headers in {}ms{}",
             status.as_u16(),
@@ -1746,14 +1781,15 @@ async fn ajax_passthrough(
     debug!(
         request_id = %request_id,
         method = %request_method,
-        url = %upstream_url,
+        host = %upstream_host,
+        path = %upstream_path,
         status = %status,
         upstream_elapsed_ms,
         streaming = true,
         "AJAX passthrough response opened"
     );
 
-    let stream_url = upstream_url.to_string();
+    let stream_target = format!("{upstream_host}{upstream_path}");
     let mut cancellation = session.cancel_tx.subscribe();
     let cancelled = async move {
         wait_for_cancellation(&mut cancellation).await;
@@ -1764,7 +1800,7 @@ async fn ajax_passthrough(
             warn!(
                 %error,
                 request_id = %request_id,
-                url = %stream_url,
+                target = %stream_target,
                 "AJAX upstream response stream failed"
             );
             io::Error::other(error)
