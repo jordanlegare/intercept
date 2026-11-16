@@ -1808,7 +1808,7 @@ async fn ajax_passthrough(
     // and long-lived responses are bounded by both size and elapsed time.
     let mut error_prefix = Vec::new();
     let mut error_body_capture = Vec::with_capacity(MAX_ERROR_BODY_BYTES);
-    let mut error_preview = None;
+    let mut error_preview: Option<String> = None;
     let mut error_sampled_bytes = 0usize;
     let mut first_error_chunk_seen = false;
     let mut error_read_failed = false;
