@@ -80,7 +80,7 @@
     eventFlushInFlight = true;
     const batch = eventBuffer.splice(0, 100);
     try {
-      const response = await controlFetch("/events", {
+      const response = await rawFetch("/_intercept/events", {
         method: "POST",
         headers: {"content-type": "application/json"},
         body: JSON.stringify(batch),
@@ -532,36 +532,30 @@
   }
 
   function initializeToolbar() {
-    const toolbar = document.getElementById("intercept-toolbar");
-    if (!toolbar || !document.body) {
-      console.error("Intercept could not initialize its authority toolbar.");
+    const placeholder = document.getElementById("intercept-toolbar");
+    if (!placeholder || !document.body) {
+      console.error("Intercept could not initialize its authority frame.");
       return;
     }
     const host = document.createElement("div");
     host.id = "intercept-ui-host";
-    host.style.cssText = "position:fixed;inset:auto 0 0;z-index:2147483647;pointer-events:none;";
+    host.style.cssText = "position:fixed;inset:auto 0 0;height:148px;z-index:2147483647;pointer-events:none;";
     const root = host.attachShadow({mode: "closed"});
-    const stylesheet = document.createElement("link");
-    stylesheet.rel = "stylesheet";
-    stylesheet.href = "/assets/intercept.css";
-    root.appendChild(stylesheet);
-    toolbar.style.pointerEvents = "auto";
-    root.appendChild(toolbar);
+    const frame = document.createElement("iframe");
+    frame.title = "Intercept authority controls";
+    frame.src = "http://127.0.0.1:5000/authority/" + encodeURIComponent(sessionId);
+    frame.setAttribute("sandbox", "allow-scripts allow-same-origin");
+    frame.referrerPolicy = "no-referrer";
+    frame.style.cssText = "display:block;width:100%;height:148px;border:0;pointer-events:auto;background:#080e16;";
+    root.appendChild(frame);
+    placeholder.remove();
     const oldStylesheet = document.querySelector('link[href="/assets/intercept.css"]');
     if (oldStylesheet) oldStylesheet.remove();
     document.body.appendChild(host);
-    toolbarRoot = root;
-    document.documentElement.style.setProperty("scroll-padding-bottom", "90px", "important");
-    document.body.style.setProperty("padding-bottom", "78px", "important");
-    nativeAdd.call(toolbarRoot, "click", handleStartClick, true);
-    renderGateState();
-    pollStatus();
-    pollEvents();
-    record("controller_loaded", "document", "Isolated toolbar and browser event observer active");
-    window.setInterval(pollStatus, 400);
-    window.setInterval(pollEvents, 1800);
+    document.documentElement.style.setProperty("scroll-padding-bottom", "158px", "important");
+    document.body.style.setProperty("padding-bottom", "148px", "important");
+    record("controller_loaded", "document", "Isolated cross-origin authority frame initialized");
     window.setInterval(flushEvents, 1200);
-    window.setInterval(updateCountdown, 100);
   }
 
   if (document.readyState === "loading") {
