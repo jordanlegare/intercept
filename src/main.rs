@@ -232,6 +232,7 @@ async fn build_pinned_client(target: &Url) -> Result<reqwest::Client, (StatusCod
     }
 
     let mut builder = reqwest::Client::builder()
+        .http1_only()
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(90))
