@@ -3121,6 +3121,7 @@ fn rewrite_worker_javascript(
             :(input instanceof Request&&input.body?"body_arg=request_stream body_arg_bytes=unknown":"body_arg=none");
           const headers=new Headers(request.headers);
           headers.set("X-Intercept-Proxy-Mode","ajax");
+          headers.set("X-Intercept-Body-Diagnostic",bodyDetail);
           reportDispatch(routed,method+" · "+bodyDetail+" · transport=worker-fetch");
           return nativeFetch(new Request(request,{{headers}}));
         }};
@@ -3137,8 +3138,12 @@ fn rewrite_worker_javascript(
           }};
           proto.send=function(...args){{
             const meta=xhrMeta.get(this);
-            try{{nativeSet.call(this,"X-Intercept-Proxy-Mode","ajax")}}catch(_e){{}}
-            if(meta)reportDispatch(meta.url,meta.method+" · "+bodyDiagnostic(args[0],args.length>0)+" · transport=worker-xhr");
+            const bodyDetail=bodyDiagnostic(args[0],args.length>0);
+            try{{
+              nativeSet.call(this,"X-Intercept-Proxy-Mode","ajax");
+              nativeSet.call(this,"X-Intercept-Body-Diagnostic",bodyDetail);
+            }}catch(_e){{}}
+            if(meta)reportDispatch(meta.url,meta.method+" · "+bodyDetail+" · transport=worker-xhr");
             return nativeSend.apply(this,args);
           }};
         }}
@@ -3416,6 +3421,9 @@ fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -
     let fetch_mode = header_or_absent("sec-fetch-mode", 24);
     let fetch_site = header_or_absent("sec-fetch-site", 24);
     let requested_with = header_or_absent("x-requested-with", 32);
+    let browser_body = header_text("x-intercept-body-diagnostic", 120)
+        .map(|value| format!(" · browser_body={value}"))
+        .unwrap_or_else(|| " · browser_body=absent".to_owned());
     let content_type = header_text("content-type", 100)
         .map(|value| format!(" · content_type={value}"))
         .unwrap_or_default();
@@ -3454,7 +3462,7 @@ fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -
     // clues when a browser request reaches Rust without a matching
     // browser-side ajax_dispatch event.
     format!(
-        "method={method} · body_bytes={} · dispatch_marker={dispatch_marker} · sec_fetch_dest={fetch_dest} · sec_fetch_mode={fetch_mode} · sec_fetch_site={fetch_site} · x_requested_with={requested_with} · content_length_out={}{}{}{}{} · cookie_header_in={cookie_header_in} · json={json_state}{client_headers}",
+        "method={method} · body_bytes={} · dispatch_marker={dispatch_marker}{browser_body} · sec_fetch_dest={fetch_dest} · sec_fetch_mode={fetch_mode} · sec_fetch_site={fetch_site} · x_requested_with={requested_with} · content_length_out={}{}{}{}{} · cookie_header_in={cookie_header_in} · json={json_state}{client_headers}",
         body.len(),
         body.len(),
         content_type,
@@ -3490,6 +3498,7 @@ fn should_skip_request_header(name: &HeaderName) -> bool {
             | "te" | "trailer" | "transfer-encoding" | "upgrade" | "content-length"
             | "accept-encoding" | "cookie" | "x-intercept-cookie-token" | "x-intercept-cookie-updated" | "x-intercept-proxy-mode"
             | "x-intercept-input-id" | "x-intercept-input-target"
+            | "x-intercept-body-diagnostic"
     )
 }
 
@@ -3647,10 +3656,15 @@ mod tests {
         headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
         headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
         headers.insert("content-type", HeaderValue::from_static("application/json"));
+        headers.insert(
+            "x-intercept-body-diagnostic",
+            HeaderValue::from_static("body_arg=string body_arg_bytes=12"),
+        );
 
         let unmarked = ajax_request_diagnostics(&Method::POST, &headers, b"");
         assert!(unmarked.contains("body_bytes=0"));
         assert!(unmarked.contains("dispatch_marker=absent"));
+        assert!(unmarked.contains("browser_body=body_arg=string body_arg_bytes=12"));
         assert!(unmarked.contains("sec_fetch_dest=empty"));
         assert!(unmarked.contains("sec_fetch_mode=cors"));
         assert!(unmarked.contains("sec_fetch_site=same-origin"));
