@@ -20,6 +20,8 @@
   const nativeLocalStorage = window.localStorage;
   const nativeSessionStorage = window.sessionStorage;
   const cookieEndpoint = location.origin + "/_intercept/cookies";
+  const cookieToken = String(script.dataset.cookieToken || "");
+  script.removeAttribute("data-cookie-token");
   let cookieMirror = String(script.dataset.cookieSeed || "");
   let cookieWriteQueue = Promise.resolve();
 
@@ -112,20 +114,25 @@
     const body = JSON.stringify({target: location.pathname + location.search, cookie: String(assignment)});
     cookieWriteQueue = cookieWriteQueue.then(() => rawFetch(cookieEndpoint, {
       method: "POST",
-      headers: {"content-type": "application/json"},
+      headers: {"content-type": "application/json", "X-Intercept-Cookie-Token": cookieToken},
       credentials: "same-origin",
       cache: "no-store",
       body
     })).then(response => {
       if (!response.ok) throw new Error("Cookie bridge write returned HTTP " + response.status);
+      return response.json();
+    }).then(data => {
+      cookieMirror = String(data.cookie || "");
     }).catch(error => {
       record("cookie_bridge_error", location.pathname, String(error && error.message || error));
+      refreshCookieMirror();
     });
   }
 
   function refreshCookieMirror() {
     const target = encodeURIComponent(location.pathname + location.search);
     rawFetch(cookieEndpoint + "?target=" + target, {
+      headers: {"X-Intercept-Cookie-Token": cookieToken},
       credentials: "same-origin",
       cache: "no-store"
     }).then(response => {
