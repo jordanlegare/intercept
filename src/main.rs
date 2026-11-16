@@ -2971,6 +2971,16 @@ fn rewrite_csp(policy: &str, session_id: &str) -> String {
                 has_style_src = true;
             }
             let mut values = tokens.map(str::to_owned).collect::<Vec<_>>();
+            if name.eq_ignore_ascii_case("trusted-types") {
+                // The controller uses one narrowly scoped policy to convert
+                // same-session script URLs into TrustedScriptURL objects.
+                // Preserve upstream policy names, but add ours even when the
+                // upstream policy was an explicit 'none' allow-list.
+                values.retain(|value| !value.eq_ignore_ascii_case("'none'"));
+                if !values.iter().any(|value| value == "*" || value == "intercept-proxy") {
+                    values.push("intercept-proxy".to_owned());
+                }
+            }
             if SOURCE_DIRECTIVES.iter().any(|candidate| name.eq_ignore_ascii_case(candidate)) {
                 values.retain(|value| value != "'none'");
                 // strict-dynamic discards host allow-lists in modern browsers.
@@ -3763,6 +3773,34 @@ mod tests {
         let style_elem = output.split(';').find(|part| part.trim_start().starts_with("style-src-elem ")).unwrap();
         assert!(style_src.contains("'unsafe-inline'"));
         assert!(style_elem.contains("'unsafe-inline'"));
+    }
+
+    #[test]
+    fn csp_rewrite_allows_the_named_trusted_types_script_url_policy() {
+        let output = rewrite_csp(
+            "require-trusted-types-for 'script'; trusted-types youtube lit-html",
+            "session123",
+        );
+        let directive = output.split(';')
+            .find(|part| part.trim_start().starts_with("trusted-types "))
+            .expect("trusted-types directive should remain");
+        assert!(directive.split_whitespace().any(|value| value == "youtube"));
+        assert!(directive.split_whitespace().any(|value| value == "lit-html"));
+        assert!(directive.split_whitespace().any(|value| value == "intercept-proxy"));
+        assert!(!directive.contains("*"));
+    }
+
+    #[test]
+    fn csp_rewrite_replaces_a_none_trusted_types_allowlist_with_intercept_policy() {
+        let output = rewrite_csp(
+            "trusted-types 'none'; require-trusted-types-for 'script'",
+            "session123",
+        );
+        let directive = output.split(';')
+            .find(|part| part.trim_start().starts_with("trusted-types "))
+            .expect("trusted-types directive should remain");
+        assert!(directive.split_whitespace().any(|value| value == "intercept-proxy"));
+        assert!(!directive.contains("'none'"));
     }
 
     #[test]

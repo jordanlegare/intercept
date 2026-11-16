@@ -312,6 +312,49 @@
     return sessionPrefix + "/_/" + url.protocol.slice(0, -1) + "/" + url.host + path;
   }
 
+  // YouTube and other modern applications may enforce
+  // require-trusted-types-for 'script'. Their dynamic script URL assignments
+  // must receive a TrustedScriptURL, not the rewritten string.
+  const TRUSTED_SCRIPT_URL_POLICY_NAME = "intercept-proxy";
+  let trustedScriptUrlPolicy = null;
+  if (window.trustedTypes && typeof window.trustedTypes.createPolicy === "function") {
+    try {
+      trustedScriptUrlPolicy = window.trustedTypes.createPolicy(TRUSTED_SCRIPT_URL_POLICY_NAME, {
+        createScriptURL(value) {
+          const url = new URL(String(value), document.baseURI);
+          const allowedBlob = url.protocol === "blob:" && url.origin === location.origin;
+          const allowedHttp = (url.protocol === "http:" || url.protocol === "https:")
+            && url.origin === location.origin;
+          if (!allowedBlob && !allowedHttp) {
+            throw new TypeError("Intercept only trusts script URLs routed through this session origin.");
+          }
+          if (url.pathname.startsWith("/_intercept/") || url.pathname.startsWith("/api/sessions/")) {
+            throw new TypeError("Intercept control-plane URLs cannot be used as page scripts.");
+          }
+          return url.href;
+        }
+      });
+    } catch (error) {
+      record("trusted_types_policy_error", "document", String(error && error.message || error));
+      console.warn("Intercept could not create its Trusted Types script URL policy", error);
+    }
+  }
+
+  function trustedScriptUrl(value) {
+    if (!window.trustedTypes) return value;
+    if (!trustedScriptUrlPolicy) {
+      throw new TypeError("Intercept's Trusted Types policy is unavailable; refusing an untrusted script URL.");
+    }
+    return trustedScriptUrlPolicy.createScriptURL(String(value));
+  }
+
+  function setInterceptAttribute(element, name, value) {
+    const isScriptSource = element instanceof window.HTMLScriptElement
+      && String(name).toLowerCase() === "src";
+    const sinkValue = isScriptSource ? trustedScriptUrl(value) : value;
+    return nativeSetAttribute.call(element, name, sinkValue);
+  }
+
   function routeSrcset(value) {
     return String(value).split(",").map(candidate => {
       const pieces = candidate.trim().split(/\s+/);
@@ -328,8 +371,12 @@
     } else if (key === "srcset") {
       value = routeSrcset(value);
     }
-    return nativeSetAttribute.call(this, name, value);
+    return setInterceptAttribute(this, name, value);
   };
+
+  function sinkValueString(value) {
+    return value instanceof URL ? value.href : String(value);
+  }
 
   function patchUrlSetter(proto, property) {
     if (!proto) return;
@@ -338,8 +385,11 @@
     Object.defineProperty(proto, property, {
       ...descriptor,
       set(value) {
-        const routed = routeToProxy(value);
-        return descriptor.set.call(this, routed || value);
+        const routed = routeToProxy(value) || value;
+        const sinkValue = proto === window.HTMLScriptElement.prototype && property === "src"
+          ? trustedScriptUrl(sinkValueString(routed))
+          : routed;
+        return descriptor.set.call(this, sinkValue);
       }
     });
   }
@@ -398,17 +448,32 @@
       const current = element.getAttribute(attribute);
       if (!current) continue;
       const routed = routeToProxy(current);
-      if (routed && routed !== current) nativeSetAttribute.call(element, attribute, routed);
+      if (routed && routed !== current) {
+        try {
+          setInterceptAttribute(element, attribute, routed);
+        } catch (error) {
+          // A hostile or incomplete CSP must not abort the entire controller.
+          // In particular, one rejected script URL cannot prevent toolbar and
+          // request interception initialization for the rest of the document.
+          record("dom_rewrite_error", selectorFor(element), attribute + ": " + String(error && error.message || error));
+        }
+      }
     }
     const srcset = element.getAttribute("srcset");
     if (srcset) {
       const routed = routeSrcset(srcset);
-      if (routed !== srcset) nativeSetAttribute.call(element, "srcset", routed);
+      if (routed !== srcset) {
+        try { nativeSetAttribute.call(element, "srcset", routed); }
+        catch (error) { record("dom_rewrite_error", selectorFor(element), "srcset: " + String(error && error.message || error)); }
+      }
     }
     const style = element.getAttribute("style");
     if (style) {
       const routed = routeCssValue(style);
-      if (routed !== style) nativeSetAttribute.call(element, "style", routed);
+      if (routed !== style) {
+        try { nativeSetAttribute.call(element, "style", routed); }
+        catch (error) { record("dom_rewrite_error", selectorFor(element), "style: " + String(error && error.message || error)); }
+      }
     }
   }
 
