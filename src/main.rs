@@ -1717,6 +1717,10 @@ async fn ajax_passthrough(
         Err(_) => return plain(StatusCode::METHOD_NOT_ALLOWED, "Unsupported HTTP method"),
     };
 
+    let has_body_framing = matches!(
+        method,
+        reqwest::Method::POST | reqwest::Method::PUT | reqwest::Method::PATCH
+    );
     let mut builder = client.request(method, upstream_url.clone());
     for (name, value) in request_headers.iter() {
         if should_skip_request_header(name) {
@@ -1742,8 +1746,14 @@ async fn ajax_passthrough(
         }
     }
 
-    // Request uploads remain bounded by MAX_REQUEST_BODY. Responses are streamed
-    // and are not subject to the document pipeline's 32 MiB buffering limit.
+    // The request body has already been buffered into Bytes, so its exact
+    // length is known. Set Content-Length explicitly: forwarding a browser
+    // request without its original framing can otherwise leave Google APIs
+    // seeing a POST with no length (HTTP 411).
+    let request_body_len = request_body.len();
+    if request_body_len > 0 || has_body_framing {
+        builder = builder.header(header::CONTENT_LENGTH, request_body_len);
+    }
     let upstream = tokio::select! {
         _ = wait_for_session_termination(session) => {
             return plain(StatusCode::GONE, "Session terminated");
@@ -2255,7 +2265,17 @@ async fn proxy(
                 builder = builder.header(name.clone(), value.clone());
             }
         }
-        builder = builder.header(header::ACCEPT_ENCODING, "identity").body(body);
+        // This path also forwards a fully buffered Bytes body. Reconstruct
+        // framing from its actual size instead of relying on incoming headers.
+        let request_body_len = body.len();
+        if request_body_len > 0
+            || matches!(parts.method, Method::POST | Method::PUT | Method::PATCH)
+        {
+            builder = builder.header(header::CONTENT_LENGTH, request_body_len);
+        }
+        builder = builder
+            .header(header::ACCEPT_ENCODING, "identity")
+            .body(body);
 
         let upstream = tokio::select! {
             _ = wait_for_session_termination(&session) => {
