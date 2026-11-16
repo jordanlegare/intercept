@@ -1743,10 +1743,46 @@ async fn ajax_passthrough(
     }
     };
 
+    let mut upstream = upstream;
     let status = upstream.status();
     let upstream_headers = upstream.headers().clone();
     let upstream_set_cookie = upstream_headers.contains_key(header::SET_COOKIE);
     let upstream_elapsed_ms = request_started.elapsed().as_millis();
+
+    // Preserve the upstream response stream while sampling only the first
+    // chunk of textual error responses. Google video endpoints commonly return
+    // a short XML error document for 403 responses; its Code/Message fields
+    // distinguish signature, IP, and policy failures that a status alone hides.
+    let mut error_prefix = None;
+    let mut error_preview = None;
+    let error_content_type = upstream_headers.get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    if !status.is_success()
+        && (error_content_type.starts_with("text/")
+            || error_content_type.contains("xml")
+            || error_content_type.contains("json"))
+    {
+        match upstream.chunk().await {
+            Ok(Some(chunk)) => {
+                error_preview = Some(clean_field(
+                    String::from_utf8_lossy(&chunk[..chunk.len().min(512)]).into_owned(),
+                    240,
+                ));
+                error_prefix = Some(chunk);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                debug!(
+                    host = %upstream_host,
+                    path = %upstream_path,
+                    error = %error.without_url(),
+                    "Could not sample upstream error response"
+                );
+            }
+        }
+    }
 
     let mut response = Response::builder().status(status);
     let response_headers = response.headers_mut().expect("fresh response builder");
@@ -1789,14 +1825,32 @@ async fn ajax_passthrough(
         }
     }
 
+    let response_diagnostics = if !status.is_success() {
+        let request_id_header = upstream_headers.get("x-guploader-uploadid")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| format!(" · guploader={}", clean_field(value.to_owned(), 80)))
+            .unwrap_or_default();
+        let content_type = if error_content_type.is_empty() {
+            String::new()
+        } else {
+            format!(" · type={}", clean_field(error_content_type.clone(), 80))
+        };
+        let preview = error_preview
+            .map(|value| format!(" · upstream={value}"))
+            .unwrap_or_default();
+        format!("{content_type}{request_id_header}{preview}")
+    } else {
+        String::new()
+    };
     push_event(
         session,
         "ajax_response",
         format!("{upstream_host}{upstream_path}"),
         format!(
-            "rid={request_id} · {} · headers in {}ms{}",
+            "rid={request_id} · {} · headers in {}ms{}{}",
             status.as_u16(),
             upstream_elapsed_ms,
+            response_diagnostics,
             input_trace.as_ref().map(|trace| format!(" · {trace}")).unwrap_or_default()
         ),
     ).await;
@@ -1816,7 +1870,10 @@ async fn ajax_passthrough(
     let cancelled = async move {
         wait_for_cancellation(&mut cancellation).await;
     };
-    let body_stream = upstream.bytes_stream().take_until(cancelled).map(move |chunk| {
+    let prefix_stream = futures_util::stream::iter(
+        error_prefix.into_iter().map(Ok::<_, io::Error>)
+    );
+    let remainder_stream = upstream.bytes_stream().take_until(cancelled).map(move |chunk| {
         let _keep_request_slot = &request_permit;
         chunk.map_err(|error| {
             let safe_error = error.without_url().to_string();
@@ -1829,6 +1886,7 @@ async fn ajax_passthrough(
             io::Error::other(safe_error)
         })
     });
+    let body_stream = prefix_stream.chain(remainder_stream);
     response.body(Body::from_stream(body_stream))
         .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "Could not build AJAX passthrough response"))
 }
