@@ -25,8 +25,12 @@
     #sessions a{color:#a9dcff;text-decoration:none;overflow-wrap:anywhere}
     #sessions a:hover{text-decoration:underline}
     .session-meta{font-size:10px;color:#8ea2bc;white-space:nowrap}
+    .session-actions{display:flex;align-items:center;gap:12px}
+    .terminate-session{width:auto;margin:0;padding:7px 10px;background:#351922;border:1px solid #81404d;color:#ffc1cb;font-size:10px;letter-spacing:.08em}
+    .terminate-session:hover{background:#542330}
+    .terminate-session:disabled{opacity:.5;cursor:wait}
     .empty{font-size:11px;color:#8192a9}
-    @media(max-width:620px){#sessions li{align-items:flex-start;flex-direction:column;gap:6px}.sessions-heading{flex-wrap:wrap}}
+    @media(max-width:620px){#sessions li{align-items:flex-start;flex-direction:column;gap:6px}.sessions-heading{flex-wrap:wrap}.session-actions{width:100%;justify-content:space-between}}
   </style>
 </head>
 <body>
@@ -89,10 +93,35 @@
         link.rel = "noopener noreferrer";
         link.textContent = session.target_url;
         link.title = "Open this active session in a new tab";
+        const actions = document.createElement("div");
+        actions.className = "session-actions";
         const meta = document.createElement("span");
         meta.className = "session-meta";
         meta.textContent = session.policy.toUpperCase() + " · " + session.state;
-        item.append(link, meta);
+        const terminate = document.createElement("button");
+        terminate.type = "button";
+        terminate.className = "terminate-session";
+        terminate.textContent = "KILL";
+        terminate.setAttribute("aria-label", "Terminate session for " + session.target_url);
+        terminate.addEventListener("click", async () => {
+          if (!window.confirm("Kill this live session? Its in-flight upstream requests will be cancelled and its browser tab will stop working.")) return;
+          terminate.disabled = true;
+          terminate.textContent = "KILLING…";
+          try {
+            const response = await fetch("/api/sessions/" + encodeURIComponent(session.id), {
+              method: "DELETE"
+            });
+            if (!response.ok) throw new Error(await response.text() || "Could not terminate session");
+            message.textContent = "Session terminated: " + session.target_url;
+            await refreshSessions();
+          } catch (error) {
+            terminate.disabled = false;
+            terminate.textContent = "KILL";
+            message.textContent = error.message || String(error);
+          }
+        });
+        actions.append(meta, terminate);
+        item.append(link, actions);
         sessionsList.append(item);
       }
     } catch (error) {
