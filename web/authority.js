@@ -177,7 +177,7 @@
       retained_event_limit: 500,
       events: latestEvents
     };
-    const blob = new Blob([JSON.stringify(payload, null, 2) + "\\n"], {
+    const blob = new Blob([JSON.stringify(payload, null, 2) + "\n"], {
       type: "application/json;charset=utf-8"
     });
     const objectUrl = URL.createObjectURL(blob);
