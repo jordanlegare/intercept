@@ -560,6 +560,13 @@
     }
 
     if (data.type === "intercept:authority-ready") {
+      // Acknowledge the handshake so the child frame can stop retrying.
+      // event.origin has already been checked against the trusted dashboard
+      // origin and event.source against this exact iframe's WindowProxy.
+      authorityFrame.contentWindow.postMessage({
+        type: "intercept:authority-ack",
+        session_id: sessionId
+      }, event.origin);
       authorityReady = true;
       if (authorityRetryTimer) window.clearTimeout(authorityRetryTimer);
       if (toolbarFallback) toolbarFallback.style.display = "none";
