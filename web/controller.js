@@ -707,12 +707,14 @@
       }
       const headers = new Headers(routedRequest.headers);
       headers.set("X-Intercept-Proxy-Mode", "ajax");
+      const bodyDetail = fetchBodyDiagnostic(input, init);
+      headers.set("X-Intercept-Body-Diagnostic", bodyDetail);
       const inputContext = addInputCorrelation(headers);
       const markedRequest = new Request(routedRequest, {headers});
       record(
         "ajax_dispatch",
         routed,
-        method + " · " + fetchBodyDiagnostic(input, init) + inputCorrelationDetail(inputContext)
+        method + " · " + bodyDetail + inputCorrelationDetail(inputContext)
       );
       return cookieWriteQueue.then(() => nativeFetch(markedRequest)).then(response => {
         if (response.headers.get("X-Intercept-Cookie-Updated") === "1") {
@@ -745,9 +747,11 @@
         } catch (_) {}
       });
       const inputContext = currentInputEvent();
+      const bodyDetail = requestBodyDiagnostic(args[0], args.length > 0);
       try {
         // Add internal metadata last, after page code has configured headers.
         nativeXhrSetRequestHeader.call(this, "X-Intercept-Proxy-Mode", "ajax");
+        nativeXhrSetRequestHeader.call(this, "X-Intercept-Body-Diagnostic", bodyDetail);
         if (inputContext) {
           nativeXhrSetRequestHeader.call(this, "X-Intercept-Input-Id", inputContext.id);
           nativeXhrSetRequestHeader.call(
@@ -763,9 +767,7 @@
       record(
         "ajax_dispatch",
         meta.url,
-        meta.method + " · " +
-          requestBodyDiagnostic(args[0], args.length > 0) +
-          inputCorrelationDetail(inputContext)
+        meta.method + " · " + bodyDetail + inputCorrelationDetail(inputContext)
       );
     }
     if (meta && meta.async && cookieWriteQueue) {
