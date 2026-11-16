@@ -120,6 +120,7 @@ struct Session {
     inflight: Arc<Semaphore>,
     max_inflight: usize,
     cookie_jar: Arc<SessionCookieJar>,
+    cookie_tokens: StdMutex<HashMap<String, String>>,
 }
 
 #[derive(Default)]
@@ -570,6 +571,7 @@ async fn cookie_bridge_get(
     let id = session_id_from_host(&headers)?;
     let session = find_session(&state, &id).await?;
     let upstream_url = cookie_bridge_target(&input.target, &session)?;
+    authorize_cookie_bridge_origin(&session, &headers, &upstream_url)?;
     Ok(Json(CookieBridgeResponse {
         cookie: session.cookie_jar.document_cookie_header(&upstream_url),
     }))
@@ -579,13 +581,16 @@ async fn cookie_bridge_set(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<CookieBridgeWrite>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<Json<CookieBridgeResponse>, (StatusCode, String)> {
     let id = session_id_from_host(&headers)?;
     let session = find_session(&state, &id).await?;
     let upstream_url = cookie_bridge_target(&input.target, &session)?;
+    authorize_cookie_bridge_origin(&session, &headers, &upstream_url)?;
     session.cookie_jar.set_document_cookie(&input.cookie, &upstream_url)
         .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(CookieBridgeResponse {
+        cookie: session.cookie_jar.document_cookie_header(&upstream_url),
+    }))
 }
 
 fn session_id_from_host(headers: &HeaderMap) -> Result<String, (StatusCode, String)> {
@@ -596,6 +601,26 @@ fn session_id_from_host(headers: &HeaderMap) -> Result<String, (StatusCode, Stri
         return Err((StatusCode::NOT_FOUND, "Unknown or expired session".into()));
     }
     Ok(id.to_owned())
+}
+
+fn authorize_cookie_bridge_origin(
+    session: &Session,
+    headers: &HeaderMap,
+    target: &Url,
+) -> Result<(), (StatusCode, String)> {
+    let token = headers.get("x-intercept-cookie-token")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or((StatusCode::FORBIDDEN, "Cookie bridge capability is missing or invalid".into()))?;
+    let allowed_origin = session.cookie_tokens.lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(token)
+        .cloned()
+        .ok_or((StatusCode::FORBIDDEN, "Cookie bridge capability has expired".into()))?;
+    if target.origin().ascii_serialization() != allowed_origin {
+        return Err((StatusCode::FORBIDDEN, "A document may only access cookies for its own upstream origin".into()));
+    }
+    Ok(())
 }
 
 fn cookie_bridge_target(target: &str, session: &Session) -> Result<Url, (StatusCode, String)> {
@@ -920,6 +945,7 @@ async fn create_session(
         inflight: Arc::new(Semaphore::new(state.max_inflight_per_session)),
         max_inflight: state.max_inflight_per_session,
         cookie_jar,
+        cookie_tokens: StdMutex::new(HashMap::new()),
     });
 
     // Preserve the submitted destination path, query, and browser-side fragment
@@ -2044,6 +2070,14 @@ async fn proxy(
         let rewrite_session_base = session.base_url.clone();
         let rewrite_session_id = id.clone();
         let rewrite_cookie_seed = session.cookie_jar.document_cookie_header(&upstream_url);
+        let rewrite_cookie_token = Uuid::new_v4().simple().to_string();
+        {
+            let mut tokens = session.cookie_tokens.lock().unwrap_or_else(|error| error.into_inner());
+            if tokens.len() >= 512 {
+                if let Some(oldest) = tokens.keys().next().cloned() { tokens.remove(&oldest); }
+            }
+            tokens.insert(rewrite_cookie_token.clone(), upstream_url.origin().ascii_serialization());
+        }
         let rewrite_worker_script = worker_script;
 
         let rewrite_result = tokio::task::spawn_blocking(move || {
@@ -2054,7 +2088,7 @@ async fn proxy(
 
             if let Ok(text) = std::str::from_utf8(&body) {
                 if rewrite_content_type.contains("text/html") {
-                    match rewrite_html(text, &rewrite_base, &rewrite_session_base, &rewrite_session_id, &rewrite_cookie_seed) {
+                    match rewrite_html(text, &rewrite_base, &rewrite_session_base, &rewrite_session_id, &rewrite_cookie_seed, &rewrite_cookie_token) {
                         Ok(rewritten) => {
                             body = rewritten.into_bytes();
                             transformed = true;
@@ -2385,6 +2419,7 @@ fn rewrite_html(
     session_base: &Url,
     session_id: &str,
     cookie_seed: &str,
+    cookie_token: &str,
 ) -> Result<String, String> {
     let html_with_styles = HTML_STYLE_BLOCK_RE.replace_all(html, |captures: &regex::Captures<'_>| {
         let open = captures.get(1).map(|m| m.as_str()).unwrap_or("");
@@ -2458,6 +2493,7 @@ fn rewrite_html(
     let primary_origin = base.origin().ascii_serialization();
     let primary_origin_for_head = primary_origin.clone();
     let cookie_seed_for_head = cookie_seed.to_owned();
+    let cookie_token_for_head = cookie_token.to_owned();
     let controller_nonce = HTML_SCRIPT_NONCE_RE.captures(&html_with_styles_and_scripts).and_then(|captures| {
         captures.get(1).or_else(|| captures.get(2)).map(|value| escape_html_attribute(value.as_str()))
     });
@@ -2466,8 +2502,9 @@ fn rewrite_html(
             .map(|nonce| format!(r#" nonce="{nonce}""#))
             .unwrap_or_default();
         let head = format!(
-            r#"<script data-intercept-controller="true" src="/assets/controller.js" data-session="{id_for_head}" data-upstream-origin="{primary_origin_for_head}" data-cookie-seed="{}"{nonce_attr}></script><link data-intercept-styles="true" rel="stylesheet" href="/assets/intercept.css">"#,
-            escape_html_attribute(&cookie_seed_for_head)
+            r#"<script data-intercept-controller="true" src="/assets/controller.js" data-session="{id_for_head}" data-upstream-origin="{primary_origin_for_head}" data-cookie-seed="{}" data-cookie-token="{}"{nonce_attr}></script><link data-intercept-styles="true" rel="stylesheet" href="/assets/intercept.css">"#,
+            escape_html_attribute(&cookie_seed_for_head),
+            escape_html_attribute(&cookie_token_for_head)
         );
         el.prepend(&head, ContentType::Html);
         Ok(())
@@ -2492,10 +2529,10 @@ fn rewrite_html(
             rewrite_meta_csp_tags(&html_with_styles_and_scripts, session_id)
         }
     };
-    Ok(ensure_controller_bootstrap(&rewritten, session_id, &primary_origin, cookie_seed))
+    Ok(ensure_controller_bootstrap(&rewritten, session_id, &primary_origin, cookie_seed, cookie_token))
 }
 
-fn ensure_controller_bootstrap(html: &str, session_id: &str, primary_origin: &str, cookie_seed: &str) -> String {
+fn ensure_controller_bootstrap(html: &str, session_id: &str, primary_origin: &str, cookie_seed: &str, cookie_token: &str) -> String {
     if html.contains("data-intercept-controller=") {
         return html.to_owned();
     }
@@ -2507,10 +2544,11 @@ fn ensure_controller_bootstrap(html: &str, session_id: &str, primary_origin: &st
         format!(r#" nonce="{}""#, escape_html_attribute(value))
     }).unwrap_or_default();
     let bootstrap = format!(
-        r#"<script data-intercept-controller="true" src="/assets/controller.js" data-session="{}" data-upstream-origin="{}" data-cookie-seed="{}"{}></script><link data-intercept-styles="true" rel="stylesheet" href="/assets/intercept.css">"#,
+        r#"<script data-intercept-controller="true" src="/assets/controller.js" data-session="{}" data-upstream-origin="{}" data-cookie-seed="{}" data-cookie-token="{}"{}></script><link data-intercept-styles="true" rel="stylesheet" href="/assets/intercept.css">"#,
         escape_html_attribute(session_id),
         escape_html_attribute(primary_origin),
         escape_html_attribute(cookie_seed),
+        escape_html_attribute(cookie_token),
         nonce_attr,
     );
 
@@ -3062,6 +3100,8 @@ mod tests {
             start_delay_nanos: AtomicU64::new(0),
             inflight: Arc::new(Semaphore::new(8)),
             max_inflight: 8,
+            cookie_jar: Arc::new(SessionCookieJar::default()),
+            cookie_tokens: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -3482,10 +3522,21 @@ mod tests {
     }
 
     #[test]
+    fn cookie_bridge_capability_is_bound_to_its_upstream_origin() {
+        let session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        let token = "0123456789abcdef0123456789abcdef";
+        session.cookie_tokens.lock().unwrap().insert(token.to_owned(), "https://example.com".to_owned());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-intercept-cookie-token", HeaderValue::from_static(token));
+        assert!(authorize_cookie_bridge_origin(&session, &headers, &Url::parse("https://example.com/consent").unwrap()).is_ok());
+        assert!(authorize_cookie_bridge_origin(&session, &headers, &Url::parse("https://other.example/consent").unwrap()).is_err());
+    }
+
+    #[test]
     fn html_rewriter_injects_controller_and_styles() {
         let base = Url::parse("https://example.com/").unwrap();
         let html = r#"<!doctype html><html><head></head><body></body></html>"#;
-        let result = rewrite_html(html, &base, &base, "session123", "consent=yes").unwrap();
+        let result = rewrite_html(html, &base, &base, "session123", "consent=yes", "0123456789abcdef0123456789abcdef").unwrap();
         assert!(result.contains("data-intercept-controller"));
         assert!(result.contains("/assets/controller.js"));
         assert!(result.contains("/assets/intercept.css"));
@@ -3496,7 +3547,7 @@ mod tests {
     fn html_controller_injection_handles_pages_without_head_or_body() {
         let base = Url::parse("https://example.com/").unwrap();
         let html = r#"<!doctype html><html><main>fragment</main></html>"#;
-        let result = rewrite_html(html, &base, &base, "session123").unwrap();
+        let result = rewrite_html(html, &base, &base, "session123", "consent=yes", "0123456789abcdef0123456789abcdef").unwrap();
         assert!(result.contains("data-intercept-controller"));
         assert!(result.contains("/assets/controller.js"));
     }
@@ -3508,6 +3559,7 @@ mod tests {
             "session123",
             "https://example.com",
             "consent=yes",
+            "0123456789abcdef0123456789abcdef",
         );
         assert!(result.contains(r#"nonce="abc123""#));
         assert!(result.contains("data-intercept-controller"));
@@ -3556,7 +3608,7 @@ mod tests {
     fn rewrites_meta_csp_and_removes_strict_dynamic_for_the_session_controller() {
         let base = Url::parse("https://example.com/").unwrap();
         let html = r#"<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="script-src 'nonce-abc' 'strict-dynamic' https://cdn.example; default-src 'self'"></head><body></body></html>"#;
-        let result = rewrite_html(html, &base, &base, "session123").unwrap();
+        let result = rewrite_html(html, &base, &base, "session123", "consent=yes", "0123456789abcdef0123456789abcdef").unwrap();
         assert!(result.contains("script-src 'nonce-abc'"));
         assert!(!result.contains("'strict-dynamic'"));
         assert!(result.contains("http://session123.localhost:5000"));
