@@ -2398,7 +2398,9 @@ fn proxy_origin(session_id: &str) -> String {
 
 fn proxy_origin_prefix(target: &Url, session_base: &Url, session_id: &str) -> String {
     if target.origin() == session_base.origin() {
-        return format!("/p/{session_id}");
+        // Primary-origin paths stay at the session host root. This preserves
+        // upstream cookie Path semantics and supports SPA pushState URLs.
+        return String::new();
     }
     let origin = target.origin().ascii_serialization();
     let authority = origin.strip_prefix(&format!("{}://", target.scheme())).unwrap_or("");
@@ -2542,7 +2544,14 @@ fn rewrite_location(location: &str, current: &Url, session_base: &Url, session_i
 }
 
 fn rewrite_set_cookie(cookie: &str, target: &Url, session_base: &Url, session_id: &str) -> String {
-    let prefix = proxy_origin_prefix(target, session_base, session_id);
+    // Primary-origin responses are served at the session host root, so their
+    // original Path attributes remain valid. Secondary origins are isolated
+    // under their encoded proxy path.
+    let prefix = if target.origin() == session_base.origin() {
+        String::new()
+    } else {
+        proxy_origin_prefix(target, session_base, session_id)
+    };
     let mut parts = cookie
         .split(';')
         .map(str::trim)
@@ -2553,13 +2562,22 @@ fn rewrite_set_cookie(cookie: &str, target: &Url, session_base: &Url, session_id
     for part in &mut parts {
         if part.to_ascii_lowercase().starts_with("path=") {
             let upstream_path = part[5..].trim();
-            let suffix = if upstream_path.is_empty() { "/" } else if upstream_path.starts_with('/') { upstream_path } else { "" };
+            let suffix = if upstream_path.is_empty() {
+                "/"
+            } else if upstream_path.starts_with('/') {
+                upstream_path
+            } else {
+                ""
+            };
             *part = format!("Path={prefix}{suffix}");
             found_path = true;
         }
     }
     if !found_path {
-        parts.push(format!("Path={prefix}/"));
+        let default_path = target.path().rsplit_once('/').map(|(directory, _)| {
+            if directory.is_empty() { "/" } else { directory }
+        }).unwrap_or("/");
+        parts.push(format!("Path={prefix}{default_path}"));
     }
     parts.join("; ")
 }
@@ -3247,7 +3265,7 @@ mod tests {
         let base = Url::parse("https://example.com/account/").unwrap();
         assert_eq!(
             rewrite_url(&base, &base, "session123", "../settings?tab=security"),
-            Some("http://session123.localhost:5000/p/session123/settings?tab=security".to_owned())
+            Some("http://session123.localhost:5000/settings?tab=security".to_owned())
         );
         assert_eq!(
             rewrite_url(&base, &base, "session123", "https://cdn.example/image.png"),
@@ -3260,7 +3278,7 @@ mod tests {
         let target = Url::parse("https://example.com/account/settings?tab=security#sessions").unwrap();
         assert_eq!(
             local_url(&target, "session123"),
-            "http://session123.localhost:5000/p/session123/account/settings?tab=security#sessions"
+            "http://session123.localhost:5000/account/settings?tab=security#sessions"
         );
     }
 
@@ -3269,15 +3287,15 @@ mod tests {
         let target = Url::parse("https://example.com/?mode=compact#top").unwrap();
         assert_eq!(
             local_url(&target, "session123"),
-            "http://session123.localhost:5000/p/session123/?mode=compact#top"
+            "http://session123.localhost:5000/?mode=compact#top"
         );
     }
 
     #[test]
-    fn rewrites_cookie_paths_to_the_session_prefix() {
+    fn preserves_primary_origin_cookie_paths_for_session_root() {
         assert_eq!(
             rewrite_set_cookie("sid=abc; Domain=example.com; Path=/admin; HttpOnly", &Url::parse("https://example.com/").unwrap(), &Url::parse("https://example.com/").unwrap(), "session123"),
-            "sid=abc; Path=/p/session123/admin; HttpOnly"
+            "sid=abc; Path=/admin; HttpOnly"
         );
     }
 
@@ -3321,7 +3339,7 @@ mod tests {
             &Url::parse("https://example.com/").unwrap(),
             "session123",
         ).unwrap();
-        assert!(output.contains("/p/session123/images/bg.png"));
+        assert!(output.contains("/images/bg.png"));
         assert!(output.contains("/p/session123/_/https/cdn.example/theme.css"));
     }
 
