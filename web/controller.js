@@ -426,7 +426,7 @@
     frame.referrerPolicy = "no-referrer";
     root.appendChild(frame);
     placeholder.remove();
-    document.body.appendChild(host);
+    document.documentElement.appendChild(host);
     document.documentElement.classList.add("intercept-session-page");
     document.body.classList.add("intercept-session-page");
     nativeAdd.call(window, "message", event => {
