@@ -692,6 +692,14 @@ async fn start_timer(
         return Ok(Json(status_for(&session).await));
     }
 
+    push_event(
+        &session,
+        "timer_started",
+        "authority",
+        format!("{:.9} seconds", duration.as_secs_f64()),
+    ).await;
+    info!(session = %session.id, delay_ms = duration.as_millis(), "Authorization timer started");
+
     let timer_session = Arc::clone(&session);
     tokio::spawn(async move {
         sleep_until(deadline).await;
@@ -700,6 +708,12 @@ async fn start_timer(
             *gate = GateState::Released;
             drop(gate);
             timer_session.gate_tx.send_replace(GateState::Released);
+            push_event(
+                &timer_session,
+                "authorization_released",
+                "authority",
+                "Timer completed; state-changing requests are now authorized".to_owned(),
+            ).await;
             info!(session = %timer_session.id, "Timer expired; state-changing requests are now authorized");
         }
     });
