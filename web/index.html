@@ -10,7 +10,7 @@
     *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(ellipse at 50% 0,#17243a 0,transparent 58%),#0a0e14}
     main{width:min(760px,100%);border:1px solid #29384e;background:#101722;padding:clamp(22px,5vw,42px);box-shadow:0 24px 80px #0008}
     .mark{color:#73d1ff;letter-spacing:.18em;font-size:12px}h1{font-size:clamp(32px,7vw,56px);letter-spacing:-.06em;margin:12px 0}p{line-height:1.65;color:#a9b7ca}
-    label{display:block;color:#dce8f7;font-size:12px;margin:28px 0 8px}input{width:100%;background:#080d14;color:#f1f6ff;border:1px solid #34465e;padding:15px;font:inherit;outline:none}input:focus{border-color:#73d1ff}
+    label{display:block;color:#dce8f7;font-size:12px;margin:28px 0 8px}input,select,textarea{width:100%;background:#080d14;color:#f1f6ff;border:1px solid #34465e;padding:15px;font:inherit;outline:none}input:focus,select:focus,textarea:focus{border-color:#73d1ff}textarea{resize:vertical}
     button{margin-top:14px;width:100%;padding:15px;background:#73d1ff;border:0;color:#07111c;font:700 14px inherit;letter-spacing:.12em;cursor:pointer}button:hover{background:#a2e2ff}
     #message{min-height:1.5em;color:#ffca80;font-size:12px;margin-top:14px}
     .rule{height:1px;background:#29384e;margin:30px 0}.small{font-size:11px;color:#8192a9}
@@ -25,6 +25,10 @@
   <form id="launch">
     <label for="target">UPSTREAM WEBSITE</label>
     <input id="target" name="url" type="url" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://example.com/" value="https://example.com/" required>
+    <label for="policy">AUTHORIZATION POLICY</label>
+    <select id="policy" name="policy"><option value="standard">STANDARD · block state-changing methods</option><option value="strict">STRICT · hold all upstream requests after bootstrap</option><option value="custom">CUSTOM · apply JSON rules, otherwise Standard</option></select>
+    <label for="rules">CUSTOM RULES (JSON)</label>
+    <textarea id="rules" name="rules" rows="4" spellcheck="false" placeholder='[{"host":"example.com","path_prefix":"/api/","methods":["GET"],"hold":true}]'></textarea>
     <button type="submit">OPEN THROUGH INTERCEPT →</button>
     <div id="message" role="status"></div>
   </form>
@@ -45,7 +49,13 @@
       const response = await fetch("/api/sessions", {
         method: "POST",
         headers: {"content-type":"application/json"},
-        body: JSON.stringify({url: document.querySelector("#target").value.trim()})
+        body: JSON.stringify({
+          url: document.querySelector("#target").value.trim(),
+          policy: document.querySelector("#policy").value,
+          rules: document.querySelector("#policy").value === "custom"
+            ? JSON.parse(document.querySelector("#rules").value || "[]")
+            : []
+        })
       });
       if (!response.ok) throw new Error(await response.text() || "Could not create proxy session");
       const data = await response.json();
