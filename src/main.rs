@@ -327,6 +327,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/p/{id}", any(proxy))
         .route("/p/{id}/", any(proxy))
         .route("/p/{id}/{*path}", any(proxy))
+        .fallback(proxy_session_origin)
         .layer(middleware::from_fn_with_state(state.clone(), host_and_cors_guard))
         .with_state(state.clone());
 
@@ -503,7 +504,9 @@ async fn host_and_cors_guard(
     // The dashboard and control API accept either loopback alias, but an
     // Origin-bearing request must use the same alias as its Host header.
     // Proxied pages continue to use their unique <session>.localhost origin.
-    if path == "/" || path == "/api/sessions" || path.starts_with("/api/sessions/") {
+    if (path == "/" && is_dashboard_host(host))
+        || path == "/api/sessions"
+        || path.starts_with("/api/sessions/") {
         if !is_dashboard_host(host) {
             return plain(
                 StatusCode::MISDIRECTED_REQUEST,
@@ -579,8 +582,35 @@ async fn host_and_cors_guard(
     next.run(request).await
 }
 
-async fn index() -> Html<&'static str> {
-    Html(include_str!("../web/index.html"))
+async fn index(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    request: Request<Body>,
+) -> Response<Body> {
+    let host = request.headers().get(header::HOST)
+        .and_then(|value| value.to_str().ok()).unwrap_or("");
+    if is_dashboard_host(host) {
+        return Html(include_str!("../web/index.html")).into_response();
+    }
+    proxy_session_origin(State(state), OriginalUri(uri), request).await
+}
+
+async fn proxy_session_origin(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    request: Request<Body>,
+) -> Response<Body> {
+    let host = request.headers().get(header::HOST)
+        .and_then(|value| value.to_str().ok()).unwrap_or("");
+    let Some(id) = host.strip_suffix(&format!(".localhost:{SESSION_PORT}")) else {
+        return plain(StatusCode::NOT_FOUND, "No proxy route matches this URL");
+    };
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return plain(StatusCode::NOT_FOUND, "No proxy route matches this URL");
+    }
+    let mut params = HashMap::new();
+    params.insert("id".to_owned(), id.to_owned());
+    proxy(State(state), Path(params), OriginalUri(uri), request).await
 }
 
 async fn controller_js() -> impl IntoResponse {
@@ -1973,8 +2003,10 @@ async fn proxy(
 
 fn upstream_url_for_request(uri: &axum::http::Uri, session: &Session) -> Result<Url, String> {
     let prefix = format!("/p/{}", session.id);
-    let suffix = uri.path().strip_prefix(&prefix)
-        .ok_or_else(|| "Request path is outside this session".to_owned())?;
+    // History API navigations (notably YouTube SPA search) may leave the
+    // canonical /p/{id} prefix in the visible URL. Such paths still arrive
+    // on the session-specific host and must resolve to the primary upstream.
+    let suffix = uri.path().strip_prefix(&prefix).unwrap_or_else(|| uri.path());
 
     if let Some(encoded_origin) = suffix.strip_prefix("/_/") {
         let (scheme, host_and_path) = encoded_origin.split_once('/')
@@ -2975,6 +3007,37 @@ mod tests {
         assert!(!vary_header_is_supported("*"));
         assert!(!vary_header_is_supported("Accept, *"));
         assert!(!vary_header_is_supported("not a header name"));
+    }
+
+    #[test]
+    fn session_host_root_paths_proxy_to_the_primary_upstream_origin() {
+        let mut session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        session.base_url = Url::parse("https://www.youtube.com/").unwrap();
+
+        let uri = "/results?search_query=a".parse::<axum::http::Uri>().unwrap();
+        assert_eq!(
+            upstream_url_for_request(&uri, &session).unwrap().as_str(),
+            "https://www.youtube.com/results?search_query=a"
+        );
+
+        let root = "/".parse::<axum::http::Uri>().unwrap();
+        assert_eq!(
+            upstream_url_for_request(&root, &session).unwrap().as_str(),
+            "https://www.youtube.com/"
+        );
+    }
+
+    #[test]
+    fn canonical_session_paths_keep_existing_upstream_mapping() {
+        let mut session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        session.base_url = Url::parse("https://www.youtube.com/").unwrap();
+
+        let uri = format!("/p/{}/results?search_query=a", session.id)
+            .parse::<axum::http::Uri>().unwrap();
+        assert_eq!(
+            upstream_url_for_request(&uri, &session).unwrap().as_str(),
+            "https://www.youtube.com/results?search_query=a"
+        );
     }
 
     #[test]
