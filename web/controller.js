@@ -589,6 +589,19 @@
     return "body_arg=" + (type || typeof body) + " body_arg_bytes=unknown";
   }
 
+  function fetchEventPath(source) {
+    try {
+      const candidate = new URL(
+        source instanceof Request ? source.url : String(source),
+        document.baseURI
+      );
+      // Keep event exports useful without recording URL query parameters.
+      return candidate.pathname.slice(0, 180);
+    } catch (_) {
+      return "unknown";
+    }
+  }
+
   function fetchBodyDiagnostic(input, init) {
     if (init && Object.prototype.hasOwnProperty.call(init, "body") &&
         init.body !== undefined) {
@@ -870,11 +883,24 @@
         routed,
         method + " · " + bodyDetail + inputCorrelationDetail(inputContext)
       );
+      const fetchEventTarget = fetchEventPath(source);
       return cookieWriteQueue.then(() => nativeFetch(markedRequest)).then(response => {
+        record(
+          "fetch_response",
+          fetchEventTarget,
+          "status=" + response.status + " · ok=" + response.ok
+        );
         if (response.headers.get("X-Intercept-Cookie-Updated") === "1") {
           return refreshCookieMirror().then(() => response);
         }
         return response;
+      }, error => {
+        // Do not log the error message: browser errors may contain full URLs
+        // or other request-specific values. The error class is sufficient to
+        // distinguish a rejected Fetch from an HTTP response.
+        const errorName = String(error && error.name || "unknown").slice(0, 40);
+        record("fetch_error", fetchEventTarget, "error_name=" + errorName);
+        throw error;
       });
     } catch (error) {
       record("ajax_route_error", String(source), String(error && error.message || error));
