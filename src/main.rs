@@ -2088,12 +2088,18 @@ fn rewrite_csp(policy: &str, session_id: &str) -> String {
         "media-src", "connect-src", "frame-src", "child-src", "worker-src",
         "manifest-src", "prefetch-src", "form-action", "base-uri", "object-src",
     ];
-    policy.split(';')
+    let mut has_style_src = false;
+    let mut rewritten = policy.split(';')
         .filter_map(|directive| {
             let mut tokens = directive.split_whitespace();
             let name = tokens.next()?;
             if name.eq_ignore_ascii_case("upgrade-insecure-requests") {
                 return None;
+            }
+            let is_style_src = name.eq_ignore_ascii_case("style-src");
+            let is_style_element = name.eq_ignore_ascii_case("style-src-elem");
+            if is_style_src {
+                has_style_src = true;
             }
             let mut values = tokens.map(str::to_owned).collect::<Vec<_>>();
             if SOURCE_DIRECTIVES.iter().any(|candidate| name.eq_ignore_ascii_case(candidate)) {
@@ -2102,6 +2108,16 @@ fn rewrite_csp(policy: &str, session_id: &str) -> String {
                 // Nonce-bearing injected scripts retain the source's nonce path.
                 if name.eq_ignore_ascii_case("script-src") || name.eq_ignore_ascii_case("script-src-elem") {
                     values.retain(|value| !value.eq_ignore_ascii_case("'strict-dynamic'"));
+                }
+                // Proxied sites commonly use inline style blocks for layout and
+                // runtime rendering. Rewriting the allowed origins alone does not
+                // authorize those blocks when style-src falls back to default-src.
+                // Permit inline CSS only; script execution remains governed by the
+                // original script directives and their nonce/hash requirements.
+                if is_style_src || is_style_element {
+                    if !values.iter().any(|value| value.eq_ignore_ascii_case("'unsafe-inline'")) {
+                        values.push("'unsafe-inline'".to_owned());
+                    }
                 }
                 for value in &mut values {
                     if value.starts_with("http://") || value.starts_with("https://") || value.starts_with("*.") {
@@ -2121,8 +2137,13 @@ fn rewrite_csp(policy: &str, session_id: &str) -> String {
             }
             Some(if values.is_empty() { name.to_owned() } else { format!("{name} {}", values.join(" ")) })
         })
-        .collect::<Vec<_>>()
-        .join("; ")
+        .collect::<Vec<_>>();
+    // If no explicit style-src exists, default-src would otherwise continue to
+    // block inline CSS. Add a narrow style policy rather than weakening default-src.
+    if !has_style_src {
+        rewritten.push(format!("style-src 'unsafe-inline' {local_origin}"));
+    }
+    rewritten.join("; ")
 }
 
 fn should_skip_request_header(name: &HeaderName) -> bool {
@@ -2555,6 +2576,29 @@ mod tests {
         assert!(result.contains("script-src 'nonce-abc'"));
         assert!(!result.contains("'strict-dynamic'"));
         assert!(result.contains("http://session123.localhost:5000"));
+    }
+
+    
+    #[test]
+    fn csp_rewrite_allows_inline_styles_when_only_default_src_is_present() {
+        let output = rewrite_csp(
+            "default-src http://upstream.example",
+            "session1234567890abcdef1234567890",
+        );
+        assert!(output.contains("style-src 'unsafe-inline' http://session1234567890abcdef1234567890.localhost:5000"));
+        assert!(output.contains("default-src http://session1234567890abcdef1234567890.localhost:5000"));
+    }
+
+    #[test]
+    fn csp_rewrite_allows_inline_styles_in_explicit_style_directives() {
+        let output = rewrite_csp(
+            "default-src 'self'; style-src 'self'; style-src-elem 'self'",
+            "session1234567890abcdef1234567890",
+        );
+        let style_src = output.split(';').find(|part| part.trim_start().starts_with("style-src ")).unwrap();
+        let style_elem = output.split(';').find(|part| part.trim_start().starts_with("style-src-elem ")).unwrap();
+        assert!(style_src.contains("'unsafe-inline'"));
+        assert!(style_elem.contains("'unsafe-inline'"));
     }
 
     #[test]
