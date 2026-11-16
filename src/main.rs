@@ -1717,6 +1717,10 @@ async fn ajax_passthrough(
         Err(_) => return plain(StatusCode::METHOD_NOT_ALLOWED, "Unsupported HTTP method"),
     };
 
+    let has_body_framing = matches!(
+        method,
+        reqwest::Method::POST | reqwest::Method::PUT | reqwest::Method::PATCH
+    );
     let mut builder = client.request(method, upstream_url.clone());
     for (name, value) in request_headers.iter() {
         if should_skip_request_header(name) {
@@ -1747,9 +1751,7 @@ async fn ajax_passthrough(
     // request without its original framing can otherwise leave Google APIs
     // seeing a POST with no length (HTTP 411).
     let request_body_len = request_body.len();
-    if request_body_len > 0
-        || matches!(method, reqwest::Method::POST | reqwest::Method::PUT | reqwest::Method::PATCH)
-    {
+    if request_body_len > 0 || has_body_framing {
         builder = builder.header(header::CONTENT_LENGTH, request_body_len);
     }
     let upstream = tokio::select! {
