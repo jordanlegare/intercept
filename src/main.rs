@@ -1390,10 +1390,6 @@ async fn ajax_passthrough(
             if let Some(referer) = rewrite_referer(value, session) {
                 builder = builder.header(name.clone(), referer);
             }
-        } else if name == header::COOKIE {
-            if let Some(cookie) = rewrite_cookie_request_header(value, &upstream_url, &session.base_url) {
-                builder = builder.header(name.clone(), cookie);
-            }
         } else if name.as_str() == "sec-fetch-site" {
             let fetch_site = if upstream_url.origin() == session.base_url.origin() {
                 "same-origin"
@@ -2402,8 +2398,8 @@ fn proxy_origin(session_id: &str) -> String {
 
 fn proxy_origin_prefix(target: &Url, session_base: &Url, session_id: &str) -> String {
     if target.origin() == session_base.origin() {
-        // Primary-origin paths stay at the session host root. This preserves
-        // upstream cookie Path semantics and supports SPA pushState URLs.
+        // Keep the primary upstream origin at the session-host root so SPA
+        // root-relative navigation remains inside the intercepted session.
         return String::new();
     }
     let origin = target.origin().ascii_serialization();
@@ -2547,81 +2543,25 @@ fn rewrite_location(location: &str, current: &Url, session_base: &Url, session_i
     }
 }
 
-fn cookie_namespace(target: &Url, session_base: &Url) -> String {
-    if target.origin() == session_base.origin() {
-        return String::new();
-    }
-    let encoded = origin_key(target).as_bytes().iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("__ix_{encoded}__")
-}
-
-fn rewrite_cookie_request_header(
-    value: &HeaderValue,
-    target: &Url,
-    session_base: &Url,
-) -> Option<HeaderValue> {
-    let namespace = cookie_namespace(target, session_base);
-    let cookies = value.to_str().ok()?.split(';').filter_map(|part| {
-        let (name, value) = part.trim().split_once('=')?;
-        if namespace.is_empty() {
-            if name.starts_with("__ix_") { return None; }
-            Some(format!("{name}={value}"))
-        } else {
-            name.strip_prefix(&namespace)
-                .map(|original_name| format!("{original_name}={value}"))
-        }
-    }).collect::<Vec<_>>();
-    if cookies.is_empty() { return None; }
-    HeaderValue::from_str(&cookies.join("; ")).ok()
-}
-
-fn cookie_domain_matches_target(domain: &str, target: &Url) -> bool {
-    let domain = domain.trim().trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase();
-    target.host_str().is_some_and(|host| {
-        let host = host.trim_end_matches('.').to_ascii_lowercase();
-        host == domain || host.ends_with(&format!(".{domain}"))
-    })
-}
-
 fn rewrite_set_cookie(cookie: &str, target: &Url, session_base: &Url, session_id: &str) -> String {
-    let namespace = cookie_namespace(target, session_base);
-    let prefix = if target.origin() == session_base.origin() {
-        String::new()
-    } else {
-        proxy_origin_prefix(target, session_base, session_id)
-    };
-    let mut parts = cookie.split(';').map(str::trim).map(str::to_owned).collect::<Vec<_>>();
-    if parts.is_empty() { return String::new(); }
-    if let Some((name, value)) = parts[0].split_once('=') {
-        parts[0] = format!("{namespace}{name}={value}");
-    }
+    let prefix = proxy_origin_prefix(target, session_base, session_id);
+    let mut parts = cookie
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.to_ascii_lowercase().starts_with("domain="))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     let mut found_path = false;
-    let mut index = 1;
-    while index < parts.len() {
-        let lower = parts[index].to_ascii_lowercase();
-        if lower.starts_with("domain=") {
-            if !cookie_domain_matches_target(&parts[index][7..], target) {
-                // Do not broaden cookies whose Domain would be rejected by a browser.
-                return String::new();
-            }
-            parts.remove(index);
-            continue;
-        }
-        if lower.starts_with("path=") {
-            let upstream_path = parts[index][5..].trim();
-            let suffix = if upstream_path.starts_with('/') { upstream_path } else { "/" };
-            parts[index] = format!("Path={prefix}{suffix}");
+    for part in &mut parts {
+        if part.to_ascii_lowercase().starts_with("path=") {
+            let upstream_path = part[5..].trim();
+            let suffix = if upstream_path.is_empty() { "/" } else if upstream_path.starts_with('/') { upstream_path } else { "" };
+            *part = format!("Path={prefix}{suffix}");
             found_path = true;
         }
-        index += 1;
     }
     if !found_path {
-        let default_path = target.path().rsplit_once('/').map(|(directory, _)| {
-            if directory.is_empty() { "/" } else { directory }
-        }).unwrap_or("/");
-        parts.push(format!("Path={prefix}{default_path}"));
+        parts.push(format!("Path={prefix}/"));
     }
     parts.join("; ")
 }
@@ -3344,35 +3284,6 @@ mod tests {
     }
 
     #[test]
-    fn namespaces_secondary_origin_cookies_and_filters_them_on_requests() {
-        let primary = Url::parse("https://example.com/").unwrap();
-        let secondary = Url::parse("https://cdn.example/assets/app.js").unwrap();
-        let namespace = cookie_namespace(&secondary, &primary);
-        let browser_cookie = HeaderValue::from_str(&format!(
-            "primary=one; {namespace}session=two; {namespace}__Host-token=three"
-        )).unwrap();
-        assert_eq!(
-            rewrite_cookie_request_header(&browser_cookie, &secondary, &primary).unwrap(),
-            "session=two; __Host-token=three"
-        );
-        assert_eq!(
-            rewrite_cookie_request_header(&browser_cookie, &primary, &primary).unwrap(),
-            "primary=one"
-        );
-        let unrelated = HeaderValue::from_static("unrelated=1");
-        assert!(rewrite_cookie_request_header(&unrelated, &secondary, &primary).is_none());
-    }
-
-    #[test]
-    fn rejects_cookie_domain_attributes_outside_the_upstream_host() {
-        let target = Url::parse("https://shop.example.com/").unwrap();
-        assert_eq!(
-            rewrite_set_cookie("bad=1; Domain=attacker.example; Path=/", &target, &target, "session123"),
-            ""
-        );
-    }
-
-    #[test]
     fn html_rewriter_injects_controller_and_styles() {
         let base = Url::parse("https://example.com/").unwrap();
         let html = r#"<!doctype html><html><head></head><body></body></html>"#;
@@ -3420,7 +3331,6 @@ mod tests {
     fn scopes_external_cookies_to_their_proxy_origin_path() {
         let primary = Url::parse("https://example.com/").unwrap();
         let cdn = Url::parse("https://cdn.example/").unwrap();
-        let namespace = cookie_namespace(&cdn, &primary);
         assert_eq!(
             rewrite_set_cookie(
                 "asset=abc; Domain=cdn.example; Path=/; HttpOnly",
@@ -3428,7 +3338,7 @@ mod tests {
                 &primary,
                 "session123",
             ),
-            format!("{namespace}asset=abc; Path=/p/session123/_/https/cdn.example/; HttpOnly")
+            "asset=abc; Path=/p/session123/_/https/cdn.example/; HttpOnly"
         );
     }
 
