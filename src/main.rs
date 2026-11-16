@@ -1,8 +1,8 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{Arc, LazyLock},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -33,6 +33,7 @@ use uuid::Uuid;
 const LISTEN: &str = "127.0.0.1:5000";
 const MAX_REQUEST_BODY: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE_BODY: usize = 32 * 1024 * 1024;
+const MAX_EVENTS: usize = 500;
 const MAX_DELAY_SECONDS: u64 = 24 * 60 * 60;
 const MIN_DELAY_NANOS: f64 = 0.000_000_001;
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
@@ -79,6 +80,7 @@ struct Session {
     cache: Mutex<ResourceCache>,
     gate: Mutex<GateState>,
     gate_tx: watch::Sender<GateState>,
+    events: Mutex<VecDeque<ActionEvent>>,
 }
 
 #[derive(Default)]
@@ -118,10 +120,26 @@ struct StartTimer {
     delay_seconds: f64,
 }
 
+#[derive(Debug, Deserialize)]
+struct EventInput {
+    kind: String,
+    target: Option<String>,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct ActionEvent {
+    at_unix_ms: u128,
+    kind: String,
+    target: String,
+    detail: String,
+}
+
 #[derive(Debug, Serialize)]
 struct StatusResponse {
     state: &'static str,
     remaining_ms: u64,
+    event_count: usize,
 }
 
 #[tokio::main]
@@ -156,6 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions", post(create_session))
         .route("/api/sessions/{id}/start", post(start_timer))
         .route("/api/sessions/{id}/status", get(session_status))
+        .route("/api/sessions/{id}/events", get(get_events).post(record_events))
         .route("/p/{id}", any(proxy))
         .route("/p/{id}/", any(proxy))
         .route("/p/{id}/{*path}", any(proxy))
@@ -244,6 +263,7 @@ async fn create_session(
         cache: Mutex::new(ResourceCache::default()),
         gate: Mutex::new(GateState::Waiting),
         gate_tx: watch::channel(GateState::Waiting).0,
+        events: Mutex::new(VecDeque::new()),
     });
 
     // Preserve the submitted destination path, query, and browser-side fragment
@@ -395,6 +415,45 @@ async fn session_status(
     Ok(Json(status_for(&session).await))
 }
 
+async fn get_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<ActionEvent>>, (StatusCode, String)> {
+    let session = find_session(&state, &id).await?;
+    let events = session.events.lock().await.iter().cloned().collect::<Vec<_>>();
+    Ok(Json(events))
+}
+
+async fn record_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(inputs): Json<Vec<EventInput>>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let session = find_session(&state, &id).await?;
+    for input in inputs.into_iter().take(100) {
+        push_event(
+            &session,
+            &input.kind,
+            input.target.unwrap_or_default(),
+            input.detail.unwrap_or_default(),
+        ).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn push_event(session: &Session, kind: &str, target: String, detail: String) {
+    let mut events = session.events.lock().await;
+    if events.len() == MAX_EVENTS {
+        events.pop_front();
+    }
+    events.push_back(ActionEvent {
+        at_unix_ms: now_ms(),
+        kind: clean_field(kind.to_owned(), 80),
+        target: clean_field(target, 240),
+        detail: clean_field(detail, 300),
+    });
+}
+
 async fn find_session(
     state: &AppState,
     id: &str,
@@ -423,9 +482,11 @@ async fn status_for(session: &Session) -> StatusResponse {
             GateState::Released => ("released", 0),
         }
     };
+    let event_count = session.events.lock().await.len();
     StatusResponse {
         state,
         remaining_ms,
+        event_count,
     }
 }
 
@@ -491,6 +552,12 @@ async fn proxy(
     }
 
     let (parts, body) = request.into_parts();
+    push_event(
+        &session,
+        "http_request",
+        upstream_url.path().to_owned(),
+        parts.method.as_str().to_owned(),
+    ).await;
     let body = match to_bytes(body, MAX_REQUEST_BODY).await {
         Ok(body) => body,
         Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "Request body exceeds the 8 MiB limit"),
@@ -984,6 +1051,8 @@ fn rewrite_html(
 <button id="intercept-start" type="button">[START]</button>
 <span id="intercept-countdown">NOT STARTED</span>
 </div>
+<div id="intercept-notice">Browser navigation and form submissions are held until authorization. State-changing HTTP requests are enforced by Rust.</div>
+<details id="intercept-events"><summary id="intercept-events-summary">EVENT STREAM · loading</summary><pre id="intercept-events-list">Waiting for browser and HTTP events…</pre></details>
 </aside>"#;
         el.append(banner, ContentType::Html);
         Ok(())
@@ -1230,6 +1299,17 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         || ip.to_ipv4_mapped().is_some_and(|v4| !is_public_v4(v4)))
 }
 
+fn clean_field(value: String, max: usize) -> String {
+    value.chars().filter(|ch| !ch.is_control()).take(max).collect()
+}
+
+fn now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
 fn plain(status: StatusCode, message: &str) -> Response<Body> {
     Response::builder()
         .status(status)
@@ -1329,6 +1409,16 @@ mod tests {
             rewrite_set_cookie("sid=abc; Domain=example.com; Path=/admin; HttpOnly", &Url::parse("https://example.com/").unwrap(), &Url::parse("https://example.com/").unwrap(), "session123"),
             "sid=abc; Path=/p/session123/admin; HttpOnly"
         );
+    }
+
+    #[test]
+    fn authority_banner_restores_event_stream_and_notice() {
+        let base = Url::parse("https://example.com/").unwrap();
+        let html = r#"<!doctype html><html><head></head><body></body></html>"#;
+        let result = rewrite_html(html, &base, &base, "session123").unwrap();
+        assert!(result.contains("INTERCEPT AUTHORITY"));
+        assert!(result.contains("intercept-events"));
+        assert!(result.contains("intercept-notice"));
     }
 
     #[test]
