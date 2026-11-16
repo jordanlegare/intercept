@@ -256,6 +256,8 @@
   // Mount the authority UI before patching page APIs. Upstream applications
   // can expose non-standard or non-configurable browser surfaces; a failure in
   // optional interception must not prevent the authorization controls appearing.
+  nativeAdd.call(window, "message", handleAuthorityMessage);
+
   try {
     initializeToolbar();
   } catch (error) {
@@ -853,7 +855,6 @@
     record("authority_status_received", "authority-frame", gateState);
   }
 
-  nativeAdd.call(window, "message", handleAuthorityMessage);
 
   function initializeToolbar() {
     // documentElement exists while the parser is in <head>, so mount now
