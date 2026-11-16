@@ -403,49 +403,177 @@
     return nativeOpenWindow.call(this, routed || url, ...rest);
   };
 
-  function initializeToolbar() {
-    const placeholder = document.getElementById("intercept-toolbar");
-    if (!placeholder || !document.body) {
-      console.error("Intercept could not initialize its authority frame.");
-      return;
-    }
-    const host = document.createElement("div");
-    host.id = "intercept-ui-host";
-    host.className = "intercept-ui-host";
-    const root = host.attachShadow({mode: "closed"});
-    const stylesheet = document.createElement("link");
-    stylesheet.rel = "stylesheet";
-    stylesheet.href = "/assets/intercept.css";
-    root.appendChild(stylesheet);
-    const frame = document.createElement("iframe");
-    frame.className = "intercept-authority-frame";
-    frame.title = "Intercept authority controls";
-    frame.src = "http://127.0.0.1:5000/authority/" + encodeURIComponent(sessionId);
-    frame.setAttribute("sandbox", "allow-scripts allow-same-origin");
-    authorityFrame = frame;
-    frame.referrerPolicy = "no-referrer";
-    root.appendChild(frame);
-    placeholder.remove();
-    document.documentElement.appendChild(host);
-    document.documentElement.classList.add("intercept-session-page");
-    document.body.classList.add("intercept-session-page");
-    nativeAdd.call(window, "message", event => {
-      const data = event.data;
-      if (event.origin !== "http://127.0.0.1:5000"
-          || !authorityFrame
-          || event.source !== authorityFrame.contentWindow
-          || !data
-          || data.type !== "intercept:authority-status"
-          || data.session_id !== sessionId
-          || !["waiting", "running", "released"].includes(data.state)) {
+  let toolbarHost = null;
+  let toolbarRoot = null;
+  let toolbarFallback = null;
+  let toolbarObserver = null;
+  let observedDocumentElement = null;
+  let authorityReady = false;
+  let authorityRetryCount = 0;
+  let authorityRetryTimer = null;
+  let telemetryStarted = false;
+
+  function authorityUrl(retry) {
+    return "http://127.0.0.1:5000/authority/" + encodeURIComponent(sessionId)
+      + (retry ? "?_intercept_retry=" + retry : "");
+  }
+
+  function scheduleAuthorityRetry() {
+    if (authorityRetryTimer) window.clearTimeout(authorityRetryTimer);
+    authorityRetryTimer = window.setTimeout(() => {
+      if (authorityReady || !authorityFrame) return;
+      if (authorityRetryCount >= 2) {
+        if (toolbarFallback) {
+          toolbarFallback.textContent = "INTERCEPT AUTHORITY · FRAME NOT RESPONDING · check 127.0.0.1:5000";
+          toolbarFallback.style.display = "block";
+        }
+        record("authority_frame_unresponsive", "authority-frame", "No ready handshake received after retries");
         return;
       }
-      gateState = data.state;
-      if (gateState === "released") releaseQueuedActions();
-      record("authority_status_received", "authority-frame", gateState);
+      authorityRetryCount += 1;
+      record("authority_frame_retry", "authority-frame", "Attempt " + authorityRetryCount);
+      // This is our trusted dashboard iframe, not an upstream resource.
+      // Bypass the page's patched iframe.src setter so 127.0.0.1 is not sent
+      // through routeToProxy() and rejected by the public-destination guard.
+      nativeSetAttribute.call(authorityFrame, "src", authorityUrl(authorityRetryCount));
+      scheduleAuthorityRetry();
+    }, 9000);
+  }
+
+  function installToolbarObserver() {
+    if (!window.MutationObserver || toolbarObserver) return;
+    toolbarObserver = new MutationObserver(() => {
+      if (document.documentElement !== observedDocumentElement) {
+        if (observedDocumentElement) {
+          try { toolbarObserver.disconnect(); } catch (_) {}
+          observedDocumentElement = null;
+          toolbarObserver.observe(document, {childList: true});
+        }
+        if (document.documentElement) {
+          observedDocumentElement = document.documentElement;
+          toolbarObserver.observe(observedDocumentElement, {childList: true});
+        }
+      }
+      if (toolbarHost && !toolbarHost.isConnected) {
+        record("authority_host_removed", "document", "Reattaching the authorization frame host");
+        mountToolbar();
+      }
     });
-    record("controller_loaded", "document", "Isolated cross-origin authority frame initialized");
-    window.setInterval(flushEvents, 1200);
+    toolbarObserver.observe(document, {childList: true});
+    if (document.documentElement) {
+      observedDocumentElement = document.documentElement;
+      toolbarObserver.observe(observedDocumentElement, {childList: true});
+    }
+  }
+
+  function mountToolbar() {
+    const html = document.documentElement;
+    if (!html) return false;
+
+    if (!toolbarHost) {
+      toolbarHost = document.createElement("div");
+      toolbarHost.id = "intercept-ui-host";
+      toolbarHost.className = "intercept-ui-host";
+      toolbarHost.setAttribute("aria-label", "Intercept authorization controls");
+      // Critical positioning is applied directly as a fallback if the page's
+      // Content-Security-Policy or stylesheet loading prevents the CSS asset.
+      toolbarHost.style.setProperty("position", "fixed", "important");
+      toolbarHost.style.setProperty("inset", "auto 0 0", "important");
+      toolbarHost.style.setProperty("display", "block", "important");
+      toolbarHost.style.setProperty("height", "148px", "important");
+      toolbarHost.style.setProperty("z-index", "2147483647", "important");
+      toolbarHost.style.setProperty("pointer-events", "none", "important");
+      toolbarHost.style.setProperty("visibility", "visible", "important");
+      toolbarHost.style.setProperty("opacity", "1", "important");
+
+      toolbarRoot = toolbarHost.attachShadow({mode: "closed"});
+      const stylesheet = document.createElement("link");
+      stylesheet.rel = "stylesheet";
+      stylesheet.href = "/assets/intercept.css";
+      toolbarRoot.appendChild(stylesheet);
+
+      toolbarFallback = document.createElement("div");
+      toolbarFallback.textContent = "INTERCEPT AUTHORITY · CONNECTING";
+      toolbarFallback.style.cssText = "display:block;position:absolute;inset:0 0 auto;padding:8px 12px;background:#080e16;color:#8ed9ff;font:12px/1.4 ui-monospace,monospace;text-align:center;pointer-events:none";
+      toolbarRoot.appendChild(toolbarFallback);
+
+      const frame = document.createElement("iframe");
+      frame.className = "intercept-authority-frame";
+      frame.title = "Intercept authority controls";
+      frame.setAttribute("sandbox", "allow-scripts allow-same-origin");
+      frame.referrerPolicy = "no-referrer";
+      frame.style.setProperty("display", "block", "important");
+      frame.style.setProperty("width", "100%", "important");
+      frame.style.setProperty("height", "148px", "important");
+      frame.style.setProperty("border", "0", "important");
+      frame.style.setProperty("pointer-events", "auto", "important");
+      frame.style.setProperty("background", "#080e16", "important");
+      frame.addEventListener("load", () => {
+        record("authority_frame_load", "authority-frame", "Iframe load event; waiting for authority-ready handshake");
+      });
+      frame.addEventListener("error", () => {
+        record("authority_frame_error", "authority-frame", "Iframe failed to load");
+      });
+      authorityFrame = frame;
+      toolbarRoot.appendChild(frame);
+      // The controller patches HTMLIFrameElement.src for upstream page
+      // content. The trusted authority frame must stay on the dashboard host.
+      nativeSetAttribute.call(frame, "src", authorityUrl(0));
+      scheduleAuthorityRetry();
+    }
+
+    if (toolbarHost.parentNode !== html) html.appendChild(toolbarHost);
+    html.classList.add("intercept-session-page");
+    if (document.body) document.body.classList.add("intercept-session-page");
+    installToolbarObserver();
+
+    if (!telemetryStarted) {
+      telemetryStarted = true;
+      record("controller_loaded", "document", "Resilient authority frame mount initialized");
+      window.setInterval(flushEvents, 1200);
+    }
+    return true;
+  }
+
+  function handleAuthorityMessage(event) {
+    const data = event.data;
+    if (event.origin !== "http://127.0.0.1:5000"
+        || !authorityFrame
+        || event.source !== authorityFrame.contentWindow
+        || !data
+        || data.session_id !== sessionId) {
+      return;
+    }
+
+    if (data.type === "intercept:authority-ready") {
+      authorityReady = true;
+      if (authorityRetryTimer) window.clearTimeout(authorityRetryTimer);
+      if (toolbarFallback) toolbarFallback.style.display = "none";
+      record("authority_frame_ready", "authority-frame", "Authority UI and control link initialized");
+      return;
+    }
+
+    if (data.type !== "intercept:authority-status"
+        || !["waiting", "running", "released"].includes(data.state)) {
+      return;
+    }
+    gateState = data.state;
+    if (gateState === "released") releaseQueuedActions();
+    record("authority_status_received", "authority-frame", gateState);
+  }
+
+  nativeAdd.call(window, "message", handleAuthorityMessage);
+
+  function initializeToolbar() {
+    if (!mountToolbar()) {
+      // DOMContentLoaded can race unusual document.write()/document.open()
+      // pages; retry on parser state changes and the next task.
+      nativeAdd.call(document, "readystatechange", mountToolbar);
+      window.setTimeout(mountToolbar, 0);
+      return;
+    }
+    nativeAdd.call(window, "pageshow", mountToolbar);
+    nativeAdd.call(window, "load", mountToolbar, {once: true});
   }
 
   if (document.readyState === "loading") {

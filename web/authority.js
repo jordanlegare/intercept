@@ -209,4 +209,11 @@
       pollMetrics();
     }
   });
+
+  // The embedding controller uses this handshake to distinguish an iframe
+  // that merely fired "load" from one whose authority UI actually initialized.
+  window.parent.postMessage({
+    type: "intercept:authority-ready",
+    session_id: sessionId
+  }, "http://" + sessionId + ".localhost:5000");
 })();

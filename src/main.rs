@@ -66,6 +66,10 @@ static HTML_SCRIPT_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?is)(<script\b[^>]*>)(.*?)(</script\s*>)")
         .expect("valid inline script block regex")
 });
+static HTML_SCRIPT_NONCE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<script\b[^>]*\bnonce\s*=\s*(?:"([^"]+)"|'([^']+)')"#)
+        .expect("valid HTML script nonce regex")
+});
 static CSS_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)"#)
         .expect("valid CSS url() regex")
@@ -1774,32 +1778,91 @@ fn rewrite_html(
 
     let id_for_head = session_id.to_owned();
     let primary_origin = session_base.origin().ascii_serialization();
+    let primary_origin_for_head = primary_origin.clone();
+    let controller_nonce = HTML_SCRIPT_NONCE_RE.captures(&html_with_styles_and_scripts).and_then(|captures| {
+        captures.get(1).or_else(|| captures.get(2)).map(|value| escape_html_attribute(value.as_str()))
+    });
     settings = settings.append_element_content_handler(element!("head", move |el| {
+        let nonce_attr = controller_nonce.as_ref()
+            .map(|nonce| format!(r#" nonce="{nonce}""#))
+            .unwrap_or_default();
         let head = format!(
-            r#"<script src="/assets/controller.js" data-session="{id_for_head}" data-upstream-origin="{primary_origin}"></script><link rel="stylesheet" href="/assets/intercept.css">"#
+            r#"<script data-intercept-controller="true" src="/assets/controller.js" data-session="{id_for_head}" data-upstream-origin="{primary_origin_for_head}"{nonce_attr}></script><link data-intercept-styles="true" rel="stylesheet" href="/assets/intercept.css">"#
         );
         el.prepend(&head, ContentType::Html);
         Ok(())
     }));
 
-    settings = settings.append_element_content_handler(element!("body", move |el| {
-        let banner = r#"<aside id="intercept-toolbar" aria-label="Intercept authority">
-<div class="intercept-row"><strong>INTERCEPT AUTHORITY</strong>
-<span id="intercept-state">WAITING</span>
-<label for="intercept-delay">DELAY (SECONDS)</label>
-<input id="intercept-delay" type="number" min="0.000000001" max="86400" step="any" value="30" inputmode="decimal">
-<button id="intercept-start" type="button">[START]</button>
-<span id="intercept-countdown">NOT STARTED</span>
-</div>
-<div id="intercept-notice">Browser navigation and form submissions are held until authorization. State-changing HTTP requests are enforced by Rust.</div>
-<details id="intercept-events"><summary id="intercept-events-summary">EVENT STREAM · loading</summary><pre id="intercept-events-list">Waiting for browser and HTTP events…</pre></details>
-</aside>"#;
-        el.append(banner, ContentType::Html);
+    let session_id_for_csp = session_id.to_owned();
+    settings = settings.append_element_content_handler(element!("meta[http-equiv][content]", move |el| {
+        if el.get_attribute("http-equiv")
+            .is_some_and(|value| value.eq_ignore_ascii_case("content-security-policy"))
+        {
+            if let Some(policy) = el.get_attribute("content") {
+                el.set_attribute("content", &rewrite_csp(&policy, &session_id_for_csp))?;
+            }
+        }
         Ok(())
     }));
 
-    rewrite_str(&html_with_styles_and_scripts, settings).map_err(|error| error.to_string())
+    let rewritten = match rewrite_str(&html_with_styles_and_scripts, settings) {
+        Ok(result) => result,
+        Err(error) => {
+            warn!(%error, url = %base, "HTML parser rewrite failed; injecting the session controller with a conservative fallback");
+            html_with_styles_and_scripts
+        }
+    };
+    Ok(ensure_controller_bootstrap(&rewritten, session_id, &primary_origin))
 }
+
+fn ensure_controller_bootstrap(html: &str, session_id: &str, primary_origin: &str) -> String {
+    if html.contains("data-intercept-controller=") {
+        return html.to_owned();
+    }
+
+    let nonce = HTML_SCRIPT_NONCE_RE.captures(html).and_then(|captures| {
+        captures.get(1).or_else(|| captures.get(2)).map(|value| value.as_str())
+    });
+    let nonce_attr = nonce.map(|value| {
+        format!(r#" nonce="{}""#, escape_html_attribute(value))
+    }).unwrap_or_default();
+    let bootstrap = format!(
+        r#"<script data-intercept-controller="true" src="/assets/controller.js" data-session="{}" data-upstream-origin="{}"{}></script><link data-intercept-styles="true" rel="stylesheet" href="/assets/intercept.css">"#,
+        escape_html_attribute(session_id),
+        escape_html_attribute(primary_origin),
+        nonce_attr,
+    );
+
+    let lower = html.to_ascii_lowercase();
+    if let Some(head_close) = lower.find("</head>") {
+        let mut output = html.to_owned();
+        output.insert_str(head_close, &bootstrap);
+        return output;
+    }
+    if let Some(html_open) = lower.find("<html") {
+        if let Some(open_end) = lower[html_open..].find('>') {
+            let mut output = html.to_owned();
+            output.insert_str(html_open + open_end + 1, &bootstrap);
+            return output;
+        }
+    }
+    if let Some(doctype) = lower.find("<!doctype") {
+        if let Some(open_end) = lower[doctype..].find('>') {
+            let mut output = html.to_owned();
+            output.insert_str(doctype + open_end + 1, &bootstrap);
+            return output;
+        }
+    }
+
+    // The HTML parser will create implied html/head elements for fragments
+    // when the controller script and stylesheet precede the first body node.
+    format!("<!doctype html>{bootstrap}{html}")
+}
+
+fn escape_html_attribute(value: &str) -> String {
+    value.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
 
 fn rewrite_url(
     base: &Url,
@@ -2017,6 +2080,11 @@ fn rewrite_csp(policy: &str, session_id: &str) -> String {
             let mut values = tokens.map(str::to_owned).collect::<Vec<_>>();
             if SOURCE_DIRECTIVES.iter().any(|candidate| name.eq_ignore_ascii_case(candidate)) {
                 values.retain(|value| value != "'none'");
+                // strict-dynamic discards host allow-lists in modern browsers.
+                // Nonce-bearing injected scripts retain the source's nonce path.
+                if name.eq_ignore_ascii_case("script-src") || name.eq_ignore_ascii_case("script-src-elem") {
+                    values.retain(|value| !value.eq_ignore_ascii_case("'strict-dynamic'"));
+                }
                 for value in &mut values {
                     if value.starts_with("http://") || value.starts_with("https://") || value.starts_with("*.") {
                         *value = local_origin.clone();
@@ -2353,26 +2421,34 @@ mod tests {
     }
 
     #[test]
-    fn authority_banner_restores_event_stream_and_notice() {
+    fn html_rewriter_injects_controller_and_styles() {
         let base = Url::parse("https://example.com/").unwrap();
         let html = r#"<!doctype html><html><head></head><body></body></html>"#;
         let result = rewrite_html(html, &base, &base, "session123").unwrap();
-        assert!(result.contains("INTERCEPT AUTHORITY"));
-        assert!(result.contains("intercept-events"));
-        assert!(result.contains("intercept-notice"));
+        assert!(result.contains("data-intercept-controller"));
+        assert!(result.contains("/assets/controller.js"));
+        assert!(result.contains("/assets/intercept.css"));
+        assert!(result.contains("data-session=\"session123\""));
     }
 
     #[test]
-    fn rewrites_session_urls_and_injects_only_the_authority_banner() {
+    fn html_controller_injection_handles_pages_without_head_or_body() {
         let base = Url::parse("https://example.com/").unwrap();
-        let html = r#"<!doctype html><html><head></head><body><a href="/next">next</a></body></html>"#;
+        let html = r#"<!doctype html><html><main>fragment</main></html>"#;
         let result = rewrite_html(html, &base, &base, "session123").unwrap();
-        assert!(result.contains("/p/session123/next"));
+        assert!(result.contains("data-intercept-controller"));
         assert!(result.contains("/assets/controller.js"));
-        assert!(result.contains("intercept-toolbar"));
-        assert!(result.contains("INTERCEPT AUTHORITY"));
-        assert!(result.contains("intercept-events"));
-        assert!(result.contains("intercept-notice"));
+    }
+
+    #[test]
+    fn fallback_controller_injection_preserves_an_existing_csp_nonce() {
+        let result = ensure_controller_bootstrap(
+            r#"<html><head><script nonce="abc123">boot()</script></head><body>page</body></html>"#,
+            "session123",
+            "https://example.com",
+        );
+        assert!(result.contains(r#"nonce="abc123""#));
+        assert!(result.contains("data-intercept-controller"));
     }
 
     #[test]
@@ -2426,6 +2502,24 @@ mod tests {
             rewrite_location("https://accounts.example/login", &current, &primary, "session123"),
             "http://session123.localhost:5000/p/session123/_/https/accounts.example/login"
         );
+    }
+
+    #[test]
+    fn rewrites_meta_csp_and_removes_strict_dynamic_for_the_session_controller() {
+        let base = Url::parse("https://example.com/").unwrap();
+        let html = r#"<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="script-src 'nonce-abc' 'strict-dynamic' https://cdn.example; default-src 'self'"></head><body></body></html>"#;
+        let result = rewrite_html(html, &base, &base, "session123").unwrap();
+        assert!(result.contains("script-src 'nonce-abc'"));
+        assert!(!result.contains("'strict-dynamic'"));
+        assert!(result.contains("http://session123.localhost:5000"));
+    }
+
+    #[test]
+    fn csp_rewrite_preserves_nonce_policy_without_strict_dynamic() {
+        let output = rewrite_csp("script-src 'nonce-abc' 'strict-dynamic' https://cdn.example", "session123");
+        assert!(output.contains("'nonce-abc'"));
+        assert!(!output.contains("'strict-dynamic'"));
+        assert!(output.contains("http://session123.localhost:5000"));
     }
 
     #[test]
