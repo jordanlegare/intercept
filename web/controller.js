@@ -764,7 +764,7 @@
       // Critical positioning is applied directly as a fallback if the page's
       // Content-Security-Policy or stylesheet loading prevents the CSS asset.
       toolbarHost.style.setProperty("position", "fixed", "important");
-      toolbarHost.style.setProperty("inset", "0 0 auto", "important");
+      toolbarHost.style.setProperty("inset", "auto 0 0", "important");
       toolbarHost.style.setProperty("display", "block", "important");
       toolbarHost.style.setProperty("height", "148px", "important");
       toolbarHost.style.setProperty("z-index", "2147483647", "important");
@@ -780,7 +780,7 @@
 
       toolbarFallback = document.createElement("div");
       toolbarFallback.textContent = "INTERCEPT AUTHORITY · CONNECTING";
-      toolbarFallback.style.cssText = "display:block;position:absolute;inset:0 0 auto;padding:8px 12px;background:#080e16;color:#8ed9ff;font:12px/1.4 ui-monospace,monospace;text-align:center;pointer-events:none";
+      toolbarFallback.style.cssText = "display:block;position:absolute;inset:auto 0 0;padding:8px 12px;background:#080e16;color:#8ed9ff;font:12px/1.4 ui-monospace,monospace;text-align:center;pointer-events:none";
       toolbarRoot.appendChild(toolbarFallback);
 
       const frame = document.createElement("iframe");
