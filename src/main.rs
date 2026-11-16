@@ -1388,6 +1388,7 @@ async fn stream_regular_response(
         .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "Could not build streaming response"))
 }
 
+#[axum::debug_handler]
 async fn proxy(
     State(state): State<AppState>,
     Path(params): Path<HashMap<String, String>>,
