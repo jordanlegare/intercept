@@ -2164,6 +2164,18 @@ async fn proxy(
             input_trace.as_ref().map(|trace| format!(" · {trace}")).unwrap_or_default()
         )
     };
+    if ajax_request {
+        // This event is emitted at the proxy ingress, not by a particular
+        // browser API wrapper. It therefore covers fetch, XHR, sendBeacon,
+        // EventSource, worker-originated requests, and other requests that
+        // the server classifies as AJAX.
+        push_event(
+            &session,
+            "ajax_routed",
+            upstream_url.path().to_owned(),
+            request_detail.clone(),
+        ).await;
+    }
     push_event(
         &session,
         if ajax_request { "ajax_request" } else { "http_request" },

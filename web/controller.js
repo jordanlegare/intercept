@@ -710,7 +710,7 @@
       const inputContext = addInputCorrelation(headers);
       const markedRequest = new Request(routedRequest, {headers});
       record(
-        "ajax_routed",
+        "ajax_dispatch",
         routed,
         method + " · " + fetchBodyDiagnostic(input, init) + inputCorrelationDetail(inputContext)
       );
@@ -761,7 +761,7 @@
       }
       record("xhr", meta.url, meta.method + inputCorrelationDetail(inputContext));
       record(
-        "ajax_routed",
+        "ajax_dispatch",
         meta.url,
         meta.method + " · " +
           requestBodyDiagnostic(args[0], args.length > 0) +
@@ -783,7 +783,11 @@
         record("beacon_blocked", String(url), "URL could not be routed");
         return false;
       }
-      record("send_beacon", routed, "POST");
+      record(
+        "ajax_dispatch",
+        routed,
+        "POST · " + requestBodyDiagnostic(data, arguments.length > 1) + " · transport=sendBeacon"
+      );
       return nativeSendBeacon(routed, data);
     };
   }
@@ -793,6 +797,7 @@
     window.EventSource = function(url, options) {
       const routed = routeToProxy(url);
       if (!routed) throw new DOMException("Intercept only proxies HTTP and HTTPS requests.", "SecurityError");
+      record("ajax_dispatch", routed, "GET · body_arg=none · transport=EventSource");
       return new NativeEventSource(routed, options);
     };
     window.EventSource.prototype = NativeEventSource.prototype;

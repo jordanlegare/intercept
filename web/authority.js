@@ -145,7 +145,7 @@
     try {
       const response = await controlFetch("/events");
       if (!response.ok) throw new Error("events " + response.status);
-      const events = response.json() || [];
+      const events = await response.json();
       if (!Array.isArray(events)) throw new Error("invalid event history response");
       latestEvents = events;
       latestEventsAt = new Date();
