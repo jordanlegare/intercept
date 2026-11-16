@@ -334,10 +334,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::select! {
         result = servers.join_next() => match result {
-            Some(Ok(Ok(()))) => return Err("An Intercept loopback listener stopped unexpectedly".into()),
-            Some(Ok(Err(error))) => return Err(Box::new(error)),
-            Some(Err(error)) => return Err(Box::new(error)),
-            None => return Err("All Intercept loopback listeners stopped unexpectedly".into()),
+            Some(Ok(Ok(()))) => return Err(Box::<dyn std::error::Error>::from(
+                io::Error::other("An Intercept loopback listener stopped unexpectedly"),
+            )),
+            Some(Ok(Err(error))) => {
+                return Err(Box::<dyn std::error::Error>::from(error));
+            }
+            Some(Err(error)) => {
+                return Err(Box::<dyn std::error::Error>::from(io::Error::other(error)));
+            }
+            None => return Err(Box::<dyn std::error::Error>::from(
+                io::Error::other("All Intercept loopback listeners stopped unexpectedly"),
+            )),
         },
         signal = tokio::signal::ctrl_c() => {
             signal?;
@@ -361,7 +369,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 drain_servers,
             ).await {
                 Ok(Ok(())) => {}
-                Ok(Err(error)) => return Err(Box::new(error)),
+                Ok(Err(error)) => return Err(Box::<dyn std::error::Error>::from(error)),
                 Err(_) => warn!(
                     grace_seconds = SHUTDOWN_GRACE_SECONDS,
                     "Graceful shutdown timed out; forcing process shutdown"
