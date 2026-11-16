@@ -17,6 +17,163 @@
   let lastListenerReport = 0;
   let eventFlushInFlight = false;
 
+  const nativeLocalStorage = window.localStorage;
+  const nativeSessionStorage = window.sessionStorage;
+  const cookieEndpoint = location.origin + "/_intercept/cookies";
+  let cookieMirror = String(script.dataset.cookieSeed || "");
+  let cookieWriteQueue = Promise.resolve();
+
+  function scopedStorage(nativeStorage, kind) {
+    const prefix = "__intercept_v1__:" + kind + ":" + encodeURIComponent(upstreamOrigin) + ":";
+    const scopedKeys = () => {
+      const keys = [];
+      for (let index = 0; index < nativeStorage.length; index++) {
+        const key = nativeStorage.key(index);
+        if (key && key.startsWith(prefix)) keys.push(key.slice(prefix.length));
+      }
+      return keys;
+    };
+    const target = Object.create(window.Storage ? window.Storage.prototype : Object.prototype);
+    Object.defineProperties(target, {
+      length: {configurable: true, enumerable: true, get: () => scopedKeys().length},
+      key: {configurable: true, value: index => scopedKeys()[Number(index)] ?? null},
+      getItem: {configurable: true, value: key => nativeStorage.getItem(prefix + String(key))},
+      setItem: {configurable: true, value: (key, value) => nativeStorage.setItem(prefix + String(key), String(value))},
+      removeItem: {configurable: true, value: key => nativeStorage.removeItem(prefix + String(key))},
+      clear: {configurable: true, value: () => scopedKeys().forEach(key => nativeStorage.removeItem(prefix + key))}
+    });
+    return new Proxy(target, {
+      get(object, property, receiver) {
+        if (Reflect.has(object, property)) return Reflect.get(object, property, receiver);
+        if (typeof property === "string") return nativeStorage.getItem(prefix + property) ?? undefined;
+        return undefined;
+      },
+      set(object, property, value, receiver) {
+        if (typeof property !== "string" || Reflect.has(object, property)) {
+          return Reflect.set(object, property, value, receiver);
+        }
+        nativeStorage.setItem(prefix + property, String(value));
+        return true;
+      },
+      deleteProperty(object, property) {
+        if (typeof property === "string" && !Reflect.has(object, property)) {
+          nativeStorage.removeItem(prefix + property);
+          return true;
+        }
+        return Reflect.deleteProperty(object, property);
+      },
+      ownKeys(object) {
+        return [...new Set([...Reflect.ownKeys(object), ...scopedKeys()])];
+      },
+      getOwnPropertyDescriptor(object, property) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(object, property);
+        if (descriptor) return descriptor;
+        if (typeof property === "string" && scopedKeys().includes(property)) {
+          return {configurable: true, enumerable: true, writable: true, value: nativeStorage.getItem(prefix + property)};
+        }
+        return undefined;
+      }
+    });
+  }
+
+  function recordStorageShimFailure(error) {
+    try { console.warn("Intercept could not install origin-scoped Web Storage", error); } catch (_) {}
+  }
+
+  try {
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: scopedStorage(nativeLocalStorage, "local")
+    });
+    Object.defineProperty(window, "sessionStorage", {
+      configurable: true,
+      value: scopedStorage(nativeSessionStorage, "session")
+    });
+  } catch (error) {
+    recordStorageShimFailure(error);
+  }
+
+  function updateCookieMirror(assignment) {
+    const pair = String(assignment).split(";")[0].trim();
+    const separator = pair.indexOf("=");
+    if (separator <= 0) return;
+    const name = pair.slice(0, separator).trim();
+    const expires = String(assignment).match(/(?:^|;)\s*expires\s*=\s*([^;]+)/i);
+    const maxAge = String(assignment).match(/(?:^|;)\s*max-age\s*=\s*(-?\d+)/i);
+    const expired = (maxAge && Number(maxAge[1]) <= 0)
+      || (expires && Number.isFinite(Date.parse(expires[1])) && Date.parse(expires[1]) <= Date.now());
+    const values = cookieMirror ? cookieMirror.split(/;\s*/) : [];
+    const filtered = values.filter(value => value.split("=", 1)[0] !== name);
+    if (!expired) filtered.push(pair);
+    cookieMirror = filtered.join("; ");
+  }
+
+  function queueCookieWrite(assignment) {
+    const body = JSON.stringify({target: location.pathname + location.search, cookie: String(assignment)});
+    cookieWriteQueue = cookieWriteQueue.then(() => rawFetch(cookieEndpoint, {
+      method: "POST",
+      headers: {"content-type": "application/json"},
+      credentials: "same-origin",
+      cache: "no-store",
+      body
+    })).then(response => {
+      if (!response.ok) throw new Error("Cookie bridge write returned HTTP " + response.status);
+    }).catch(error => {
+      record("cookie_bridge_error", location.pathname, String(error && error.message || error));
+    });
+  }
+
+  function refreshCookieMirror() {
+    const target = encodeURIComponent(location.pathname + location.search);
+    rawFetch(cookieEndpoint + "?target=" + target, {
+      credentials: "same-origin",
+      cache: "no-store"
+    }).then(response => {
+      if (!response.ok) throw new Error("Cookie bridge refresh returned HTTP " + response.status);
+      return response.json();
+    }).then(data => {
+      cookieMirror = String(data.cookie || "");
+    }).catch(error => {
+      record("cookie_bridge_error", location.pathname, String(error && error.message || error));
+    });
+  }
+
+  try {
+    Object.defineProperty(Document.prototype, "cookie", {
+      configurable: true,
+      enumerable: true,
+      get() { return cookieMirror; },
+      set(value) {
+        updateCookieMirror(value);
+        queueCookieWrite(value);
+      }
+    });
+  } catch (error) {
+    try {
+      Object.defineProperty(document, "cookie", {
+        configurable: true,
+        get() { return cookieMirror; },
+        set(value) {
+          updateCookieMirror(value);
+          queueCookieWrite(value);
+        }
+      });
+    } catch (_) {
+      console.warn("Intercept could not install the document.cookie bridge", error);
+    }
+  }
+
+  ["pushState", "replaceState"].forEach(method => {
+    const nativeMethod = history[method];
+    if (typeof nativeMethod !== "function") return;
+    history[method] = function(...args) {
+      const result = nativeMethod.apply(this, args);
+      refreshCookieMirror();
+      return result;
+    };
+  });
+  nativeAdd.call(window, "popstate", refreshCookieMirror);
+
   function selectorFor(node) {
     if (!(node instanceof Element)) return String(node && node.nodeName || "unknown");
     const parts = [node.tagName.toLowerCase()];
@@ -365,7 +522,7 @@
       const inputContext = addInputCorrelation(headers);
       const markedRequest = new Request(routedRequest, {headers});
       record("ajax_routed", routed, method + inputCorrelationDetail(inputContext));
-      return nativeFetch(markedRequest);
+      return cookieWriteQueue.then(() => nativeFetch(markedRequest));
     } catch (error) {
       record("ajax_route_error", String(source), String(error && error.message || error));
       return Promise.reject(error);
@@ -379,7 +536,7 @@
   XMLHttpRequest.prototype.open = function(method, url, ...rest) {
     const routed = routeToProxy(url);
     if (!routed) throw new DOMException("Intercept only proxies HTTP and HTTPS requests.", "SecurityError");
-    xhrMeta.set(this, {method: String(method).toUpperCase(), url: routed});
+    xhrMeta.set(this, {method: String(method).toUpperCase(), url: routed, async: rest[0] !== false});
     return nativeXhrOpen.call(this, method, routed, ...rest);
   };
   XMLHttpRequest.prototype.send = function(...args) {
@@ -402,6 +559,10 @@
       }
       record("xhr", meta.url, meta.method + inputCorrelationDetail(inputContext));
       record("ajax_routed", meta.url, meta.method + inputCorrelationDetail(inputContext));
+    }
+    if (meta && meta.async && cookieWriteQueue) {
+      cookieWriteQueue.then(() => nativeXhrSend.apply(this, args));
+      return;
     }
     return nativeXhrSend.apply(this, args);
   };
