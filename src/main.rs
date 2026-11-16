@@ -834,8 +834,26 @@ async fn get_events(
     Path(id): Path<String>,
 ) -> Result<Json<Vec<ActionEvent>>, (StatusCode, String)> {
     let session = find_session(&state, &id).await?;
-    let events = session.events.lock().await.iter().cloned().collect::<Vec<_>>();
+    // Keep the authority activity view focused on user/page/network activity,
+    // not the iframe's internal polling and mount lifecycle.
+    let events = session.events.lock().await.iter()
+        .filter(|event| !is_internal_authority_event(&event.kind))
+        .cloned()
+        .collect::<Vec<_>>();
     Ok(Json(events))
+}
+
+fn is_internal_authority_event(kind: &str) -> bool {
+    matches!(
+        kind,
+        "authority_status_received"
+            | "authority_frame_load"
+            | "authority_frame_error"
+            | "authority_frame_retry"
+            | "authority_frame_ready"
+            | "authority_host_removed"
+            | "controller_loaded"
+    )
 }
 
 async fn record_events(
@@ -2213,6 +2231,31 @@ mod tests {
             start_delay_nanos: AtomicU64::new(0),
             inflight: Arc::new(Semaphore::new(8)),
             max_inflight: 8,
+        }
+    }
+
+    #[test]
+    fn filters_internal_authority_lifecycle_events_from_activity_stream() {
+        for kind in [
+            "authority_status_received",
+            "authority_frame_load",
+            "authority_frame_error",
+            "authority_frame_retry",
+            "authority_frame_ready",
+            "authority_host_removed",
+            "controller_loaded",
+        ] {
+            assert!(is_internal_authority_event(kind), "{kind} should be hidden");
+        }
+
+        for kind in [
+            "timer_started",
+            "authorization_released",
+            "http_request",
+            "ajax_request",
+            "dom_click",
+        ] {
+            assert!(!is_internal_authority_event(kind), "{kind} is meaningful activity");
         }
     }
 
