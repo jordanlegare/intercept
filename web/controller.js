@@ -185,6 +185,7 @@
       refreshCookieMirror();
     }).finally(() => {
       cookieWritesPending = Math.max(0, cookieWritesPending - 1);
+      if (cookieWritesPending === 0) flushCookieDeferredActions();
     });
   }
 
@@ -493,30 +494,36 @@
 
   function queueAction(action, description) {
     if (queue.length >= 50) {
-      showNotice("Action queue is full (50). Wait for authorization before trying again.");
+      showNotice("Cookie synchronization queue is full (50). Try again when it drains.");
       record("queue_full", description, "Action not queued");
       return;
     }
     queue.push(action);
-    showNotice(queue.length + " browser action(s) held until authorization.");
-    record("action_queued", description, "Held until timer authorization");
+    showNotice(queue.length + " browser action(s) waiting for cookie synchronization.");
+    record("action_queued", description, "Deferred until pending cookie writes finish");
   }
 
-  function releaseQueuedActions() {
-    if (gateState !== "released" || !queue.length) return;
+  // The Rust request gate owns authorization policy. This browser-side queue
+  // exists only to ensure a navigation cannot overtake an upstream cookie write.
+  function flushCookieDeferredActions() {
+    if (cookieWritesPending !== 0 || !queue.length) return;
     const actions = queue.splice(0);
-    showNotice("Timer complete. Releasing " + actions.length + " queued browser action(s).");
-    record("actions_released", "browser queue", String(actions.length) + " action(s)");
+    showNotice("Cookie synchronization complete. Resuming " + actions.length + " browser action(s).");
+    record("actions_released", "cookie synchronization queue", String(actions.length) + " action(s)");
     for (const action of actions) {
       try { action(); } catch (error) { console.error("Intercept could not replay action", error); }
     }
   }
 
   nativeAdd.call(document, "click", event => {
-    if ((gateState === "released" && cookieWritesPending === 0) || replaying) return;
+    if (replaying || cookieWritesPending === 0) return;
     const anchor = event.target instanceof Element ? event.target.closest("a[href],area[href]") : null;
     if (!anchor) return;
     const href = anchor.href;
+    let parsed;
+    try { parsed = new URL(href, document.baseURI); } catch (_) { return; }
+    // Leave mailto:, tel:, javascript:, and other browser-native schemes alone.
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
     const routedHref = routeToProxy(href);
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -525,15 +532,12 @@
       record("navigation_blocked", selectorFor(anchor), href);
       return;
     }
-    const navigate = () => location.assign(routedHref);
-    if (gateState === "released") Promise.resolve().then(() => cookieWriteQueue).then(navigate);
-    else queueAction(navigate, routedHref);
+    queueAction(() => location.assign(routedHref), routedHref);
   }, true);
 
   nativeAdd.call(document, "submit", event => {
     const form = event.target;
-    if (!(form instanceof HTMLFormElement) || replaying
-        || (gateState === "released" && cookieWritesPending === 0)) return;
+    if (!(form instanceof HTMLFormElement) || replaying || cookieWritesPending === 0) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     const routedAction = routeToProxy(form.action);
@@ -555,8 +559,7 @@
         window.setTimeout(() => { replaying = false; }, 0);
       }
     };
-    if (gateState === "released") cookieWriteQueue.then(replaySubmit);
-    else queueAction(replaySubmit, form.method.toUpperCase() + " " + form.action);
+    queueAction(replaySubmit, form.method.toUpperCase() + " " + form.action);
   }, true);
 
   const nativeFetch = window.fetch.bind(window);
@@ -862,7 +865,7 @@
       return;
     }
     gateState = data.state;
-    if (gateState === "released") releaseQueuedActions();
+    if (gateState === "released") flushCookieDeferredActions();
     record("authority_status_received", "authority-frame", gateState);
   }
 

@@ -3355,6 +3355,23 @@ mod tests {
     }
 
     #[test]
+    fn standard_policy_allows_youtube_search_document_navigation_without_timer_release() {
+        let session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        let target = Url::parse("https://www.youtube.com/results?search_query=intercept").unwrap();
+        assert!(
+            !should_hold_request(&session, &Method::GET, &target, false),
+            "Standard policy must allow YouTube's GET search navigation"
+        );
+    }
+
+    #[test]
+    fn strict_policy_holds_youtube_search_document_navigation_until_authorized() {
+        let session = policy_test_session(AuthorizationPolicy::Strict, Vec::new());
+        let target = Url::parse("https://www.youtube.com/results?search_query=intercept").unwrap();
+        assert!(should_hold_request(&session, &Method::GET, &target, false));
+    }
+
+    #[test]
     fn strict_policy_still_holds_youtube_read_only_post_requests() {
         let session = policy_test_session(AuthorizationPolicy::Strict, Vec::new());
         let target = Url::parse("https://www.youtube.com/youtubei/v1/complete").unwrap();
