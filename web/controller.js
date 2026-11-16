@@ -554,6 +554,54 @@
       : "";
   }
 
+  function requestBodyDiagnostic(body, provided) {
+    if (!provided) return "body_arg=omitted";
+    if (body === null) return "body_arg=null";
+    if (body === undefined) return "body_arg=undefined";
+    if (typeof body === "string") {
+      return "body_arg=string body_arg_bytes=" + new TextEncoder().encode(body).byteLength;
+    }
+    if (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) {
+      return "body_arg=urlsearchparams body_arg_bytes=" +
+        new TextEncoder().encode(body.toString()).byteLength;
+    }
+    if (typeof Blob !== "undefined" && body instanceof Blob) {
+      return "body_arg=blob body_arg_bytes=" + body.size;
+    }
+    if (typeof ArrayBuffer !== "undefined" && body instanceof ArrayBuffer) {
+      return "body_arg=arraybuffer body_arg_bytes=" + body.byteLength;
+    }
+    if (typeof ArrayBuffer !== "undefined" && ArrayBuffer.isView(body)) {
+      return "body_arg=arraybuffer_view body_arg_bytes=" + body.byteLength;
+    }
+    if (typeof FormData !== "undefined" && body instanceof FormData) {
+      let entries = 0;
+      for (const _entry of body.entries()) entries++;
+      return "body_arg=formdata body_arg_entries=" + entries;
+    }
+    if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
+      return "body_arg=stream body_arg_bytes=unknown";
+    }
+    if (typeof Document !== "undefined" && body instanceof Document) {
+      return "body_arg=document body_arg_bytes=unknown";
+    }
+    const type = Object.prototype.toString.call(body).slice(8, -1).slice(0, 40);
+    return "body_arg=" + (type || typeof body) + " body_arg_bytes=unknown";
+  }
+
+  function fetchBodyDiagnostic(input, init) {
+    if (init && Object.prototype.hasOwnProperty.call(init, "body") &&
+        init.body !== undefined) {
+      return requestBodyDiagnostic(init.body, true);
+    }
+    if (input instanceof Request) {
+      return input.body
+        ? "body_arg=request_stream body_arg_bytes=unknown"
+        : "body_arg=none";
+    }
+    return "body_arg=none";
+  }
+
   for (const type of ["pointerdown", "click", "change", "input", "keydown"]) {
     nativeAdd.call(document, type, event => {
       let detail = "";
@@ -661,7 +709,11 @@
       headers.set("X-Intercept-Proxy-Mode", "ajax");
       const inputContext = addInputCorrelation(headers);
       const markedRequest = new Request(routedRequest, {headers});
-      record("ajax_routed", routed, method + inputCorrelationDetail(inputContext));
+      record(
+        "ajax_routed",
+        routed,
+        method + " · " + fetchBodyDiagnostic(input, init) + inputCorrelationDetail(inputContext)
+      );
       return cookieWriteQueue.then(() => nativeFetch(markedRequest)).then(response => {
         if (response.headers.get("X-Intercept-Cookie-Updated") === "1") {
           return refreshCookieMirror().then(() => response);
@@ -708,7 +760,13 @@
         record("xhr_marker_error", meta.url, String(error && error.message || error));
       }
       record("xhr", meta.url, meta.method + inputCorrelationDetail(inputContext));
-      record("ajax_routed", meta.url, meta.method + inputCorrelationDetail(inputContext));
+      record(
+        "ajax_routed",
+        meta.url,
+        meta.method + " · " +
+          requestBodyDiagnostic(args[0], args.length > 0) +
+          inputCorrelationDetail(inputContext)
+      );
     }
     if (meta && meta.async && cookieWriteQueue) {
       cookieWriteQueue.then(() => nativeXhrSend.apply(this, args));
