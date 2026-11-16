@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     net::TcpListener,
     sync::{watch, Mutex, RwLock, Semaphore},
+    task::JoinSet,
     time::{sleep_until, Instant},
 };
 use tracing::{debug, info, warn};
@@ -51,6 +52,7 @@ const UPSTREAM_TIMEOUT_SECONDS: u64 = 120;
 const AJAX_STREAM_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 const SHUTDOWN_GRACE_SECONDS: u64 = 5;
 const DASHBOARD_HOST: &str = "127.0.0.1:5000";
+const LOCALHOST_DASHBOARD_HOST: &str = "localhost:5000";
 const SESSION_PORT: &str = "5000";
 const DEFAULT_MAX_SESSIONS: usize = 8;
 const DEFAULT_SESSION_IDLE_SECONDS: u64 = 1800;
@@ -297,33 +299,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(middleware::from_fn_with_state(state.clone(), host_and_cors_guard))
         .with_state(state.clone());
 
+    // Serve both loopback address families. Browsers may resolve "localhost"
+    // to ::1 first, while the canonical dashboard address remains 127.0.0.1.
+    // Binding only one family can make the localhost alias fail intermittently.
     let address: SocketAddr = LISTEN.parse()?;
-    let listener = TcpListener::bind(address).await?;
-    info!("Intercept dashboard and control API listening at http://{LISTEN}");
+    let mut listeners = vec![TcpListener::bind(address).await?];
+    match TcpListener::bind("[::1]:5000").await {
+        Ok(listener) => listeners.push(listener),
+        Err(error) => warn!(
+            %error,
+            "IPv6 loopback listener unavailable; localhost must resolve to IPv4"
+        ),
+    }
+    for listener in &listeners {
+        info!(address = %listener.local_addr()?, "Intercept loopback listener bound");
+    }
+    info!("Dashboard available at http://127.0.0.1:5000 and http://localhost:5000");
     info!("Session pages use per-session origins such as http://<session-id>.localhost:5000.");
     info!("The listener is loopback-only; this is not a network-wide transparent proxy.");
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let server = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_rx.await;
-        })
-        .into_future();
-    tokio::pin!(server);
+
+    let (shutdown_tx, _) = watch::channel(false);
+    let mut servers = JoinSet::new();
+    for listener in listeners {
+        let app = app.clone();
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        servers.spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.wait_for(|shutdown| *shutdown).await;
+                })
+                .await
+        });
+    }
 
     tokio::select! {
-        result = &mut server => result?,
+        result = servers.join_next() => match result {
+            Some(Ok(Ok(()))) => return Err(Box::<dyn std::error::Error>::from(
+                io::Error::other("An Intercept loopback listener stopped unexpectedly"),
+            )),
+            Some(Ok(Err(error))) => {
+                return Err(Box::<dyn std::error::Error>::from(error));
+            }
+            Some(Err(error)) => {
+                return Err(Box::<dyn std::error::Error>::from(io::Error::other(error)));
+            }
+            None => return Err(Box::<dyn std::error::Error>::from(
+                io::Error::other("All Intercept loopback listeners stopped unexpectedly"),
+            )),
+        },
         signal = tokio::signal::ctrl_c() => {
             signal?;
             info!(
                 grace_seconds = SHUTDOWN_GRACE_SECONDS,
                 "Shutdown signal received; draining active requests"
             );
-            let _ = shutdown_tx.send(());
+            shutdown_tx.send_replace(true);
+            let drain_servers = async {
+                while let Some(result) = servers.join_next().await {
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => return Err(error),
+                        Err(error) => return Err(io::Error::other(error)),
+                    }
+                }
+                Ok::<(), io::Error>(())
+            };
             match tokio::time::timeout(
                 Duration::from_secs(SHUTDOWN_GRACE_SECONDS),
-                &mut server,
+                drain_servers,
             ).await {
-                Ok(result) => result?,
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(Box::<dyn std::error::Error>::from(error)),
                 Err(_) => warn!(
                     grace_seconds = SHUTDOWN_GRACE_SECONDS,
                     "Graceful shutdown timed out; forcing process shutdown"
@@ -395,6 +441,25 @@ async fn record_session_events(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn dashboard_origin_for_host(host: &str) -> Option<&'static str> {
+    if host.eq_ignore_ascii_case(DASHBOARD_HOST) {
+        Some("http://127.0.0.1:5000")
+    } else if host.eq_ignore_ascii_case(LOCALHOST_DASHBOARD_HOST) {
+        Some("http://localhost:5000")
+    } else {
+        None
+    }
+}
+
+fn is_dashboard_host(host: &str) -> bool {
+    dashboard_origin_for_host(host).is_some()
+}
+
+fn dashboard_origin_matches_host(host: &str, origin: &str) -> bool {
+    dashboard_origin_for_host(host)
+        .is_some_and(|expected| origin.eq_ignore_ascii_case(expected))
+}
+
 async fn host_and_cors_guard(
     State(state): State<AppState>,
     request: Request<Body>,
@@ -404,17 +469,23 @@ async fn host_and_cors_guard(
     let host = request.headers().get(header::HOST)
         .and_then(|value| value.to_str().ok()).unwrap_or("");
 
-    // The dashboard and control API are deliberately reachable only through
-    // their own origin. Proxied pages use a unique <session>.localhost origin.
+    // The dashboard and control API accept either loopback alias, but an
+    // Origin-bearing request must use the same alias as its Host header.
+    // Proxied pages continue to use their unique <session>.localhost origin.
     if path == "/" || path == "/api/sessions" || path.starts_with("/api/sessions/") {
-        if !host.eq_ignore_ascii_case(DASHBOARD_HOST) {
-            return plain(StatusCode::MISDIRECTED_REQUEST, "Use the trusted dashboard origin at 127.0.0.1:5000");
+        if !is_dashboard_host(host) {
+            return plain(
+                StatusCode::MISDIRECTED_REQUEST,
+                "Use http://127.0.0.1:5000 or http://localhost:5000",
+            );
         }
-        if request.headers().get(header::ORIGIN)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|origin| origin != "http://127.0.0.1:5000")
-        {
-            return plain(StatusCode::FORBIDDEN, "Cross-origin access to the trusted control API is denied");
+        if let Some(origin_header) = request.headers().get(header::ORIGIN) {
+            let Ok(origin) = origin_header.to_str() else {
+                return plain(StatusCode::FORBIDDEN, "Invalid Origin for the trusted control API");
+            };
+            if !dashboard_origin_matches_host(host, origin) {
+                return plain(StatusCode::FORBIDDEN, "Cross-origin access to the trusted control API is denied");
+            }
         }
         return next.run(request).await;
     }
@@ -458,8 +529,8 @@ async fn host_and_cors_guard(
     }
 
     if path == "/assets/authority.js" || path.starts_with("/authority/") {
-        if !host.eq_ignore_ascii_case(DASHBOARD_HOST) {
-            return plain(StatusCode::MISDIRECTED_REQUEST, "Authority resources are served only from the dashboard origin");
+        if !is_dashboard_host(host) {
+            return plain(StatusCode::MISDIRECTED_REQUEST, "Authority resources are served only from a trusted dashboard origin");
         }
         return next.run(request).await;
     }
@@ -471,7 +542,7 @@ async fn host_and_cors_guard(
             return next.run(request).await;
         }
     }
-    if !host.eq_ignore_ascii_case(DASHBOARD_HOST) {
+    if !is_dashboard_host(host) {
         return plain(StatusCode::MISDIRECTED_REQUEST, "Unknown host for this local service");
     }
     next.run(request).await
@@ -2806,5 +2877,34 @@ mod tests {
             proxy_url(&external, &primary, "session123"),
             "http://session123.localhost:5000/p/session123/_/https/cdn.example:8443/a.js"
         );
+    }
+    #[test]
+    fn dashboard_accepts_both_loopback_hostnames_and_matches_origins() {
+        assert_eq!(
+            dashboard_origin_for_host("127.0.0.1:5000"),
+            Some("http://127.0.0.1:5000")
+        );
+        assert_eq!(
+            dashboard_origin_for_host("localhost:5000"),
+            Some("http://localhost:5000")
+        );
+        assert!(is_dashboard_host("LOCALHOST:5000"));
+        assert!(dashboard_origin_matches_host(
+            "localhost:5000",
+            "http://localhost:5000"
+        ));
+        assert!(dashboard_origin_matches_host(
+            "127.0.0.1:5000",
+            "http://127.0.0.1:5000"
+        ));
+        assert!(!dashboard_origin_matches_host(
+            "localhost:5000",
+            "http://127.0.0.1:5000"
+        ));
+        assert!(!dashboard_origin_matches_host(
+            "127.0.0.1:5000",
+            "http://localhost:5000"
+        ));
+        assert!(!is_dashboard_host("example.com:5000"));
     }
 }
