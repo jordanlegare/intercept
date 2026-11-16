@@ -3715,14 +3715,15 @@ mod tests {
 
     #[test]
     fn ajax_request_diagnostics_marks_invalid_json_and_missing_metadata() {
-        let headers = HeaderMap::new();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
         let detail = ajax_request_diagnostics(&Method::POST, &headers, b"{broken");
 
         assert!(detail.contains("content_length_out=7"));
         assert!(detail.contains("origin_host=absent"));
         assert!(detail.contains("referer_host=absent"));
         assert!(detail.contains("cookie=absent"));
-        assert!(detail.contains("json=not_checked"));
+        assert!(detail.contains("json=invalid"));
         assert!(detail.contains("yt_client_name=absent"));
     }
 
