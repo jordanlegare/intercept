@@ -3308,6 +3308,7 @@ mod tests {
             inflight: Arc::new(Semaphore::new(1)),
             max_inflight: 1,
             cookie_jar: Arc::new(SessionCookieJar::default()),
+            cookie_tokens: StdMutex::new(HashMap::new()),
         };
         let referer = HeaderValue::from_str(
             "http://session1234567890abcdef1234567890.localhost:5000/p/session1234567890abcdef1234567890/profile"
