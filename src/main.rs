@@ -896,7 +896,8 @@ async fn start_timer(
     let timer_session = Arc::clone(&session);
     tokio::spawn(async move {
         let mut cancellation = timer_session.cancel_tx.subscribe();
-        if *cancellation.borrow_and_update() {
+        let already_cancelled = *cancellation.borrow_and_update();
+        if already_cancelled {
             return;
         }
         tokio::select! {
@@ -1075,7 +1076,11 @@ async fn wait_for_session_termination(session: &Session) {
         return;
     }
     let mut cancellation = session.cancel_tx.subscribe();
-    if !session.cancelled.load(Ordering::Acquire) {
+    if session.cancelled.load(Ordering::Acquire) {
+        return;
+    }
+    let already_cancelled = *cancellation.borrow_and_update();
+    if !already_cancelled {
         let _ = cancellation.wait_for(|cancelled| *cancelled).await;
     }
 }
@@ -1084,7 +1089,8 @@ async fn wait_for_authorization(session: &Session) -> bool {
     let mut updates = session.gate_tx.subscribe();
     let mut cancellation = session.cancel_tx.subscribe();
     loop {
-        if *cancellation.borrow_and_update() {
+        let already_cancelled = *cancellation.borrow_and_update();
+        if already_cancelled {
             return false;
         }
         let state = *updates.borrow_and_update();
@@ -1288,7 +1294,8 @@ async fn ajax_passthrough(
     let stream_url = upstream_url.to_string();
     let mut cancellation = session.cancel_tx.subscribe();
     let cancelled = async move {
-        if !*cancellation.borrow_and_update() {
+        let already_cancelled = *cancellation.borrow_and_update();
+        if !already_cancelled {
             let _ = cancellation.wait_for(|cancelled| *cancelled).await;
         }
     };
@@ -2582,6 +2589,8 @@ mod tests {
             cache: Mutex::new(ResourceCache::default()),
             gate: Mutex::new(GateState::Waiting),
             gate_tx: watch::channel(GateState::Waiting).0,
+            cancel_tx: watch::channel(false).0,
+            cancelled: AtomicBool::new(false),
             events: Mutex::new(VecDeque::new()),
             policy,
             rules,
@@ -2669,6 +2678,8 @@ mod tests {
             cache: Mutex::new(ResourceCache::default()),
             gate: Mutex::new(GateState::Waiting),
             gate_tx: watch::channel(GateState::Waiting).0,
+            cancel_tx: watch::channel(false).0,
+            cancelled: AtomicBool::new(false),
             events: Mutex::new(VecDeque::new()),
             policy: AuthorizationPolicy::Standard,
             rules: Vec::new(),
