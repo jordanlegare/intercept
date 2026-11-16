@@ -9,6 +9,7 @@
   const sessionPrefix = "/p/" + encodeURIComponent(sessionId);
   const rawFetch = window.fetch.bind(window);
   const nativeAdd = EventTarget.prototype.addEventListener;
+  const nativeRemove = EventTarget.prototype.removeEventListener;
   const queue = [];
   const eventBuffer = [];
   let authorityFrame = null;
@@ -16,6 +17,40 @@
   let replaying = false;
   let lastListenerReport = 0;
   let eventFlushInFlight = false;
+  const nativeSetAttribute = Element.prototype.setAttribute;
+  let toolbarHost = null;
+  let toolbarRoot = null;
+  let toolbarFallback = null;
+  let toolbarObserver = null;
+  let observedDocumentElement = null;
+  let authorityReady = false;
+  let authorityRetryCount = 0;
+  let authorityRetryTimer = null;
+  let telemetryStarted = false;
+
+  // These are proxy-control-plane diagnostics, not page activity. Excluding
+  // them prevents the status poll and iframe lifecycle from filling the event
+  // stream with Intercept's own housekeeping.
+  const INTERNAL_AUTHORITY_EVENTS = new Set([
+    "authority_status_received",
+    "authority_frame_load",
+    "authority_frame_error",
+    "authority_frame_retry",
+    "authority_frame_ready",
+    "authority_host_removed",
+    "controller_loaded"
+  ]);
+
+  function record(kind, target, detail) {
+    if (INTERNAL_AUTHORITY_EVENTS.has(kind)) return;
+    eventBuffer.push({
+      kind: String(kind).slice(0, 80),
+      target: String(target || "").slice(0, 240),
+      detail: String(detail || "").slice(0, 300)
+    });
+    if (eventBuffer.length > 120) eventBuffer.shift();
+  }
+
 
   let nativeLocalStorage = null;
   let nativeSessionStorage = null;
@@ -215,30 +250,17 @@
     return parts.join("").slice(0, 180);
   }
 
-  // These are proxy-control-plane diagnostics, not page activity. Excluding
-  // them prevents the status poll and iframe lifecycle from filling the event
-  // stream with Intercept's own housekeeping.
-  const INTERNAL_AUTHORITY_EVENTS = new Set([
-    "authority_status_received",
-    "authority_frame_load",
-    "authority_frame_error",
-    "authority_frame_retry",
-    "authority_frame_ready",
-    "authority_host_removed",
-    "controller_loaded"
-  ]);
 
-  function record(kind, target, detail) {
-    if (INTERNAL_AUTHORITY_EVENTS.has(kind)) return;
-    eventBuffer.push({
-      kind: String(kind).slice(0, 80),
-      target: String(target || "").slice(0, 240),
-      detail: String(detail || "").slice(0, 300)
-    });
-    if (eventBuffer.length > 120) eventBuffer.shift();
+
+
+  // Mount the authority UI before patching page APIs. Upstream applications
+  // can expose non-standard or non-configurable browser surfaces; a failure in
+  // optional interception must not prevent the authorization controls appearing.
+  try {
+    initializeToolbar();
+  } catch (error) {
+    console.error("Intercept authority toolbar initialization failed", error);
   }
-
-
 
   async function flushEvents() {
     if (!eventBuffer.length || eventFlushInFlight) return;
@@ -296,7 +318,6 @@
     }).join(", ");
   }
 
-  const nativeSetAttribute = Element.prototype.setAttribute;
   Element.prototype.setAttribute = function(name, value) {
     const key = String(name).toLowerCase();
     if (["href", "src", "action", "formaction", "poster", "data", "cite", "background"].includes(key)) {
@@ -672,15 +693,6 @@
     return nativeOpenWindow.call(this, routed || url, ...rest);
   };
 
-  let toolbarHost = null;
-  let toolbarRoot = null;
-  let toolbarFallback = null;
-  let toolbarObserver = null;
-  let observedDocumentElement = null;
-  let authorityReady = false;
-  let authorityRetryCount = 0;
-  let authorityRetryTimer = null;
-  let telemetryStarted = false;
   let inputEventSequence = 0;
   let recentInputEvent = null;
   const INPUT_CORRELATION_WINDOW_MS = 2000;
@@ -844,20 +856,18 @@
   nativeAdd.call(window, "message", handleAuthorityMessage);
 
   function initializeToolbar() {
+    // documentElement exists while the parser is in <head>, so mount now
+    // instead of waiting for DOMContentLoaded and losing the UI to page hooks.
     if (!mountToolbar()) {
-      // DOMContentLoaded can race unusual document.write()/document.open()
-      // pages; retry on parser state changes and the next task.
-      nativeAdd.call(document, "readystatechange", mountToolbar);
-      window.setTimeout(mountToolbar, 0);
-      return;
+      const retry = () => {
+        if (mountToolbar()) {
+          nativeRemove.call(document, "readystatechange", retry);
+        }
+      };
+      nativeAdd.call(document, "readystatechange", retry);
+      window.setTimeout(retry, 0);
     }
     nativeAdd.call(window, "pageshow", mountToolbar);
     nativeAdd.call(window, "load", mountToolbar, {once: true});
-  }
-
-  if (document.readyState === "loading") {
-    nativeAdd.call(document, "DOMContentLoaded", initializeToolbar, {once: true});
-  } else {
-    initializeToolbar();
   }
 })();
