@@ -1970,7 +1970,7 @@ fn should_skip_response_header(name: &HeaderName) -> bool {
     matches!(
         name.as_str(),
         "connection" | "keep-alive" | "proxy-authenticate" | "proxy-authorization"
-            | "te" | "trailer" | "transfer-encoding" | "upgrade"
+            | "te" | "trailer" | "transfer-encoding" | "upgrade" | "origin-agent-cluster"
     )
 }
 
