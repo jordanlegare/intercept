@@ -153,17 +153,31 @@
     }
   }
 
+  const expectedParentOrigin = "http://" + sessionId + ".localhost:5000";
+  let readyAcknowledged = false;
+  let readyRetryTimer = null;
+
   window.addEventListener("message", event => {
     const data = event.data;
-    const expectedParentOrigin = "http://" + sessionId + ".localhost:5000";
     if (event.origin !== expectedParentOrigin
         || event.source !== window.parent
         || !data
-        || data.type !== "intercept:notice"
         || data.session_id !== sessionId) {
       return;
     }
-    noticeNode.textContent = String(data.message || "").slice(0, 500);
+
+    if (data.type === "intercept:authority-ack") {
+      readyAcknowledged = true;
+      if (readyRetryTimer !== null) {
+        window.clearInterval(readyRetryTimer);
+        readyRetryTimer = null;
+      }
+      return;
+    }
+
+    if (data.type === "intercept:notice") {
+      noticeNode.textContent = String(data.message || "").slice(0, 500);
+    }
   });
 
   startButton.addEventListener("click", async () => {
@@ -217,8 +231,18 @@
 
   // The embedding controller uses this handshake to distinguish an iframe
   // that merely fired "load" from one whose authority UI actually initialized.
-  window.parent.postMessage({
-    type: "intercept:authority-ready",
-    session_id: sessionId
-  }, "http://" + sessionId + ".localhost:5000");
+  function announceAuthorityReady() {
+    window.parent.postMessage({
+      type: "intercept:authority-ready",
+      session_id: sessionId
+    }, expectedParentOrigin);
+  }
+
+  // The parent acknowledges this message. Re-send until acknowledged so a
+  // lost early message or a parent-side initialization race cannot strand the
+  // toolbar in its "FRAME NOT RESPONDING" fallback state.
+  announceAuthorityReady();
+  readyRetryTimer = window.setInterval(() => {
+    if (!readyAcknowledged) announceAuthorityReady();
+  }, 750);
 })();
