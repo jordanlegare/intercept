@@ -689,7 +689,7 @@
       if (type === "pointerdown" && event.target instanceof Element) {
         const suggestion = event.target.closest(".ytSuggestionComponentText");
         const query = suggestion && suggestion.textContent
-          ? suggestion.textContent.replace(/\\s+/g, " ").trim()
+          ? suggestion.textContent.replace(/\s+/g, " ").trim()
           : "";
         if (query) {
           recentYouTubeSuggestion = {query, at: performance.now()};
