@@ -9,13 +9,60 @@
   const sessionPrefix = "/p/" + encodeURIComponent(sessionId);
   const apiPrefix = "/api/sessions/" + encodeURIComponent(sessionId);
   const api = suffix => apiPrefix + suffix;
+  const rawFetch = window.fetch.bind(window);
+  const nativeAdd = EventTarget.prototype.addEventListener;
+  const queue = [];
+  const eventBuffer = [];
+  let gateState = "waiting";
+  let replaying = false;
+  let lastListenerReport = 0;
+
+  const noticeNode = () => document.getElementById("intercept-notice");
   const stateNode = () => document.getElementById("intercept-state");
   const countdownNode = () => document.getElementById("intercept-countdown");
   const delayInput = () => document.getElementById("intercept-delay");
   const startButton = () => document.getElementById("intercept-start");
 
-  // The page remains on localhost, but every HTTP(S) request made by its scripts
-  // is translated into a path-addressed upstream request handled by Rust.
+  function selectorFor(node) {
+    if (!(node instanceof Element)) return String(node && node.nodeName || "unknown");
+    const parts = [node.tagName.toLowerCase()];
+    if (node.id) parts.push("#" + node.id.slice(0, 80));
+    if (node.classList && node.classList.length) {
+      parts.push("." + Array.from(node.classList).slice(0, 3).map(v => v.slice(0, 32)).join("."));
+    }
+    return parts.join("").slice(0, 180);
+  }
+
+  function record(kind, target, detail) {
+    eventBuffer.push({
+      kind: String(kind).slice(0, 80),
+      target: String(target || "").slice(0, 240),
+      detail: String(detail || "").slice(0, 300)
+    });
+    if (eventBuffer.length > 120) eventBuffer.shift();
+  }
+
+  async function flushEvents() {
+    if (!eventBuffer.length) return;
+    const batch = eventBuffer.splice(0, 100);
+    try {
+      await rawFetch(api("/events"), {
+        method: "POST",
+        headers: {"content-type": "application/json"},
+        body: JSON.stringify(batch),
+        keepalive: true
+      });
+    } catch (_) {
+      eventBuffer.unshift(...batch);
+      if (eventBuffer.length > 120) eventBuffer.length = 120;
+    }
+  }
+
+  function showNotice(message) {
+    const node = noticeNode();
+    if (node) node.textContent = message;
+  }
+
   function routeToProxy(value) {
     let url;
     try {
@@ -24,22 +71,14 @@
       return null;
     }
     if (url.protocol !== "http:" && url.protocol !== "https:") return url.href;
-
     const path = url.pathname + url.search + url.hash;
     if (url.origin === location.origin) {
-      if (url.pathname === sessionPrefix || url.pathname.startsWith(sessionPrefix + "/")) {
-        return url.href;
-      }
+      if (url.pathname === sessionPrefix || url.pathname.startsWith(sessionPrefix + "/")) return url.href;
       if (url.pathname === apiPrefix || url.pathname.startsWith(apiPrefix + "/") ||
-          url.pathname === "/assets/controller.js" || url.pathname === "/assets/intercept.css") {
-        return url.href;
-      }
+          url.pathname === "/assets/controller.js" || url.pathname === "/assets/intercept.css") return url.href;
       return sessionPrefix + path;
     }
-
-    if (url.origin === upstreamOrigin) {
-      return sessionPrefix + path;
-    }
+    if (url.origin === upstreamOrigin) return sessionPrefix + path;
     return sessionPrefix + "/_/" + url.protocol.slice(0, -1) + "/" + url.host + path;
   }
 
@@ -52,7 +91,6 @@
     }).join(", ");
   }
 
-  // URL mutation hooks keep dynamically-created page resources on the proxy.
   const nativeSetAttribute = Element.prototype.setAttribute;
   Element.prototype.setAttribute = function(name, value) {
     const key = String(name).toLowerCase();
@@ -99,7 +137,7 @@
   ].forEach(([proto, property]) => patchUrlSetter(proto, property));
 
   function routeCssValue(value) {
-    return String(value).replace(/url\\(\\s*["']?(.*?)["']?\\s*\\)/gi, (match, url) => {
+    return String(value).replace(/url\(\s*["']?(.*?)["']?\s*\)/gi, (match, url) => {
       const routed = routeToProxy(url.trim());
       return routed ? 'url("' + routed + '")' : match;
     });
@@ -156,30 +194,107 @@
   if (window.MutationObserver && document.documentElement) {
     const resourceObserver = new MutationObserver(records => {
       for (const record of records) {
-        if (record.type === "attributes") {
-          rewriteDomElement(record.target);
-        } else {
-          for (const node of record.addedNodes) rewriteDomTree(node);
-        }
+        if (record.type === "attributes") rewriteDomElement(record.target);
+        else for (const node of record.addedNodes) rewriteDomTree(node);
       }
     });
     resourceObserver.observe(document.documentElement, {
-      subtree: true,
-      childList: true,
-      attributes: true,
+      subtree: true, childList: true, attributes: true,
       attributeFilter: ["href", "src", "action", "formaction", "poster", "data", "cite", "background", "srcset", "style"]
     });
   }
-
   rewriteDomTree(document.documentElement);
+
+  // Observe registrations and trusted user-facing activity without recording form values.
+  EventTarget.prototype.addEventListener = function(type, listener, options) {
+    if (["click", "submit", "change", "input", "keydown", "pointerdown"].includes(String(type)) &&
+        (this === window || this === document || this instanceof Element)) {
+      const now = Date.now();
+      if (now - lastListenerReport > 100) {
+        lastListenerReport = now;
+        record("listener_registered", selectorFor(this), String(type));
+      }
+    }
+    return nativeAdd.call(this, type, listener, options);
+  };
+
+  for (const type of ["pointerdown", "click", "change", "input", "keydown"]) {
+    nativeAdd.call(document, type, event => {
+      const detail = type === "keydown" ? "key=" + String(event.key || "").slice(0, 24) : "";
+      record("dom_" + type, selectorFor(event.target), detail);
+    }, true);
+  }
+
+  function queueAction(action, description) {
+    if (queue.length >= 50) {
+      showNotice("Action queue is full (50). Wait for authorization before trying again.");
+      record("queue_full", description, "Action not queued");
+      return;
+    }
+    queue.push(action);
+    showNotice(queue.length + " browser action(s) held until authorization.");
+    record("action_queued", description, "Held until timer authorization");
+  }
+
+  function releaseQueuedActions() {
+    if (gateState !== "released" || !queue.length) return;
+    const actions = queue.splice(0);
+    showNotice("Timer complete. Releasing " + actions.length + " queued browser action(s).");
+    record("actions_released", "browser queue", String(actions.length) + " action(s)");
+    for (const action of actions) {
+      try { action(); } catch (error) { console.error("Intercept could not replay action", error); }
+    }
+  }
+
+  nativeAdd.call(document, "click", event => {
+    if (gateState === "released" || replaying) return;
+    const anchor = event.target instanceof Element ? event.target.closest("a[href],area[href]") : null;
+    if (!anchor) return;
+    const href = anchor.href;
+    const routedHref = routeToProxy(href);
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (!routedHref) {
+      showNotice("Could not route this navigation through the active Intercept session.");
+      record("navigation_blocked", selectorFor(anchor), href);
+      return;
+    }
+    queueAction(() => location.assign(routedHref), routedHref);
+  }, true);
+
+  nativeAdd.call(document, "submit", event => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || gateState === "released" || replaying) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const routedAction = routeToProxy(form.action);
+    if (!routedAction) {
+      showNotice("Could not route this form through the active Intercept session.");
+      record("form_blocked", selectorFor(form), form.action);
+      return;
+    }
+    const submitter = event.submitter;
+    queueAction(() => {
+      replaying = true;
+      try {
+        form.action = routedAction;
+        if (submitter && submitter.form === form) form.requestSubmit(submitter);
+        else form.requestSubmit();
+      } catch (error) {
+        console.error("Intercept form replay failed", error);
+      } finally {
+        window.setTimeout(() => { replaying = false; }, 0);
+      }
+    }, form.method.toUpperCase() + " " + form.action);
+  }, true);
 
   const nativeFetch = window.fetch.bind(window);
   window.fetch = function(input, init) {
     const source = input instanceof Request ? input.url : input;
+    const method = String((init && init.method) || (input instanceof Request && input.method) || "GET").toUpperCase();
     const routed = routeToProxy(source);
-    if (!routed) {
-      return Promise.reject(new TypeError("Intercept only proxies HTTP and HTTPS requests."));
-    }
+    record("fetch", String(source), method);
+    if (!routed) return Promise.reject(new TypeError("Intercept only proxies HTTP and HTTPS requests."));
     try {
       const routedInput = input instanceof Request ? new Request(routed, input) : routed;
       return nativeFetch.call(this, routedInput, init);
@@ -188,18 +303,31 @@
     }
   };
 
+  const xhrMeta = new WeakMap();
   const nativeXhrOpen = XMLHttpRequest.prototype.open;
+  const nativeXhrSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open = function(method, url, ...rest) {
     const routed = routeToProxy(url);
     if (!routed) throw new DOMException("Intercept only proxies HTTP and HTTPS requests.", "SecurityError");
+    xhrMeta.set(this, {method: String(method).toUpperCase(), url: routed});
     return nativeXhrOpen.call(this, method, routed, ...rest);
+  };
+  XMLHttpRequest.prototype.send = function(...args) {
+    const meta = xhrMeta.get(this);
+    if (meta) record("xhr", meta.url, meta.method);
+    return nativeXhrSend.apply(this, args);
   };
 
   if (navigator.sendBeacon) {
     const nativeSendBeacon = navigator.sendBeacon.bind(navigator);
     navigator.sendBeacon = function(url, data) {
       const routed = routeToProxy(url);
-      return routed ? nativeSendBeacon(routed, data) : false;
+      if (!routed) {
+        record("beacon_blocked", String(url), "URL could not be routed");
+        return false;
+      }
+      record("send_beacon", routed, "POST");
+      return nativeSendBeacon(routed, data);
     };
   }
 
@@ -231,65 +359,75 @@
 
   async function pollStatus() {
     try {
-      const response = await nativeFetch(api("/status"), { cache: "no-store" });
+      const response = await rawFetch(api("/status"), {cache: "no-store"});
       if (!response.ok) throw new Error("status " + response.status);
       const data = await response.json();
-
-      const state = data.state;
+      gateState = data.state;
       const status = stateNode();
       const countdown = countdownNode();
       const button = startButton();
       const input = delayInput();
-
-      if (status) {
-        status.textContent = state === "waiting" ? "WAITING" :
-          state === "running" ? "AUTHORIZATION COUNTDOWN" : "AUTHORIZED";
-      }
-      if (countdown) {
-        countdown.textContent = state === "waiting" ? "NOT STARTED" :
-          state === "released" ? "00:00.00" :
-          (Math.ceil((data.remaining_ms || 0) / 10) / 100).toFixed(2) + "s";
-      }
-      if (button) button.disabled = state !== "waiting";
-      if (input) input.disabled = state !== "waiting";
+      if (status) status.textContent = gateState === "waiting" ? "WAITING" :
+        gateState === "running" ? "AUTHORIZATION COUNTDOWN" : "AUTHORIZED";
+      if (countdown) countdown.textContent = gateState === "waiting" ? "NOT STARTED" :
+        gateState === "released" ? "00:00.00" :
+        (Math.ceil((data.remaining_ms || 0) / 10) / 100).toFixed(2) + "s";
+      if (button) button.disabled = gateState !== "waiting";
+      if (input) input.disabled = gateState !== "waiting";
+      if (gateState === "released") releaseQueuedActions();
     } catch (error) {
-      const status = stateNode();
-      const countdown = countdownNode();
-      if (status) status.textContent = "SERVICE UNAVAILABLE";
-      if (countdown) countdown.textContent = String(error.message || error).slice(0, 80);
+      if (stateNode()) stateNode().textContent = "SERVICE UNAVAILABLE";
+      if (countdownNode()) countdownNode().textContent = String(error.message || error).slice(0, 80);
     }
   }
 
-  document.addEventListener("click", async event => {
-    const target = event.target;
-    const button = target instanceof Element ? target.closest("#intercept-start") : null;
-    if (!button || button.disabled) return;
+  async function pollEvents() {
+    try {
+      const response = await rawFetch(api("/events"), {cache: "no-store"});
+      if (!response.ok) return;
+      const events = await response.json();
+      const summary = document.getElementById("intercept-events-summary");
+      const list = document.getElementById("intercept-events-list");
+      if (summary) summary.textContent = "EVENT STREAM · " + events.length + " retained";
+      if (list) {
+        list.textContent = events.slice(-30).reverse().map(item => {
+          const time = new Date(Number(item.at_unix_ms)).toLocaleTimeString();
+          return "[" + time + "] " + item.kind + " · " + item.detail + " · " + item.target;
+        }).join("\n") || "No events recorded yet.";
+      }
+    } catch (_) {}
+  }
 
+  nativeAdd.call(document, "click", async event => {
+    const button = event.target instanceof Element ? event.target.closest("#intercept-start") : null;
+    if (!button || button.disabled) return;
     const seconds = Number(delayInput() && delayInput().value);
     if (!Number.isFinite(seconds) || seconds < 0.000000001 || seconds > 86400) {
-      const status = stateNode();
-      if (status) status.textContent = "INVALID DELAY";
+      if (stateNode()) stateNode().textContent = "INVALID DELAY";
       return;
     }
-
     button.disabled = true;
     try {
-      const response = await nativeFetch(api("/start"), {
+      const response = await rawFetch(api("/start"), {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ delay_seconds: seconds })
+        headers: {"content-type": "application/json"},
+        body: JSON.stringify({delay_seconds: seconds})
       });
       if (!response.ok) throw new Error(await response.text() || "Timer could not start");
+      record("timer_started", "intercept-toolbar", String(seconds) + " seconds");
       await pollStatus();
     } catch (error) {
-      const status = stateNode();
-      const countdown = countdownNode();
-      if (status) status.textContent = "START FAILED";
-      if (countdown) countdown.textContent = String(error.message || error).slice(0, 80);
+      if (stateNode()) stateNode().textContent = "START FAILED";
+      if (countdownNode()) countdownNode().textContent = String(error.message || error).slice(0, 80);
       button.disabled = false;
     }
-  });
+  }, true);
 
+  rawFetch(api("/status"), {cache: "no-store"}).catch(() => {});
   pollStatus();
-  window.setInterval(pollStatus, 200);
+  pollEvents();
+  record("controller_loaded", "document", "Browser event observer active");
+  window.setInterval(pollStatus, 400);
+  window.setInterval(pollEvents, 1800);
+  window.setInterval(flushEvents, 1200);
 })();
