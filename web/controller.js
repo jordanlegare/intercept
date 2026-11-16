@@ -157,7 +157,7 @@
       get() {
         const scope = cookieScope();
         const namespace = cookieNamespace(scope);
-        return nativeCookieDescriptor.get.call(this).split(/;\\s*/).filter(Boolean).map(pair => {
+        return nativeCookieDescriptor.get.call(this).split(/;\s*/).filter(Boolean).map(pair => {
           const equals = pair.indexOf("=");
           if (equals < 0) return "";
           const name = pair.slice(0, equals);
@@ -185,7 +185,7 @@
           const key = (separator < 0 ? attribute : attribute.slice(0, separator)).trim().toLowerCase();
           const attributeValue = separator < 0 ? "" : attribute.slice(separator + 1).trim();
           if (key === "domain") {
-            const domain = attributeValue.replace(/^\\./, "").replace(/\\.$/, "").toLowerCase();
+            const domain = attributeValue.replace(/^\./, "").replace(/\.$/, "").toLowerCase();
             const host = new URL(scope.origin).hostname.toLowerCase();
             if (!(host === domain || host.endsWith("." + domain))) {
               return nativeCookieDescriptor.set.call(this, original);
