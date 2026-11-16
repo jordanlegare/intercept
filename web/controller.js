@@ -7,12 +7,13 @@
   if (!sessionId || !upstreamOrigin) return;
 
   const sessionPrefix = "/p/" + encodeURIComponent(sessionId);
-  const apiPrefix = "/api/sessions/" + encodeURIComponent(sessionId);
+  const apiPrefix = "http://127.0.0.1:5000/api/sessions/" + encodeURIComponent(sessionId);
   const api = suffix => apiPrefix + suffix;
   const rawFetch = window.fetch.bind(window);
   const nativeAdd = EventTarget.prototype.addEventListener;
   const queue = [];
   const eventBuffer = [];
+  let toolbarRoot = null;
   const CONTROL_REQUEST_TIMEOUT_MS = 5000;
   let gateState = "waiting";
   let replaying = false;
@@ -23,11 +24,12 @@
   let startInFlight = false;
   let countdownDeadline = 0;
 
-  const noticeNode = () => document.getElementById("intercept-notice");
-  const stateNode = () => document.getElementById("intercept-state");
-  const countdownNode = () => document.getElementById("intercept-countdown");
-  const delayInput = () => document.getElementById("intercept-delay");
-  const startButton = () => document.getElementById("intercept-start");
+  const uiNode = id => toolbarRoot && toolbarRoot.querySelector("#" + id);
+  const noticeNode = () => uiNode("intercept-notice");
+  const stateNode = () => uiNode("intercept-state");
+  const countdownNode = () => uiNode("intercept-countdown");
+  const delayInput = () => uiNode("intercept-delay");
+  const startButton = () => uiNode("intercept-start");
 
   function selectorFor(node) {
     if (!(node instanceof Element)) return String(node && node.nodeName || "unknown");
@@ -56,7 +58,15 @@
       controller.abort();
     }, timeoutMs);
     try {
-      return await rawFetch(api(suffix), {...options, signal: controller.signal});
+      const response = await rawFetch(api(suffix), {...options, signal: controller.signal});
+      // Keep the watchdog active until the complete body has been consumed.
+      const body = await response.text();
+      return {
+        ok: response.ok,
+        status: response.status,
+        text: async () => body,
+        json: async () => body ? JSON.parse(body) : null
+      };
     } catch (error) {
       if (timedOut) throw new Error("control request timed out after " + timeoutMs + " ms");
       throw error;
@@ -469,8 +479,8 @@
       const response = await controlFetch("/events", {cache: "no-store"});
       if (!response.ok) throw new Error("events " + response.status);
       const events = await response.json();
-      const summary = document.getElementById("intercept-events-summary");
-      const list = document.getElementById("intercept-events-list");
+      const summary = uiNode("intercept-events-summary");
+      const list = uiNode("intercept-events-list");
       if (summary) summary.textContent = "EVENT STREAM · " + events.length + " retained";
       if (list) {
         list.textContent = events.slice(-30).reverse().map(item => {
@@ -485,7 +495,7 @@
     }
   }
 
-  nativeAdd.call(document, "click", async event => {
+  async function handleStartClick(event) {
     const button = event.target instanceof Element ? event.target.closest("#intercept-start") : null;
     if (!button || button.disabled || startInFlight) return;
     const seconds = Number(delayInput() && delayInput().value);
@@ -493,6 +503,8 @@
       if (stateNode()) stateNode().textContent = "INVALID DELAY";
       return;
     }
+    record("start_click_received", "intercept-toolbar", "User activated START");
+    showNotice("START CLICK RECEIVED · contacting local authority…");
     startInFlight = true;
     renderGateState();
     try {
@@ -517,13 +529,44 @@
       startInFlight = false;
       renderGateState();
     }
-  }, true);
+  }
 
-  pollStatus();
-  pollEvents();
-  record("controller_loaded", "document", "Browser event observer active");
-  window.setInterval(pollStatus, 400);
-  window.setInterval(pollEvents, 1800);
-  window.setInterval(flushEvents, 1200);
-  window.setInterval(updateCountdown, 100);
+  function initializeToolbar() {
+    const toolbar = document.getElementById("intercept-toolbar");
+    if (!toolbar || !document.body) {
+      console.error("Intercept could not initialize its authority toolbar.");
+      return;
+    }
+    const host = document.createElement("div");
+    host.id = "intercept-ui-host";
+    host.style.cssText = "position:fixed;inset:auto 0 0;z-index:2147483647;pointer-events:none;";
+    const root = host.attachShadow({mode: "closed"});
+    const stylesheet = document.createElement("link");
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = "/assets/intercept.css";
+    root.appendChild(stylesheet);
+    toolbar.style.pointerEvents = "auto";
+    root.appendChild(toolbar);
+    const oldStylesheet = document.querySelector('link[href="/assets/intercept.css"]');
+    if (oldStylesheet) oldStylesheet.remove();
+    document.body.appendChild(host);
+    toolbarRoot = root;
+    document.documentElement.style.setProperty("scroll-padding-bottom", "90px", "important");
+    document.body.style.setProperty("padding-bottom", "78px", "important");
+    nativeAdd.call(toolbarRoot, "click", handleStartClick, true);
+    renderGateState();
+    pollStatus();
+    pollEvents();
+    record("controller_loaded", "document", "Isolated toolbar and browser event observer active");
+    window.setInterval(pollStatus, 400);
+    window.setInterval(pollEvents, 1800);
+    window.setInterval(flushEvents, 1200);
+    window.setInterval(updateCountdown, 100);
+  }
+
+  if (document.readyState === "loading") {
+    nativeAdd.call(document, "DOMContentLoaded", initializeToolbar, {once: true});
+  } else {
+    initializeToolbar();
+  }
 })();
