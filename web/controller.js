@@ -78,8 +78,7 @@
     const path = url.pathname + url.search + url.hash;
     if (url.origin === location.origin) {
       if (url.pathname === sessionPrefix || url.pathname.startsWith(sessionPrefix + "/")) return url.href;
-      if (url.pathname === apiPrefix || url.pathname.startsWith(apiPrefix + "/") ||
-          url.pathname === "/assets/controller.js" || url.pathname === "/assets/intercept.css") return url.href;
+      if (url.pathname === "/assets/controller.js" || url.pathname === "/assets/intercept.css") return url.href;
       return sessionPrefix + path;
     }
     if (url.origin === upstreamOrigin) return sessionPrefix + path;
