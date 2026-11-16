@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 
@@ -26,7 +26,7 @@ use tokio::{
     sync::{watch, Mutex, RwLock},
     time::{sleep_until, Instant},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use url::Url;
 use uuid::Uuid;
 
@@ -38,6 +38,33 @@ const MIN_DELAY_NANOS: f64 = 0.000_000_001;
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHE_ENTRY_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_ASSET_CACHE_SECONDS: u64 = 300;
+const UPSTREAM_TIMEOUT_SECONDS: u64 = 30;
+const SHUTDOWN_GRACE_SECONDS: u64 = 5;
+
+static HTML_STYLE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)(<style\b[^>]*>)(.*?)(</style\s*>)")
+        .expect("valid inline style block regex")
+});
+static HTML_SCRIPT_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)(<script\b[^>]*>)(.*?)(</script\s*>)")
+        .expect("valid inline script block regex")
+});
+static CSS_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)"#)
+        .expect("valid CSS url() regex")
+});
+static CSS_IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)@import\s+(?:"([^"]+)"|'([^']+)')"#)
+        .expect("valid CSS @import regex")
+});
+static JS_STATIC_IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)(\b(?:import|export)\s+(?:[^;\n]*?\s+from\s*)?)(["'])(https?://[^"']+)(["'])"#)
+        .expect("valid JavaScript static import regex")
+});
+static JS_DYNAMIC_IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)\bimport\(\s*(["'])(https?://[^"']+)(["'])\s*\)"#)
+        .expect("valid JavaScript dynamic import regex")
+});
 
 #[derive(Clone)]
 struct AppState {
@@ -125,12 +152,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(address).await?;
     info!("Intercept listening at http://{LISTEN}");
     info!("This service is loopback-only; it is not a network-wide transparent proxy.");
-    axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await?;
-    Ok(())
-}
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.await;
+        })
+        .into_future();
+    tokio::pin!(server);
 
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    tokio::select! {
+        result = &mut server => result?,
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
+            info!(
+                grace_seconds = SHUTDOWN_GRACE_SECONDS,
+                "Shutdown signal received; draining active requests"
+            );
+            let _ = shutdown_tx.send(());
+            match tokio::time::timeout(
+                Duration::from_secs(SHUTDOWN_GRACE_SECONDS),
+                &mut server,
+            ).await {
+                Ok(result) => result?,
+                Err(_) => warn!(
+                    grace_seconds = SHUTDOWN_GRACE_SECONDS,
+                    "Graceful shutdown timed out; forcing process shutdown"
+                ),
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn index() -> Html<&'static str> {
@@ -235,7 +286,7 @@ async fn build_pinned_client(target: &Url) -> Result<reqwest::Client, (StatusCod
         .http1_only()
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(90))
+        .timeout(Duration::from_secs(UPSTREAM_TIMEOUT_SECONDS))
         .pool_idle_timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(16)
         .user_agent("Intercept/0.1 (+http://127.0.0.1:5000)");
@@ -403,6 +454,7 @@ async fn proxy(
     OriginalUri(uri): OriginalUri,
     request: Request<Body>,
 ) -> Response<Body> {
+    let request_started = Instant::now();
     let Some(id) = params.get("id") else {
         return plain(StatusCode::BAD_REQUEST, "Missing session id");
     };
@@ -446,10 +498,13 @@ async fn proxy(
     } else {
         None
     };
+    let cache_hit = cached.is_some();
 
+    let mut upstream_elapsed_ms = 0u128;
     let (upstream_status, upstream_headers, mut response_body) = if let Some(cached) = cached {
         (cached.status, cached.headers, cached.body)
     } else {
+        let upstream_started = Instant::now();
         let client = match client_for(&session, &upstream_url).await {
             Ok(client) => client,
             Err((status, message)) => return plain(status, &message),
@@ -488,7 +543,12 @@ async fn proxy(
         let upstream = match builder.send().await {
             Ok(response) => response,
             Err(error) => {
-                warn!(error = ?error, url = %upstream_url, "Upstream request failed");
+                warn!(
+                    error = ?error,
+                    url = %upstream_url,
+                    elapsed_ms = request_started.elapsed().as_millis(),
+                    "Upstream request failed"
+                );
                 return plain(StatusCode::BAD_GATEWAY, "Upstream request failed");
             }
         };
@@ -512,11 +572,17 @@ async fn proxy(
                     bytes.extend_from_slice(&chunk);
                 }
                 Err(error) => {
-                    warn!(%error, url = %upstream_url, "Failed while reading upstream response");
+                    warn!(
+                        %error,
+                        url = %upstream_url,
+                        elapsed_ms = request_started.elapsed().as_millis(),
+                        "Failed while reading upstream response"
+                    );
                     return plain(StatusCode::BAD_GATEWAY, "Failed while reading upstream response");
                 }
             }
         }
+        upstream_elapsed_ms = upstream_started.elapsed().as_millis();
 
         if let Some(key) = cache_key.as_deref() {
             if !bypass_cache {
@@ -526,6 +592,7 @@ async fn proxy(
         (status, headers, bytes)
     };
 
+    let rewrite_started = Instant::now();
     let content_type = upstream_headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -564,6 +631,7 @@ async fn proxy(
             }
         }
     }
+    let rewrite_elapsed_ms = rewrite_started.elapsed().as_millis();
 
     let mut response = Response::builder().status(upstream_status);
     let headers = response.headers_mut().expect("fresh response builder");
@@ -610,6 +678,17 @@ async fn proxy(
     } else if transformed && content_type.contains("text/css") {
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/css; charset=utf-8"));
     }
+    debug!(
+        method = %parts.method,
+        url = %upstream_url,
+        status = %upstream_status,
+        cache_hit,
+        upstream_elapsed_ms,
+        rewrite_elapsed_ms,
+        response_bytes = response_body.len(),
+        elapsed_ms = request_started.elapsed().as_millis(),
+        "Proxy request completed"
+    );
     response.body(Body::from(response_body))
         .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "Could not build proxy response"))
 }
@@ -766,9 +845,7 @@ fn rewrite_html(
     session_base: &Url,
     session_id: &str,
 ) -> Result<String, String> {
-    let style_blocks = Regex::new(r"(?is)(<style\b[^>]*>)(.*?)(</style\s*>)")
-        .map_err(|error| error.to_string())?;
-    let html_with_styles = style_blocks.replace_all(html, |captures: &regex::Captures<'_>| {
+    let html_with_styles = HTML_STYLE_BLOCK_RE.replace_all(html, |captures: &regex::Captures<'_>| {
         let open = captures.get(1).map(|m| m.as_str()).unwrap_or("");
         let body = captures.get(2).map(|m| m.as_str()).unwrap_or("");
         let close = captures.get(3).map(|m| m.as_str()).unwrap_or("");
@@ -776,9 +853,7 @@ fn rewrite_html(
             .unwrap_or_else(|_| body.to_owned());
         format!("{open}{rewritten}{close}")
     }).into_owned();
-    let script_blocks = Regex::new(r"(?is)(<script\b[^>]*>)(.*?)(</script\s*>)")
-        .map_err(|error| error.to_string())?;
-    let html_with_styles_and_scripts = script_blocks.replace_all(&html_with_styles, |captures: &regex::Captures<'_>| {
+    let html_with_styles_and_scripts = HTML_SCRIPT_BLOCK_RE.replace_all(&html_with_styles, |captures: &regex::Captures<'_>| {
         let open = captures.get(1).map(|m| m.as_str()).unwrap_or("");
         let body = captures.get(2).map(|m| m.as_str()).unwrap_or("");
         let close = captures.get(3).map(|m| m.as_str()).unwrap_or("");
@@ -930,9 +1005,7 @@ fn rewrite_srcset(base: &Url, session_base: &Url, session_id: &str, value: &str)
 }
 
 fn rewrite_css(css: &str, base: &Url, session_base: &Url, session_id: &str) -> Result<String, String> {
-    let url_pattern = Regex::new(r#"(?i)url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)"#)
-        .map_err(|error| error.to_string())?;
-    let with_urls = url_pattern.replace_all(css, |captures: &regex::Captures<'_>| {
+    let with_urls = CSS_URL_RE.replace_all(css, |captures: &regex::Captures<'_>| {
         let original = captures.get(0).map(|m| m.as_str()).unwrap_or("");
         let raw = captures.get(1).or_else(|| captures.get(2)).or_else(|| captures.get(3))
             .map(|m| m.as_str().trim()).unwrap_or("");
@@ -942,9 +1015,7 @@ fn rewrite_css(css: &str, base: &Url, session_base: &Url, session_id: &str) -> R
         }
     });
 
-    let import_pattern = Regex::new(r#"(?i)@import\s+(?:"([^"]+)"|'([^']+)')"#)
-        .map_err(|error| error.to_string())?;
-    let with_imports = import_pattern.replace_all(&with_urls, |captures: &regex::Captures<'_>| {
+    let with_imports = CSS_IMPORT_RE.replace_all(&with_urls, |captures: &regex::Captures<'_>| {
         let original = captures.get(0).map(|m| m.as_str()).unwrap_or("");
         let raw = captures.get(1).or_else(|| captures.get(2)).map(|m| m.as_str()).unwrap_or("");
         match rewrite_url(base, session_base, session_id, raw) {
@@ -956,9 +1027,7 @@ fn rewrite_css(css: &str, base: &Url, session_base: &Url, session_id: &str) -> R
 }
 
 fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: &str) -> Result<String, String> {
-    let static_imports = Regex::new(r#"(?m)(\b(?:import|export)\s+(?:[^;\n]*?\s+from\s*)?)(["'])(https?://[^"']+)(["'])"#)
-        .map_err(|error| error.to_string())?;
-    let rewritten = static_imports.replace_all(source, |captures: &regex::Captures<'_>| {
+    let rewritten = JS_STATIC_IMPORT_RE.replace_all(source, |captures: &regex::Captures<'_>| {
         let prefix = captures.get(1).map(|m| m.as_str()).unwrap_or("");
         let quote = captures.get(2).map(|m| m.as_str()).unwrap_or("'");
         let raw = captures.get(3).map(|m| m.as_str()).unwrap_or("");
@@ -967,9 +1036,7 @@ fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: 
         format!("{prefix}{quote}{route}{suffix}")
     });
 
-    let dynamic_imports = Regex::new(r#"(?m)\bimport\(\s*(["'])(https?://[^"']+)(["'])\s*\)"#)
-        .map_err(|error| error.to_string())?;
-    let rewritten = dynamic_imports.replace_all(&rewritten, |captures: &regex::Captures<'_>| {
+    let rewritten = JS_DYNAMIC_IMPORT_RE.replace_all(&rewritten, |captures: &regex::Captures<'_>| {
         let quote = captures.get(1).map(|m| m.as_str()).unwrap_or("'");
         let raw = captures.get(2).map(|m| m.as_str()).unwrap_or("");
         let suffix = captures.get(3).map(|m| m.as_str()).unwrap_or(quote);
