@@ -1171,11 +1171,14 @@ async fn proxy(
     let is_document = parts.headers.get("sec-fetch-dest")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.eq_ignore_ascii_case("document")) || accept_html;
-    let bootstrap_document = parts.method == Method::GET
+    // Keep the one-time bootstrap exception available across upstream
+    // redirects. It is consumed only after the final HTML document body has
+    // been received, so Strict mode cannot deadlock before the authority UI loads.
+    let bootstrap_document = session.policy == AuthorizationPolicy::Strict
+        && parts.method == Method::GET
         && !ajax_request
         && is_document
-        && upstream_url.path() == session.base_url.path()
-        && session.bootstrap_pending.swap(false, Ordering::AcqRel);
+        && session.bootstrap_pending.load(Ordering::Acquire);
     if should_hold_request(&session, &parts.method, &upstream_url, bootstrap_document) {
         wait_for_authorization(&session).await;
     }
@@ -1424,6 +1427,13 @@ async fn proxy(
             }
         }
     }
+    if bootstrap_document
+        && !upstream_status.is_redirection()
+        && content_type.contains("text/html")
+    {
+        session.bootstrap_pending.store(false, Ordering::Release);
+    }
+
     let rewrite_elapsed_ms = rewrite_started.elapsed().as_millis();
 
     let mut response = Response::builder().status(upstream_status);
