@@ -16,7 +16,7 @@ Install a recent stable Rust toolchain, then run:
 
 Open http://127.0.0.1:5000 or http://localhost:5000, enter the complete upstream URL (including any path and query string), and choose **Open new session tab**. Each launch creates an independent server-side session and opens it in a separate browser tab; the launcher remains open so you can start more sessions without restarting Intercept. The **Active Sessions** list shows sessions currently held by the process, lets you reopen one in another tab, provides a per-session folder button to browse cached resources, and provides a **KILL** action. The cache browser displays an origin/path folder tree, cached file metadata, text previews, and downloads. The cache is held in process memory rather than a disk directory; it disappears when its session is killed/expired or Intercept restarts. Killing a session removes it from the registry, cancels in-flight upstream requests, and clears its clients and cache without stopping the proxy process. The session opens the exact resource rather than resetting to the site's homepage. The session URL retains the destination path, query, and browser-side fragment. The browser sees a unique `.localhost` host for each session; the trusted authority panel is loaded in a cross-origin iframe. Allow pop-ups for the dashboard origin you use so each launch can open its own tab. Select an authorization policy before opening:
 
-1. **Standard** holds POST, PUT, PATCH, and DELETE while allowing GET, HEAD, and OPTIONS.
+1. **Standard** holds POST, PUT, PATCH, and DELETE while allowing GET, HEAD, and OPTIONS, with narrowly-scoped read-only POST exceptions for YouTube autocomplete (`/youtubei/v1/complete`) and search (`/youtubei/v1/search`). Other POST endpoints remain held.
 2. **Strict** permits the initial document bootstrap, then holds all upstream requests until the timer starts and expires.
 3. **Custom** evaluates ordered host/path/method rules; unmatched requests use Standard behavior. Example:
    ```json
@@ -35,7 +35,7 @@ The server listens on the IPv4 and IPv6 loopback interfaces where available, and
       - dashboard + session/timer API
       - multi-origin URL routing and response rewriting
       - bounded per-session static-resource cache
-      - minimal bottom authority banner
+      - minimal top authority banner
       - per-session authorization gate
               |  HTTP or verified HTTPS (rustls)
               v
@@ -45,10 +45,10 @@ One reqwest Client is created per upstream origin and reused. Each new origin is
 
 ## Authority behavior
 
-- The proxied page keeps its original layout. A fixed cross-origin authority iframe appears at the bottom with WAITING / AUTHORIZATION COUNTDOWN / AUTHORIZED, a decimal-seconds delay input, **[START]**, the countdown, a notice, an event stream, and session resource metrics.
+- The proxied page keeps its original layout. A fixed cross-origin authority iframe appears at the top with WAITING / AUTHORIZATION COUNTDOWN / AUTHORIZED, a decimal-seconds delay input, **[START]**, the countdown, a notice, an event stream, and session resource metrics.
 - The iframe is hosted on the dashboard origin, isolated from the proxied page by the browser's same-origin policy and a closed Shadow DOM host. The session origin cannot access the dashboard control API; API requests are accepted only on either trusted dashboard hostname, with Origin required to match the corresponding hostname.
 - Authority status, event polling, and event uploads have full-response deadlines and in-flight guards. The countdown advances locally between server status responses; Rust's monotonic timer remains authoritative. Start retries using the same delay are idempotent.
-- The controller observes pointer, click, change, input, and keydown activity; reports selected event-listener registrations; and records fetch, XHR, sendBeacon, and proxied HTTP request metadata. It does not record input values or request bodies.
+- The controller observes pointer, click, change, input, and keydown activity; reports selected event-listener registrations; and records fetch, XHR, sendBeacon, and proxied HTTP request metadata. Recent input/change/Enter events receive short-lived IDs attached to subsequent fetch/XHR requests, allowing the event stream to correlate a typed interaction with its AJAX request and upstream response. It records target selectors and event IDs only, never input values or request bodies.
 - While authorization is pending, ordinary anchor navigation and form submission are held in a bounded browser queue (50 actions) and replayed when the Rust timer releases the session. The Rust gate independently enforces Standard, Strict, or Custom policy for every routed upstream request.
 - Network URLs created at runtime through fetch, XHR, sendBeacon, EventSource, Worker, SharedWorker, service-worker registration, window.open, dynamic URL attributes, and CSS setters are routed through the session. Worker scripts get a bootstrap that routes worker fetch/XHR/importScripts calls and marks fetch/XHR as AJAX. Static and dynamic JavaScript module imports are rewritten too.
 - **AJAX passthrough:** requests explicitly marked by the injected fetch/XHR controller (with browser Fetch Metadata and EventSource fallbacks) (\`Sec-Fetch-Dest: empty\`), legacy \`X-Requested-With: XMLHttpRequest\`, an explicit internal AJAX marker, or \`Accept: text/event-stream\` use a dedicated response path. The upstream status, content type, application headers and response bytes are preserved; HTML/CSS/JavaScript rewriting and the static-resource cache are bypassed. Upstream response bodies stream back to the browser instead of being buffered.
@@ -56,7 +56,7 @@ One reqwest Client is created per upstream origin and reused. Each new origin is
 - AJAX response streams have a 24-hour total request timeout so long-polling and Server-Sent Events can remain open; browser EventSource clients can reconnect after that limit. Request bodies are still buffered and capped at 8 MiB. The AJAX response path has no 32 MiB body-buffering cap.
 - Each upstream origin has its own pooled, DNS-pinned client. Cookies are scoped to that upstream origin's local proxy path so cookies from different hosts do not collide. A session may initialize at most 24 upstream-origin clients.
 - Static non-AJAX resources are cached per session in memory (64 MiB total; 8 MiB per entry; five-minute default TTL). HTML and API responses are not cached by default. Use the folder button beside **KILL** in the dashboard to browse the live cache by scheme, host, and path, preview text assets, or download cached bytes. This is a virtual browser over RAM entries, not a disk-backed file manager.
-- Rust owns authorization. Standard blocks POST/PUT/PATCH/DELETE; Strict holds all proxied traffic after the first bootstrap document; Custom applies ordered path/host/method rules and falls back to Standard. A site's state-changing GET endpoints remain allowed by Standard and must be covered by Custom or Strict.
+- Rust owns authorization. Standard blocks POST/PUT/PATCH/DELETE except the explicit read-only YouTube autocomplete/search routes; Strict holds all proxied traffic after the first bootstrap document; Custom applies ordered path/host/method rules and falls back to Standard. A site's state-changing GET endpoints remain allowed by Standard and must be covered by Custom or Strict.
 
 This is not a universal JavaScript sandbox and cannot suspend arbitrary JavaScript execution. The event stream is observational; it records event metadata, not values. The browser queue defers ordinary anchor navigation and form submission, while the Rust proxy is authoritative for POST, PUT, PATCH, and DELETE. A page's custom click handler may still perform local JavaScript side effects before making a request, and applications can mutate state through GET endpoints. Those behaviors are not universally blocked.
 
