@@ -235,9 +235,47 @@
     return nativeAdd.call(this, type, listener, options);
   };
 
+  function rememberInputEvent(event) {
+    const id = "i" + (++inputEventSequence).toString(36);
+    const target = selectorFor(event.target);
+    recentInputEvent = {id, target, at: performance.now()};
+    return recentInputEvent;
+  }
+
+  function currentInputEvent() {
+    if (!recentInputEvent ||
+        performance.now() - recentInputEvent.at > INPUT_CORRELATION_WINDOW_MS) {
+      return null;
+    }
+    return recentInputEvent;
+  }
+
+  function addInputCorrelation(headers) {
+    const context = currentInputEvent();
+    if (!context) return null;
+    headers.set("X-Intercept-Input-Id", context.id);
+    headers.set("X-Intercept-Input-Target", encodeURIComponent(context.target).slice(0, 360));
+    return context;
+  }
+
+  function inputCorrelationDetail(context) {
+    return context
+      ? " · input_id=" + context.id + " target=" + encodeURIComponent(context.target).slice(0, 120)
+      : "";
+  }
+
   for (const type of ["pointerdown", "click", "change", "input", "keydown"]) {
     nativeAdd.call(document, type, event => {
-      const detail = type === "keydown" ? "key=" + String(event.key || "").slice(0, 24) : "";
+      let detail = "";
+      if (type === "input" || type === "change" ||
+          (type === "keydown" && event.key === "Enter")) {
+        const context = rememberInputEvent(event);
+        detail = "input_id=" + context.id;
+      } else if (type === "keydown") {
+        // Do not record literal characters or user-entered text.
+        const key = String(event.key || "");
+        detail = "key=" + (key.length === 1 ? "character" : key.slice(0, 24));
+      }
       record("dom_" + type, selectorFor(event.target), detail);
     }, true);
   }
@@ -324,8 +362,9 @@
       }
       const headers = new Headers(routedRequest.headers);
       headers.set("X-Intercept-Proxy-Mode", "ajax");
+      const inputContext = addInputCorrelation(headers);
       const markedRequest = new Request(routedRequest, {headers});
-      record("ajax_routed", routed, method);
+      record("ajax_routed", routed, method + inputCorrelationDetail(inputContext));
       return nativeFetch(markedRequest);
     } catch (error) {
       record("ajax_route_error", String(source), String(error && error.message || error));
@@ -346,14 +385,23 @@
   XMLHttpRequest.prototype.send = function(...args) {
     const meta = xhrMeta.get(this);
     if (meta) {
+      const inputContext = currentInputEvent();
       try {
-        // Add the internal marker last, after page code has configured headers.
+        // Add internal metadata last, after page code has configured headers.
         nativeXhrSetRequestHeader.call(this, "X-Intercept-Proxy-Mode", "ajax");
+        if (inputContext) {
+          nativeXhrSetRequestHeader.call(this, "X-Intercept-Input-Id", inputContext.id);
+          nativeXhrSetRequestHeader.call(
+            this,
+            "X-Intercept-Input-Target",
+            encodeURIComponent(inputContext.target).slice(0, 360)
+          );
+        }
       } catch (error) {
         record("xhr_marker_error", meta.url, String(error && error.message || error));
       }
-      record("xhr", meta.url, meta.method);
-      record("ajax_routed", meta.url, meta.method);
+      record("xhr", meta.url, meta.method + inputCorrelationDetail(inputContext));
+      record("ajax_routed", meta.url, meta.method + inputCorrelationDetail(inputContext));
     }
     return nativeXhrSend.apply(this, args);
   };
@@ -426,6 +474,9 @@
   let authorityRetryCount = 0;
   let authorityRetryTimer = null;
   let telemetryStarted = false;
+  let inputEventSequence = 0;
+  let recentInputEvent = null;
+  const INPUT_CORRELATION_WINDOW_MS = 2000;
 
   function authorityUrl(retry) {
     return "http://127.0.0.1:5000/authority/" + encodeURIComponent(sessionId)
