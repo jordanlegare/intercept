@@ -634,13 +634,11 @@
 
     let query = "";
     let querySource = "";
-    try {
-      const pageUrl = new URL(window.location.href);
-      query = pageUrl.searchParams.get("search_query")
-        || pageUrl.searchParams.get("q")
-        || "";
-      if (query) querySource = "page_url";
-    } catch (_) {}
+    if (recentYouTubeSuggestion
+        && performance.now() - recentYouTubeSuggestion.at <= YOUTUBE_SUGGESTION_WINDOW_MS) {
+      query = recentYouTubeSuggestion.query;
+      querySource = "clicked_suggestion";
+    }
 
     if (!query) {
       const selectors = [
@@ -662,6 +660,16 @@
       }
     }
 
+    if (!query) {
+      try {
+        const pageUrl = new URL(window.location.href);
+        query = pageUrl.searchParams.get("search_query")
+          || pageUrl.searchParams.get("q")
+          || "";
+        if (query) querySource = "page_url";
+      } catch (_) {}
+    }
+
     if (!query.trim()) {
       return {body: null, reason: "search query unavailable"};
     }
@@ -678,6 +686,15 @@
 
   for (const type of ["pointerdown", "click", "change", "input", "keydown"]) {
     nativeAdd.call(document, type, event => {
+      if (type === "pointerdown" && event.target instanceof Element) {
+        const suggestion = event.target.closest(".ytSuggestionComponentText");
+        const query = suggestion && suggestion.textContent
+          ? suggestion.textContent.replace(/\\s+/g, " ").trim()
+          : "";
+        if (query) {
+          recentYouTubeSuggestion = {query, at: performance.now()};
+        }
+      }
       let detail = "";
       if (type === "input" || type === "change" ||
           (type === "keydown" && event.key === "Enter")) {
@@ -935,7 +952,9 @@
 
   let inputEventSequence = 0;
   let recentInputEvent = null;
+  let recentYouTubeSuggestion = null;
   const INPUT_CORRELATION_WINDOW_MS = 2000;
+  const YOUTUBE_SUGGESTION_WINDOW_MS = 3000;
 
   function authorityUrl(retry) {
     return "http://127.0.0.1:5000/authority/" + encodeURIComponent(sessionId)
