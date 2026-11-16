@@ -63,8 +63,34 @@
   font-weight: 700;
 }
 
-html {
-  scroll-padding-bottom: 64px;
+html { scroll-padding-bottom: 90px; }
+body { padding-bottom: 78px !important; }
+
+#intercept-toolbar #intercept-notice {
+  margin-top: 6px;
+  color: #8fa1b7;
+  text-align: center;
+  font-size: 10px;
+}
+
+#intercept-toolbar #intercept-events { margin: 7px auto 0; max-width: 1080px; }
+#intercept-toolbar #intercept-events summary {
+  color: #9cc7e8;
+  cursor: pointer;
+  text-align: center;
+  user-select: none;
+}
+#intercept-toolbar #intercept-events-list {
+  max-height: 150px;
+  overflow: auto;
+  margin: 7px 0 0;
+  padding: 8px;
+  color: #b8c8dc;
+  background: #070c13;
+  border: 1px solid #26394f;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 10px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 @media (max-width: 520px) {
