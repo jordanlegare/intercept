@@ -3720,8 +3720,8 @@ mod tests {
         let detail = ajax_request_diagnostics(&Method::POST, &headers, b"{broken");
 
         assert!(detail.contains("content_length_out=7"));
-        assert!(detail.contains("origin_host=absent"));
-        assert!(detail.contains("referer_host=absent"));
+        assert!(detail.contains("origin_host_in=absent"));
+        assert!(detail.contains("referer_host_in=absent"));
         assert!(detail.contains("cookie_header_in=absent"));
         assert!(detail.contains("json=invalid"));
         assert!(detail.contains("yt_client_name=absent"));
