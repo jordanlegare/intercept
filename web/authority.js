@@ -148,6 +148,19 @@
     }
   }
 
+  window.addEventListener("message", event => {
+    const data = event.data;
+    const expectedParentOrigin = "http://" + sessionId + ".localhost:5000";
+    if (event.origin !== expectedParentOrigin
+        || event.source !== window.parent
+        || !data
+        || data.type !== "intercept:notice"
+        || data.session_id !== sessionId) {
+      return;
+    }
+    noticeNode.textContent = String(data.message || "").slice(0, 500);
+  });
+
   startButton.addEventListener("click", async () => {
     if (startButton.disabled || startInFlight) return;
     const seconds = Number(delayInput.value);
