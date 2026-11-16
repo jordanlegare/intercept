@@ -162,9 +162,31 @@ impl SessionCookieJar {
             return Err("JavaScript cannot set HttpOnly cookies".into());
         }
         validate_cookie_prefix(cookie, url)?;
-        self.lock().parse(cookie, url)
-            .map(|_| ())
-            .map_err(|error| format!("Cookie rejected: {error}"))
+        match self.lock().parse(cookie, url) {
+            Ok(_) => Ok(()),
+            Err(cookie_store::CookieError::DomainMismatch) => {
+                // Browsers silently ignore document.cookie assignments whose
+                // Domain attribute does not match the current document host.
+                // Treat this as a successful no-op so the bridge can return
+                // the authoritative cookie mirror instead of surfacing a 400.
+                debug!(
+                    host = url.host_str().unwrap_or_default(),
+                    "Ignored document cookie assignment with a non-matching Domain attribute"
+                );
+                Ok(())
+            }
+            Err(cookie_store::CookieError::Expired) => {
+                // Expiring a cookie that is not currently stored is also a
+                // normal no-op for document.cookie. Existing matching cookies
+                // are expired by CookieStore and arrive through the Ok branch.
+                debug!(
+                    host = url.host_str().unwrap_or_default(),
+                    "Ignored deletion of an expired or absent document cookie"
+                );
+                Ok(())
+            }
+            Err(error) => Err(format!("Cookie rejected: {error}")),
+        }
     }
 }
 
@@ -3646,6 +3668,51 @@ mod tests {
         assert!(jar.set_document_cookie("__Host-bad=yes; Secure; Path=/nested", &url).is_err());
         assert!(jar.set_document_cookie("__Host-good=yes; Secure; Path=/", &url).is_ok());
         assert!(jar.document_cookie_header(&url).contains("__Host-good=yes"));
+    }
+
+    #[test]
+    fn javascript_cookie_bridge_ignores_domain_mismatch_like_browser() {
+        let jar = SessionCookieJar::default();
+        let url = Url::parse("https://www.youtube.com/").unwrap();
+
+        // A script may attempt this, but a browser does not let a youtube.com
+        // document write a cookie scoped to an unrelated domain.
+        assert!(jar.set_document_cookie(
+            "third_party=value; Domain=google.example; Path=/",
+            &url
+        ).is_ok());
+        assert_eq!(jar.document_cookie_header(&url), "");
+        assert_eq!(
+            jar.document_cookie_header(&Url::parse("https://google.example/").unwrap()),
+            ""
+        );
+    }
+
+    #[test]
+    fn javascript_cookie_bridge_treats_absent_expired_cookie_as_noop() {
+        let jar = SessionCookieJar::default();
+        let url = Url::parse("https://www.youtube.com/").unwrap();
+
+        assert!(jar.set_document_cookie(
+            "obsolete=; Max-Age=0; Path=/",
+            &url
+        ).is_ok());
+        assert_eq!(jar.document_cookie_header(&url), "");
+    }
+
+    #[test]
+    fn javascript_cookie_bridge_can_delete_an_existing_cookie() {
+        let jar = SessionCookieJar::default();
+        let url = Url::parse("https://www.youtube.com/").unwrap();
+
+        assert!(jar.set_document_cookie("session=active; Path=/", &url).is_ok());
+        assert!(jar.document_cookie_header(&url).contains("session=active"));
+
+        assert!(jar.set_document_cookie(
+            "session=; Max-Age=0; Path=/",
+            &url
+        ).is_ok());
+        assert_eq!(jar.document_cookie_header(&url), "");
     }
 
     #[test]
