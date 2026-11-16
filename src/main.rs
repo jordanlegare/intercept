@@ -1768,6 +1768,7 @@ fn rewrite_html(
 
     let id_for_head = session_id.to_owned();
     let primary_origin = session_base.origin().ascii_serialization();
+    let primary_origin_for_head = primary_origin.clone();
     let controller_nonce = HTML_SCRIPT_NONCE_RE.captures(&html_with_styles_and_scripts).and_then(|captures| {
         captures.get(1).or_else(|| captures.get(2)).map(|value| escape_html_attribute(value.as_str()))
     });
@@ -1776,7 +1777,7 @@ fn rewrite_html(
             .map(|nonce| format!(r#" nonce="{nonce}""#))
             .unwrap_or_default();
         let head = format!(
-            r#"<script data-intercept-controller="true" src="/assets/controller.js" data-session="{id_for_head}" data-upstream-origin="{primary_origin}"{nonce_attr}></script><link data-intercept-styles="true" rel="stylesheet" href="/assets/intercept.css">"#
+            r#"<script data-intercept-controller="true" src="/assets/controller.js" data-session="{id_for_head}" data-upstream-origin="{primary_origin_for_head}"{nonce_attr}></script><link data-intercept-styles="true" rel="stylesheet" href="/assets/intercept.css">"#
         );
         el.prepend(&head, ContentType::Html);
         Ok(())
@@ -2493,7 +2494,6 @@ mod tests {
         );
     }
 
-    #[test]
     #[test]
     fn rewrites_meta_csp_and_removes_strict_dynamic_for_the_session_controller() {
         let base = Url::parse("https://example.com/").unwrap();
