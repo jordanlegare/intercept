@@ -21,7 +21,7 @@
 <main>
   <div class="mark">LOCAL HTTP RELAY · 127.0.0.1:5000</div>
   <h1>INTERCEPT<span style="color:#73d1ff">_</span></h1>
-  <p>Open one HTTP or HTTPS origin through the local relay. The website is served through localhost with its HTTP/HTTPS resources routed and cached by Rust, while only a bottom Intercept authority banner is added to the page UI. Rust holds state-changing HTTP requests until the timer authorizes them.</p>
+  <p>Open one HTTP or HTTPS origin through the local relay. Each session gets its own <code>.localhost</code> browser origin; the trusted authority panel and control API remain isolated on this dashboard origin. Rust routes and caches HTTP/HTTPS resources and enforces your selected authorization policy.</p>
   <form id="launch">
     <label for="target">UPSTREAM WEBSITE</label>
     <input id="target" name="url" type="url" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://example.com/" value="https://example.com/" required>
@@ -33,8 +33,9 @@
     <div id="message" role="status"></div>
   </form>
   <div class="rule"></div>
-  <p class="small">The browser talks HTTP to this loopback app; Rust makes verified HTTPS connections upstream. This is a same-origin reverse-proxy session, not transparent interception of arbitrary HTTPS tabs. No browser CA installation is needed for this local-HTTP workflow.</p>
-  <p class="small">Only visit sites you trust. A proxied site runs JavaScript in the local proxy origin. Cross-origin application requests, WebSockets, HTTP/3, and service-worker behavior are not fully proxied.</p>
+  <p class="small">Standard holds state-changing methods. Strict permits the first document bootstrap and then holds all upstream requests. Custom applies host/path/method rules and defaults unmatched requests to Standard. The Rust server enforces each policy.</p>
+  <p class="small">The browser talks HTTP to this loopback app; Rust makes verified HTTPS connections upstream. Each session has a distinct <code>session-id.localhost</code> origin, separate from the dashboard and authority API. This is not transparent interception of arbitrary HTTPS tabs and requires no browser CA.</p>
+  <p class="small">Only visit sites you trust. Per-session origins reduce access to the dashboard and other sessions, but this is not a universal JavaScript sandbox. WebSockets, WebTransport, HTTP/3, and full service-worker lifecycle compatibility are not implemented.</p>
 </main>
 <script>
 (() => {
