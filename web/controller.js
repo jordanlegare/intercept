@@ -46,6 +46,7 @@
       event.kind === "youtube_attestation_rpc"
       || event.kind === "youtube_attestation_resource"
       || event.kind === "youtube_player_state"
+      || event.kind === "youtube_player_worker"
       || event.kind === "youtube_sabr_request_gap"
       || event.kind === "youtube_sabr_response_stream_complete"
     );
