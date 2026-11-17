@@ -633,6 +633,70 @@
     return "body_arg=none";
   }
 
+  function youtubeSabrEndpointCheck(source) {
+    try {
+      const candidate = new URL(
+        source instanceof Request ? source.url : String(source),
+        document.baseURI
+      );
+      let hostname = candidate.hostname.toLowerCase();
+      let pathname = candidate.pathname;
+
+      // Page code can pass either the original Googlevideo URL or an already
+      // routed Intercept URL. Resolve only the fixed route envelope; never
+      // copy the query string into diagnostics.
+      if (candidate.origin === location.origin) {
+        const routeMarker = sessionPrefix + "/_/https/";
+        const routeIndex = pathname.indexOf(routeMarker);
+        if (routeIndex >= 0) {
+          const target = pathname.slice(routeIndex + routeMarker.length);
+          const slash = target.indexOf("/");
+          if (slash <= 0) return false;
+          hostname = target.slice(0, slash).toLowerCase();
+          pathname = target.slice(slash);
+        }
+      }
+
+      const googleVideoHost = hostname === "googlevideo.com"
+        || hostname.endsWith(".googlevideo.com");
+      return googleVideoHost
+        && pathname === "/videoplayback"
+        && candidate.searchParams.has("sabr");
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function sanitizedYouTubeFetchCallsite() {
+    try {
+      const frames = String(new Error().stack || "").split("\\n").slice(3);
+      const safeFrames = [];
+      for (const frame of frames) {
+        const match = frame.match(/https?:\\/\\/[^\\s)]+/);
+        if (!match) continue;
+
+        const raw = match[0];
+        const position = raw.match(/:(\\d+):(\\d+)$/);
+        const address = position ? raw.slice(0, -position[0].length) : raw;
+        const parsed = new URL(address);
+        const segments = parsed.pathname.split("/").filter(Boolean);
+        const file = segments.length ? segments[segments.length - 1].slice(0, 36) : "script";
+        const functionName = frame.slice(0, match.index)
+          .replace(/^\\s*at\\s+/, "")
+          .replace(/[\\s(@]+$/, "")
+          .trim()
+          .slice(0, 28);
+        const location = parsed.hostname + "/" + file
+          + (position ? ":" + position[1] + ":" + position[2] : "");
+        safeFrames.push((functionName ? functionName + "@" : "") + location);
+        if (safeFrames.length >= 2) break;
+      }
+      return safeFrames.length ? safeFrames.join(">") : "unavailable";
+    } catch (_) {
+      return "unavailable";
+    }
+  }
+
   function youtubeSearchEndpointCheck(source) {
     try {
       const upstream = new URL(upstreamOrigin);
@@ -2042,6 +2106,30 @@
         routedRequest = new Request(routed, init);
       }
       let bodyDetail = fetchBodyDiagnostic(input, init);
+      if (routedRequest.method === "POST"
+          && bodyDetail === "body_arg=none"
+          && youtubeSabrEndpointCheck(source)) {
+        const requestInput = input instanceof Request;
+        const initPresent = init !== undefined && init !== null;
+        const initBodyPresent = Boolean(initPresent
+          && Object.prototype.hasOwnProperty.call(init, "body")
+          && init.body !== undefined);
+        const inputBodyNull = requestInput ? input.body === null : null;
+        const inputBodyUsed = requestInput ? input.bodyUsed : null;
+        record(
+          "youtube_sabr_fetch_callsite",
+          "/videoplayback",
+          "method=POST"
+            + " input=" + (requestInput ? "Request" : input instanceof URL ? "URL" : typeof input)
+            + " init_present=" + initPresent
+            + " init_body_present=" + initBodyPresent
+            + " body_diag=" + bodyDetail
+            + " input_body_null=" + (inputBodyNull === null ? "n/a" : inputBodyNull)
+            + " input_body_used=" + (inputBodyUsed === null ? "n/a" : inputBodyUsed)
+            + " routed_body_null=" + (routedRequest.body === null)
+            + " callsite=" + sanitizedYouTubeFetchCallsite()
+        );
+      }
       let youtubeSearchFallbackHeaders = null;
       const youtubeSearchCheck = youtubeSearchEndpointCheck(source);
       const youtubePlayerCheck = youtubePlayerEndpointCheck(source);
