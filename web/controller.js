@@ -669,26 +669,26 @@
 
   function sanitizedYouTubeFetchCallsite() {
     try {
-      const frames = String(new Error().stack || "").split("\\n").slice(3);
+      const frames = String(new Error().stack || "").split("\n").slice(3);
       const safeFrames = [];
       for (const frame of frames) {
-        const match = frame.match(/https?:\\/\\/[^\\s)]+/);
+        const match = frame.match(/https?:\/\/[^\s)]+/);
         if (!match) continue;
 
         const raw = match[0];
-        const position = raw.match(/:(\\d+):(\\d+)$/);
+        const position = raw.match(/:(\d+):(\d+)$/);
         const address = position ? raw.slice(0, -position[0].length) : raw;
         const parsed = new URL(address);
         const segments = parsed.pathname.split("/").filter(Boolean);
         const file = segments.length ? segments[segments.length - 1].slice(0, 36) : "script";
         const functionName = frame.slice(0, match.index)
-          .replace(/^\\s*at\\s+/, "")
-          .replace(/[\\s(@]+$/, "")
+          .replace(/^\s*at\s+/, "")
+          .replace(/[\s(@]+$/, "")
           .trim()
           .slice(0, 28);
-        const location = parsed.hostname + "/" + file
+        const scriptLocation = parsed.hostname + "/" + file
           + (position ? ":" + position[1] + ":" + position[2] : "");
-        safeFrames.push((functionName ? functionName + "@" : "") + location);
+        safeFrames.push((functionName ? functionName + "@" : "") + scriptLocation);
         if (safeFrames.length >= 2) break;
       }
       return safeFrames.length ? safeFrames.join(">") : "unavailable";
