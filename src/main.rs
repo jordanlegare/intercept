@@ -2039,6 +2039,12 @@ struct YouTubeAttestationTiming {
     last_operation: Option<&'static str>,
     last_correlation_id: Option<String>,
     last_request_at: Option<Instant>,
+    att_get_request_count: u64,
+    last_att_get_correlation_id: Option<String>,
+    last_att_get_request_at: Option<Instant>,
+    att_log_request_count: u64,
+    last_att_log_correlation_id: Option<String>,
+    last_att_log_request_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2047,6 +2053,12 @@ struct YouTubeAttestationTimingSnapshot {
     last_operation: Option<&'static str>,
     last_correlation_id: Option<String>,
     last_request_ago_ms: Option<u64>,
+    att_get_request_count: u64,
+    last_att_get_correlation_id: Option<String>,
+    last_att_get_request_ago_ms: Option<u64>,
+    att_log_request_count: u64,
+    last_att_log_correlation_id: Option<String>,
+    last_att_log_request_ago_ms: Option<u64>,
 }
 
 impl YouTubeAttestationTiming {
@@ -2062,12 +2074,43 @@ impl YouTubeAttestationTiming {
         self.last_request_at = Some(observed_at);
     }
 
+    fn observe_proxy_resource_request(
+        &mut self,
+        operation: &'static str,
+        correlation_id: Option<&str>,
+        observed_at: Instant,
+    ) {
+        match operation {
+            "AttGet" => {
+                self.att_get_request_count = self.att_get_request_count.saturating_add(1);
+                self.last_att_get_correlation_id = correlation_id.map(str::to_owned);
+                self.last_att_get_request_at = Some(observed_at);
+            }
+            "AttLog" => {
+                self.att_log_request_count = self.att_log_request_count.saturating_add(1);
+                self.last_att_log_correlation_id = correlation_id.map(str::to_owned);
+                self.last_att_log_request_at = Some(observed_at);
+            }
+            _ => {}
+        }
+    }
+
     fn snapshot(&self, observed_at: Instant) -> YouTubeAttestationTimingSnapshot {
         YouTubeAttestationTimingSnapshot {
             proxy_request_count: self.proxy_request_count,
             last_operation: self.last_operation,
             last_correlation_id: self.last_correlation_id.clone(),
             last_request_ago_ms: self.last_request_at.map(|previous| {
+                duration_millis(observed_at.saturating_duration_since(previous))
+            }),
+            att_get_request_count: self.att_get_request_count,
+            last_att_get_correlation_id: self.last_att_get_correlation_id.clone(),
+            last_att_get_request_ago_ms: self.last_att_get_request_at.map(|previous| {
+                duration_millis(observed_at.saturating_duration_since(previous))
+            }),
+            att_log_request_count: self.att_log_request_count,
+            last_att_log_correlation_id: self.last_att_log_correlation_id.clone(),
+            last_att_log_request_ago_ms: self.last_att_log_request_at.map(|previous| {
                 duration_millis(observed_at.saturating_duration_since(previous))
             }),
         }
@@ -2568,6 +2611,19 @@ fn is_youtube_attestation_challenge_request(url: &Url) -> bool {
         && url.path().eq_ignore_ascii_case("/youtubei/v1/att/get")
 }
 
+fn youtube_attestation_resource_operation(url: &Url) -> Option<&'static str> {
+    if is_youtube_attestation_challenge_request(url) {
+        return Some("AttGet");
+    }
+    let host = url.host_str()?.to_ascii_lowercase();
+    let youtube_host = host == "youtube.com" || host.ends_with(".youtube.com");
+    if youtube_host && url.path().eq_ignore_ascii_case("/youtubei/v1/att/log") {
+        Some("AttLog")
+    } else {
+        None
+    }
+}
+
 fn youtube_attestation_correlation_id(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get("x-intercept-attestation-id")?.to_str().ok()?;
     if value.is_empty()
@@ -2620,15 +2676,15 @@ async fn ajax_passthrough(
 ) -> Response<Body> {
     let ProxyRequestContext { request_id, started_at: request_started, permit: request_permit } = context;
     let attestation_operation = youtube_attestation_rpc_operation(&upstream_url);
-    let attestation_challenge = is_youtube_attestation_challenge_request(&upstream_url);
-    let attestation_rpc_id = if attestation_operation.is_some() || attestation_challenge {
+    let attestation_resource_operation = youtube_attestation_resource_operation(&upstream_url);
+    let attestation_rpc_id = if attestation_operation.is_some() || attestation_resource_operation.is_some() {
         youtube_attestation_correlation_id(&request_headers)
             .map(str::to_owned)
             .unwrap_or_else(|| "unmatched".to_owned())
     } else {
         String::new()
     };
-    let attestation_rpc_detail = if attestation_operation.is_some() || attestation_challenge {
+    let attestation_rpc_detail = if attestation_operation.is_some() || attestation_resource_operation.is_some() {
         format!("rpc={attestation_rpc_id} ")
     } else {
         String::new()
@@ -2742,6 +2798,17 @@ async fn ajax_passthrough(
                     push_event(
                         &session,
                         "youtube_attestation_rpc",
+                        format!("{upstream_host}{upstream_path}"),
+                        format!(
+                            "rid={request_id} rpc={attestation_rpc_id} phase=upstream_error operation={operation} stage=client_init status={}",
+                            status.as_u16()
+                        ),
+                    ).await;
+                }
+                if let Some(operation) = attestation_resource_operation {
+                    push_event(
+                        &session,
+                        "youtube_attestation_resource",
                         format!("{upstream_host}{upstream_path}"),
                         format!(
                             "rid={request_id} rpc={attestation_rpc_id} phase=upstream_error operation={operation} stage=client_init status={}",
@@ -3178,6 +3245,17 @@ async fn ajax_passthrough(
                     ),
                 ).await;
             }
+            if let Some(operation) = attestation_resource_operation {
+                push_event(
+                    &session,
+                    "youtube_attestation_resource",
+                    format!("{upstream_host}{upstream_path}"),
+                    format!(
+                        "rid={request_id} rpc={attestation_rpc_id} phase=upstream_error operation={operation} stage=send error_kind={failure_kind} elapsed_ms={}",
+                        request_started.elapsed().as_millis()
+                    ),
+                ).await;
+            }
             // Signed media URLs carry expiring authorization in their query.
             // Strip the URL before logging and report only its host/path.
             let safe_error = error.without_url().to_string();
@@ -3235,6 +3313,29 @@ async fn ajax_passthrough(
             format!("{upstream_host}{upstream_path}"),
             format!(
                 "rid={request_id} phase=upstream_response operation={operation} status={} elapsed_ms={upstream_elapsed_ms} ct={content_type} cl={content_length} ce={content_encoding} server={server}",
+                status.as_u16()
+            ),
+        ).await;
+    }
+    if let Some(operation) = attestation_resource_operation {
+        let content_type = upstream_headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 64))
+            .unwrap_or_else(|| "absent".to_owned());
+        let content_length = upstream_headers.get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 24))
+            .unwrap_or_else(|| "absent".to_owned());
+        let content_encoding = upstream_headers.get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 24))
+            .unwrap_or_else(|| "absent".to_owned());
+        push_event(
+            &session,
+            "youtube_attestation_resource",
+            format!("{upstream_host}{upstream_path}"),
+            format!(
+                "rid={request_id} rpc={attestation_rpc_id} phase=upstream_response operation={operation} status={} elapsed_ms={upstream_elapsed_ms} ct={content_type} cl={content_length} ce={content_encoding}",
                 status.as_u16()
             ),
         ).await;
@@ -3643,11 +3744,21 @@ async fn ajax_passthrough(
                                     "youtube_sabr_attestation_context",
                                     stream_target.clone(),
                                     format!(
-                                        "rid={request_id} status=3 proxy_waa_requests={} last_operation={} last_rpc_id={} last_proxy_waa_ago_ms={}",
+                                        "rid={request_id} status=3 proxy_waa_requests={} last_operation={} last_rpc_id={} last_proxy_waa_ago_ms={} att_get_n={} att_get_id={} att_get_ms={} att_log_n={} att_log_id={} att_log_ms={}",
                                         attestation.proxy_request_count,
                                         attestation.last_operation.unwrap_or("none"),
                                         attestation.last_correlation_id.as_deref().unwrap_or("unmatched"),
                                         attestation.last_request_ago_ms
+                                            .map(|value| value.to_string())
+                                            .unwrap_or_else(|| "never".to_owned()),
+                                        attestation.att_get_request_count,
+                                        attestation.last_att_get_correlation_id.as_deref().unwrap_or("unmatched"),
+                                        attestation.last_att_get_request_ago_ms
+                                            .map(|value| value.to_string())
+                                            .unwrap_or_else(|| "never".to_owned()),
+                                        attestation.att_log_request_count,
+                                        attestation.last_att_log_correlation_id.as_deref().unwrap_or("unmatched"),
+                                        attestation.last_att_log_request_ago_ms
                                             .map(|value| value.to_string())
                                             .unwrap_or_else(|| "never".to_owned()),
                                     ),
@@ -3790,8 +3901,8 @@ async fn proxy(
     // omits Fetch Metadata or the controller's AJAX marker. Keep them on the
     // streaming passthrough path and diagnose them at the proxy boundary.
     let attestation_operation = youtube_attestation_rpc_operation(&upstream_url);
-    let attestation_challenge = is_youtube_attestation_challenge_request(&upstream_url);
-    let attestation_rpc_id = if attestation_operation.is_some() || attestation_challenge {
+    let attestation_resource_operation = youtube_attestation_resource_operation(&upstream_url);
+    let attestation_rpc_id = if attestation_operation.is_some() || attestation_resource_operation.is_some() {
         youtube_attestation_correlation_id(&parts.headers)
             .map(str::to_owned)
             .unwrap_or_else(|| "unmatched".to_owned())
@@ -3800,7 +3911,7 @@ async fn proxy(
     };
     let ajax_request = is_ajax_request(&parts.headers)
         || attestation_operation.is_some()
-        || attestation_challenge;
+        || attestation_resource_operation.is_some();
     let input_trace = input_event_trace(&parts.headers);
     let worker_script = parts.headers.get("sec-fetch-dest")
         .and_then(|value| value.to_str().ok())
@@ -3837,13 +3948,22 @@ async fn proxy(
                 youtube_attestation_transport(&parts.headers),
             ),
         ).await;
-    } else if attestation_challenge {
+    } else if let Some(operation) = attestation_resource_operation {
+        {
+            let mut timing = session.youtube_attestation_timing.lock()
+                .unwrap_or_else(|error| error.into_inner());
+            timing.observe_proxy_resource_request(
+                operation,
+                youtube_attestation_correlation_id(&parts.headers),
+                Instant::now(),
+            );
+        }
         push_event(
             &session,
             "youtube_attestation_resource",
             format!("{}{}", upstream_url.host_str().unwrap_or_default(), upstream_url.path()),
             format!(
-                "rid={request_id} rpc={attestation_rpc_id} phase=proxy_received operation=AttGet method={} transport={}",
+                "rid={request_id} rpc={attestation_rpc_id} phase=proxy_received operation={operation} method={} transport={}",
                 parts.method,
                 youtube_attestation_transport(&parts.headers),
             ),
@@ -3896,7 +4016,7 @@ async fn proxy(
                 youtube_attestation_transport(&parts.headers),
             ),
         ).await;
-    } else if attestation_challenge {
+    } else if let Some(operation) = attestation_resource_operation {
         let content_type = parts.headers.get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(|value| clean_field(value.to_owned(), 64))
@@ -3906,7 +4026,7 @@ async fn proxy(
             "youtube_attestation_resource",
             format!("{}{}", upstream_url.host_str().unwrap_or_default(), upstream_url.path()),
             format!(
-                "rid={request_id} rpc={attestation_rpc_id} phase=proxy_ingress operation=AttGet method={} body_bytes={} ct={} transport={}",
+                "rid={request_id} rpc={attestation_rpc_id} phase=proxy_ingress operation={operation} method={} body_bytes={} ct={} transport={}",
                 parts.method,
                 body.len(),
                 content_type,
@@ -4902,11 +5022,14 @@ fn rewrite_worker_javascript(
           const youtubeHost=hostname==="youtube.com"||hostname.endsWith(".youtube.com");
           const youtubeJnn=youtubeHost&&lowerPath.startsWith("/api/jnn/v1/");
           const youtubeAttGet=youtubeHost&&lowerPath==="/youtubei/v1/att/get";
-          if(!googleCandidate&&!youtubeJnn&&!youtubeAttGet)return null;
+          const youtubeAttLog=youtubeHost&&lowerPath==="/youtubei/v1/att/log";
+          const youtubeAttResource=youtubeAttGet||youtubeAttLog;
+          if(!googleCandidate&&!youtubeJnn&&!youtubeAttResource)return null;
           const match=pathname.match(/^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/)
             ||pathname.match(/^\/api\/jnn\/v1\/(Create|GenerateIT)$/);
-          return {{target:hostname+pathname,operation:youtubeAttGet?"AttGet":match?match[1]:"Other",
-            kind:youtubeAttGet?"youtube_attestation_resource":"youtube_attestation_rpc"}};
+          return {{target:hostname+pathname,
+            operation:youtubeAttGet?"AttGet":youtubeAttLog?"AttLog":match?match[1]:"Other",
+            kind:youtubeAttResource?"youtube_attestation_resource":"youtube_attestation_rpc"}};
         }}catch(_e){{return null}}
       }}
       function reportAttestation(info,detail){{
@@ -5958,6 +6081,8 @@ mod tests {
         assert!(output.contains(r#"const match=pathname.match(/^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/)"#));
         assert!(output.contains(r#"pathname.match(/^\/api\/jnn\/v1\/(Create|GenerateIT)$/)"#));
         assert!(output.contains("youtube_attestation_resource"));
+        assert!(output.contains("youtubeAttLog"));
+        assert!(output.contains("operation:youtubeAttGet?\"AttGet\":youtubeAttLog?\"AttLog\""));
     }
 
     #[test]
@@ -6018,6 +6143,13 @@ mod tests {
         let wrong_path = Url::parse("https://www.youtube.com/youtubei/v1/player").unwrap();
 
         assert!(is_youtube_attestation_challenge_request(&challenge));
+        assert_eq!(youtube_attestation_resource_operation(&challenge), Some("AttGet"));
+        let log = Url::parse("https://www.youtube.com/youtubei/v1/att/log?prettyPrint=false").unwrap();
+        assert_eq!(youtube_attestation_resource_operation(&log), Some("AttLog"));
+        assert_eq!(
+            youtube_attestation_resource_operation(&Url::parse("https://www.youtube.com/youtubei/v1/att/other").unwrap()),
+            None
+        );
         assert!(!is_youtube_attestation_challenge_request(&wrong_host));
         assert!(!is_youtube_attestation_challenge_request(&wrong_path));
     }
@@ -7621,13 +7753,27 @@ mod ump_stream_diagnostics_tests {
         assert_eq!(never_seen.last_operation, None);
         assert_eq!(never_seen.last_correlation_id, None);
         assert_eq!(never_seen.last_request_ago_ms, None);
+        assert_eq!(never_seen.att_get_request_count, 0);
+        assert_eq!(never_seen.last_att_get_correlation_id, None);
+        assert_eq!(never_seen.last_att_get_request_ago_ms, None);
+        assert_eq!(never_seen.att_log_request_count, 0);
+        assert_eq!(never_seen.last_att_log_correlation_id, None);
+        assert_eq!(never_seen.last_att_log_request_ago_ms, None);
 
         timing.observe_proxy_request("GenerateIT", Some("mwl2lpxu-1"), start);
+        timing.observe_proxy_resource_request("AttGet", Some("attget-1"), start + Duration::from_millis(25));
+        timing.observe_proxy_resource_request("AttLog", Some("attlog-1"), start + Duration::from_millis(50));
         let observed = timing.snapshot(start + Duration::from_millis(125));
         assert_eq!(observed.proxy_request_count, 1);
         assert_eq!(observed.last_operation, Some("GenerateIT"));
         assert_eq!(observed.last_correlation_id.as_deref(), Some("mwl2lpxu-1"));
         assert_eq!(observed.last_request_ago_ms, Some(125));
+        assert_eq!(observed.att_get_request_count, 1);
+        assert_eq!(observed.last_att_get_correlation_id.as_deref(), Some("attget-1"));
+        assert_eq!(observed.last_att_get_request_ago_ms, Some(100));
+        assert_eq!(observed.att_log_request_count, 1);
+        assert_eq!(observed.last_att_log_correlation_id.as_deref(), Some("attlog-1"));
+        assert_eq!(observed.last_att_log_request_ago_ms, Some(75));
     }
 
     #[test]
