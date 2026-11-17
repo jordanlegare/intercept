@@ -979,7 +979,6 @@
     if (pendingNavigationIsFresh) {
       addId(pendingNavigation.videoId, "recent_navigation_click");
     }
-    recentYouTubeVideoNavigation = null;
 
     try {
       const url = new URL(location.href);
@@ -1193,7 +1192,6 @@
       pendingNavigation && performance.now() - pendingNavigation.at <= 12000
     );
     if (pendingNavigationIsFresh) addId(pendingNavigation.videoId, "recent_navigation_click");
-    recentYouTubeVideoNavigation = null;
     try {
       const url = new URL(location.href);
       addId(url.searchParams.get("v"), "current_url");
@@ -1691,30 +1689,214 @@
     }
   }
 
+  function readYouTubeField(object, key) {
+    try {
+      return object && object[key];
+    } catch (_) {
+      return undefined;
+    }
+  }
+
+  function youtubeNavigationFromUrl(value) {
+    if (typeof value !== "string" || !value || value.length > 4096) return null;
+    try {
+      const targetUrl = new URL(value, document.baseURI);
+      const upstreamHost = new URL(upstreamOrigin).hostname.toLowerCase();
+      const targetHost = targetUrl.hostname.toLowerCase();
+      const isYouTubeHost = targetHost === "youtube.com" || targetHost.endsWith(".youtube.com");
+      const isSessionOrigin = targetUrl.origin === location.origin;
+      if (!isYouTubeHost && !isSessionOrigin) return null;
+
+      let videoId = targetUrl.searchParams.get("v");
+      let source = "anchor_href";
+      if (!videoId) {
+        const targetMatch = targetUrl.pathname.match(/^\/(?:shorts|live|embed)\/([A-Za-z0-9_-]{11})(?:\/|$)/);
+        videoId = targetMatch && targetMatch[1];
+      }
+      if (typeof videoId !== "string" || !/^[A-Za-z0-9_-]{11}$/.test(videoId)) return null;
+
+      const playlistIndex = targetUrl.searchParams.get("index");
+      return {
+        videoId,
+        source,
+        playlistId: targetUrl.searchParams.get("list") || null,
+        playlistIndex: playlistIndex && /^\d+$/.test(playlistIndex) ? Number(playlistIndex) : null,
+        params: targetUrl.searchParams.get("params") || null
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function youtubeNavigationFromObject(root, initialSource) {
+    const queue = [{value: root, source: initialSource, depth: 0}];
+    const visited = new Set();
+    const nestedKeys = [
+      "watchEndpoint", "reelWatchEndpoint", "navigationEndpoint", "command",
+      "data", "content", "renderer", "videoRenderer", "richItemRenderer",
+      "compactVideoRenderer", "gridVideoRenderer", "playlistVideoRenderer",
+      "commandMetadata", "webCommandMetadata", "innertubeCommand", "onTap"
+    ];
+    let inspected = 0;
+
+    while (queue.length && inspected < 48) {
+      const current = queue.shift();
+      const object = current && current.value;
+      if (!object || typeof object !== "object" || visited.has(object)) continue;
+      visited.add(object);
+      inspected++;
+
+      const videoId = readYouTubeField(object, "videoId");
+      if (typeof videoId === "string" && /^[A-Za-z0-9_-]{11}$/.test(videoId)) {
+        const playlistIndex = readYouTubeField(object, "playlistIndex");
+        const rawIndex = typeof playlistIndex === "number"
+          ? String(playlistIndex) : playlistIndex;
+        return {
+          videoId,
+          source: current.source,
+          playlistId: typeof readYouTubeField(object, "playlistId") === "string"
+            ? readYouTubeField(object, "playlistId") : null,
+          playlistIndex: (typeof rawIndex === "number" && Number.isInteger(rawIndex) && rawIndex >= 0)
+            ? rawIndex
+            : (typeof rawIndex === "string" && /^\d+$/.test(rawIndex) ? Number(rawIndex) : null),
+          params: typeof readYouTubeField(object, "params") === "string"
+            ? readYouTubeField(object, "params") : null
+        };
+      }
+
+      const metadata = readYouTubeField(object, "webCommandMetadata");
+      const metadataUrl = readYouTubeField(metadata, "url");
+      const urlCandidate = youtubeNavigationFromUrl(metadataUrl);
+      if (urlCandidate) {
+        urlCandidate.source = "command_metadata_url";
+        return urlCandidate;
+      }
+
+      if (current.depth >= 4) continue;
+      for (const key of nestedKeys) {
+        const child = readYouTubeField(object, key);
+        if (!child || typeof child !== "object") continue;
+        let childSource = current.source;
+        if (key === "watchEndpoint") childSource = "watch_endpoint";
+        else if (key === "reelWatchEndpoint") childSource = "reel_watch_endpoint";
+        else if (key === "navigationEndpoint" || key === "command") childSource = "endpoint_data";
+        queue.push({value: child, source: childSource, depth: current.depth + 1});
+      }
+    }
+    return null;
+  }
+
+  function captureYouTubeNavigation(event, eventType) {
+    let path = [];
+    try {
+      path = typeof event.composedPath === "function"
+        ? event.composedPath()
+        : [event.target];
+    } catch (_) {
+      path = [event.target];
+    }
+    const elements = path.filter(node => node instanceof Element);
+    const seenAnchors = new Set();
+
+    // Prefer the actual link from the composed path, rather than the retargeted
+    // event.target. This reaches anchors inside YouTube's open shadow roots.
+    for (const element of elements) {
+      let anchor = null;
+      try {
+        if (element.matches("a[href],area[href]")) anchor = element;
+        else if (element === event.target) anchor = element.closest("a[href],area[href]");
+      } catch (_) {}
+      if (!anchor || seenAnchors.has(anchor)) continue;
+      seenAnchors.add(anchor);
+      const candidate = youtubeNavigationFromUrl(anchor.href || anchor.getAttribute("href"));
+      if (candidate) {
+        candidate.element = anchor;
+        candidate.eventType = eventType;
+        candidate.composedPathLength = elements.length;
+        return candidate;
+      }
+    }
+
+    // YouTube cards often expose navigationEndpoint through Polymer's data
+    // model even when no anchor is present in the composed path.
+    for (const element of elements) {
+      const attributeId = (() => {
+        try {
+          return element.getAttribute("video-id")
+            || element.getAttribute("data-video-id");
+        } catch (_) {
+          return null;
+        }
+      })();
+      if (typeof attributeId === "string" && /^[A-Za-z0-9_-]{11}$/.test(attributeId)) {
+        return {
+          videoId: attributeId,
+          source: "element_video_id_attribute",
+          playlistId: null,
+          playlistIndex: null,
+          params: null,
+          element,
+          eventType,
+          composedPathLength: elements.length
+        };
+      }
+
+      const propertyId = readYouTubeField(element, "videoId");
+      if (typeof propertyId === "string" && /^[A-Za-z0-9_-]{11}$/.test(propertyId)) {
+        return {
+          videoId: propertyId,
+          source: "element_video_id_property",
+          playlistId: null,
+          playlistIndex: null,
+          params: null,
+          element,
+          eventType,
+          composedPathLength: elements.length
+        };
+      }
+
+      const data = readYouTubeField(element, "data");
+      const dataCandidate = youtubeNavigationFromObject(data, "endpoint_data");
+      if (dataCandidate) {
+        dataCandidate.element = element;
+        dataCandidate.eventType = eventType;
+        dataCandidate.composedPathLength = elements.length;
+        return dataCandidate;
+      }
+
+      const polymerData = readYouTubeField(element, "__data");
+      const polymerCandidate = youtubeNavigationFromObject(polymerData, "polymer_endpoint_data");
+      if (polymerCandidate) {
+        polymerCandidate.element = element;
+        polymerCandidate.eventType = eventType;
+        polymerCandidate.composedPathLength = elements.length;
+        return polymerCandidate;
+      }
+    }
+    return null;
+  }
+
   for (const type of ["pointerdown", "click", "change", "input", "keydown"]) {
     nativeAdd.call(document, type, event => {
       if ((type === "pointerdown" || type === "click") && event.target instanceof Element) {
         captureYouTubeFeedbackToken(event);
-        const anchor = event.target.closest("a[href],area[href]");
-        if (anchor) {
-          try {
-            const targetUrl = new URL(anchor.href, document.baseURI);
-            let targetVideoId = targetUrl.searchParams.get("v");
-            if (!targetVideoId) {
-              const targetMatch = targetUrl.pathname.match(/^\/(?:shorts|live|embed)\/([A-Za-z0-9_-]{11})(?:\/|$)/);
-              targetVideoId = targetMatch && targetMatch[1];
-            }
-            if (typeof targetVideoId === "string" && /^[A-Za-z0-9_-]{11}$/.test(targetVideoId)) {
-              const playlistIndex = targetUrl.searchParams.get("index");
-              recentYouTubeVideoNavigation = {
-                videoId: targetVideoId,
-                playlistId: targetUrl.searchParams.get("list") || null,
-                playlistIndex: playlistIndex && /^\d+$/.test(playlistIndex) ? Number(playlistIndex) : null,
-                params: targetUrl.searchParams.get("params") || null,
-                at: performance.now()
-              };
-            }
-          } catch (_) {}
+        const candidate = captureYouTubeNavigation(event, type);
+        if (candidate) {
+          recentYouTubeVideoNavigation = {
+            videoId: candidate.videoId,
+            playlistId: candidate.playlistId || null,
+            playlistIndex: candidate.playlistIndex,
+            params: candidate.params || null,
+            source: candidate.source,
+            at: performance.now()
+          };
+          record(
+            "youtube_navigation_candidate_captured",
+            selectorFor(candidate.element || event.target),
+            "source=" + candidate.source
+              + " · event=" + type
+              + " · composed_path_nodes=" + candidate.composedPathLength
+          );
         }
       }
       if (type === "pointerdown" && event.target instanceof Element) {
