@@ -155,6 +155,7 @@ struct Session {
     max_inflight: usize,
     cookie_jar: Arc<SessionCookieJar>,
     cookie_tokens: StdMutex<HashMap<String, String>>,
+    sabr_backoff: StdMutex<Option<SabrBackoffWindow>>,
 }
 
 #[derive(Default)]
@@ -1170,6 +1171,7 @@ async fn create_session(
         max_inflight: state.max_inflight_per_session,
         cookie_jar,
         cookie_tokens: StdMutex::new(HashMap::new()),
+        sabr_backoff: StdMutex::new(None),
     });
 
     // Preserve the submitted destination path, query, and browser-side fragment
@@ -1785,6 +1787,230 @@ struct NextRequestPolicyDiagnostic {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SabrRequestParseState {
+    Ok,
+    Empty,
+    UnsupportedEncoding,
+    Truncated,
+    Malformed,
+    UnsupportedWireType,
+}
+
+impl SabrRequestParseState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Empty => "empty",
+            Self::UnsupportedEncoding => "unsupported_encoding",
+            Self::Truncated => "truncated",
+            Self::Malformed => "malformed",
+            Self::UnsupportedWireType => "unsupported_wire",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct SabrRequestMetadata {
+    parse_state: Option<SabrRequestParseState>,
+    streamer_context_present: bool,
+    po_token_bytes: Option<usize>,
+    playback_cookie_bytes: Option<usize>,
+    client_info_present: bool,
+}
+
+impl SabrRequestMetadata {
+    fn summary(&self) -> String {
+        let length_field = |length: Option<usize>| match length {
+            Some(bytes) => format!("present:{bytes}"),
+            None => "absent".to_owned(),
+        };
+        format!(
+            "parse={} sc={} po={} pc={} ci={}",
+            self.parse_state.unwrap_or(SabrRequestParseState::Malformed).label(),
+            if self.streamer_context_present { "present" } else { "absent" },
+            length_field(self.po_token_bytes),
+            length_field(self.playback_cookie_bytes),
+            if self.client_info_present { "present" } else { "absent" },
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SabrRequestParseError {
+    Truncated,
+    Malformed,
+    UnsupportedWireType,
+}
+
+struct ProtobufField<'a> {
+    number: u32,
+    wire_type: u8,
+    payload: Option<&'a [u8]>,
+}
+
+fn read_protobuf_varint(
+    input: &[u8],
+    cursor: &mut usize,
+) -> Result<u64, SabrRequestParseError> {
+    let mut value = 0u64;
+    for index in 0..10 {
+        let byte = *input.get(*cursor).ok_or(SabrRequestParseError::Truncated)?;
+        *cursor += 1;
+        if index == 9 && byte > 1 {
+            return Err(SabrRequestParseError::Malformed);
+        }
+        value |= u64::from(byte & 0x7f) << ((index as u32) * 7);
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err(SabrRequestParseError::Malformed)
+}
+
+fn protobuf_next_field<'a>(
+    input: &'a [u8],
+    cursor: &mut usize,
+) -> Result<Option<ProtobufField<'a>>, SabrRequestParseError> {
+    if *cursor == input.len() {
+        return Ok(None);
+    }
+
+    let tag = read_protobuf_varint(input, cursor)?;
+    let number = u32::try_from(tag >> 3).map_err(|_| SabrRequestParseError::Malformed)?;
+    if number == 0 || number > 0x1fff_ffff {
+        return Err(SabrRequestParseError::Malformed);
+    }
+    let wire_type = (tag & 0x07) as u8;
+    let payload = match wire_type {
+        0 => {
+            let _ = read_protobuf_varint(input, cursor)?;
+            None
+        }
+        1 | 5 => {
+            let width = if wire_type == 1 { 8 } else { 4 };
+            let end = (*cursor).checked_add(width).ok_or(SabrRequestParseError::Malformed)?;
+            if end > input.len() {
+                return Err(SabrRequestParseError::Truncated);
+            }
+            *cursor = end;
+            None
+        }
+        2 => {
+            let length = read_protobuf_varint(input, cursor)?;
+            let length = usize::try_from(length).map_err(|_| SabrRequestParseError::Malformed)?;
+            let end = (*cursor).checked_add(length).ok_or(SabrRequestParseError::Malformed)?;
+            if end > input.len() {
+                return Err(SabrRequestParseError::Truncated);
+            }
+            let bytes = &input[*cursor..end];
+            *cursor = end;
+            Some(bytes)
+        }
+        _ => return Err(SabrRequestParseError::UnsupportedWireType),
+    };
+
+    Ok(Some(ProtobufField {
+        number,
+        wire_type,
+        payload,
+    }))
+}
+
+// VideoPlaybackAbrRequest.streamerContext is field 19. Inside StreamerContext,
+// clientInfo, poToken, and playbackCookie are fields 1, 2, and 3 respectively.
+// Length-delimited values are borrowed and skipped; token/cookie bytes are never copied.
+fn scan_sabr_streamer_context(
+    input: &[u8],
+    metadata: &mut SabrRequestMetadata,
+) -> Result<(), SabrRequestParseError> {
+    let mut cursor = 0;
+    while let Some(field) = protobuf_next_field(input, &mut cursor)? {
+        if let 1..=3 = field.number {
+            if field.wire_type != 2 {
+                return Err(SabrRequestParseError::UnsupportedWireType);
+            }
+            let payload_len = field.payload.map(|payload| payload.len()).unwrap_or_default();
+            match field.number {
+                1 => metadata.client_info_present = true,
+                2 => metadata.po_token_bytes = Some(payload_len),
+                3 => metadata.playback_cookie_bytes = Some(payload_len),
+                _ => unreachable!(),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decode_sabr_request_metadata(
+    body: &[u8],
+    content_encoding: Option<&str>,
+) -> SabrRequestMetadata {
+    let mut metadata = SabrRequestMetadata::default();
+
+    if content_encoding.is_some_and(|encoding| {
+        !encoding.trim().is_empty() && !encoding.trim().eq_ignore_ascii_case("identity")
+    }) {
+        metadata.parse_state = Some(SabrRequestParseState::UnsupportedEncoding);
+        return metadata;
+    }
+    if body.is_empty() {
+        metadata.parse_state = Some(SabrRequestParseState::Empty);
+        return metadata;
+    }
+
+    let parsed = (|| {
+        let mut cursor = 0;
+        while let Some(field) = protobuf_next_field(body, &mut cursor)? {
+            if field.number == 19 {
+                if field.wire_type != 2 {
+                    return Err(SabrRequestParseError::UnsupportedWireType);
+                }
+                metadata.streamer_context_present = true;
+                scan_sabr_streamer_context(field.payload.unwrap_or_default(), &mut metadata)?;
+            }
+        }
+        Ok::<(), SabrRequestParseError>(())
+    })();
+
+    metadata.parse_state = Some(match parsed {
+        Ok(()) => SabrRequestParseState::Ok,
+        Err(SabrRequestParseError::Truncated) => SabrRequestParseState::Truncated,
+        Err(SabrRequestParseError::Malformed) => SabrRequestParseState::Malformed,
+        Err(SabrRequestParseError::UnsupportedWireType) => SabrRequestParseState::UnsupportedWireType,
+    });
+    metadata
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SabrBackoffWindow {
+    backoff_ms: u64,
+    policy_observed_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SabrBackoffObservation {
+    backoff_ms: u64,
+    elapsed_ms: u64,
+    remaining_ms: u64,
+    satisfied: bool,
+}
+
+fn observe_sabr_backoff(
+    window: SabrBackoffWindow,
+    observed_at: Instant,
+) -> SabrBackoffObservation {
+    let elapsed_ms = observed_at.saturating_duration_since(window.policy_observed_at)
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
+    SabrBackoffObservation {
+        backoff_ms: window.backoff_ms,
+        elapsed_ms,
+        remaining_ms: window.backoff_ms.saturating_sub(elapsed_ms),
+        satisfied: elapsed_ms >= window.backoff_ms,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProtobufReadState {
     Tag,
     VarintValue,
@@ -1955,6 +2181,7 @@ struct UmpStreamDiagnostics {
     current_metadata_truncated: bool,
     latest_stream_protection_status: Option<StreamProtectionStatusDiagnostic>,
     latest_next_request_policy: Option<NextRequestPolicyDiagnostic>,
+    latest_next_request_policy_observed_at: Option<Instant>,
     stream_protection_status_decode_errors: usize,
     next_request_policy_decode_errors: usize,
     part_counts: std::collections::BTreeMap<u32, usize>,
@@ -2043,6 +2270,7 @@ impl UmpStreamDiagnostics {
             }
             Some(DecodedUmpMetadata::NextRequestPolicy(decoded)) => {
                 self.latest_next_request_policy = Some(decoded);
+                self.latest_next_request_policy_observed_at = Some(Instant::now());
             }
             None => self.record_metadata_decode_error(part_type),
         }
@@ -2051,9 +2279,21 @@ impl UmpStreamDiagnostics {
     fn record_metadata_decode_error(&mut self, part_type: u32) {
         match part_type {
             58 => self.stream_protection_status_decode_errors += 1,
-            35 => self.next_request_policy_decode_errors += 1,
+            35 => {
+                self.next_request_policy_decode_errors += 1;
+                self.latest_next_request_policy = None;
+                self.latest_next_request_policy_observed_at = None;
+            }
             _ => {}
         }
+    }
+
+    fn next_request_backoff_window(&self) -> Option<SabrBackoffWindow> {
+        let backoff_ms = u64::try_from(self.latest_next_request_policy?.backoff_time_ms?).ok()?;
+        Some(SabrBackoffWindow {
+            backoff_ms,
+            policy_observed_at: self.latest_next_request_policy_observed_at?,
+        })
     }
 
     fn summary(&self) -> String {
@@ -2247,6 +2487,14 @@ async fn ajax_passthrough(
     context: ProxyRequestContext,
 ) -> Response<Body> {
     let ProxyRequestContext { request_id, started_at: request_started, permit: request_permit } = context;
+    let is_sabr_request = is_youtube_sabr_request(&upstream_url);
+    let sabr_request_metadata = if is_sabr_request {
+        let content_encoding = request_headers.get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok());
+        Some(decode_sabr_request_metadata(request_body.as_ref(), content_encoding))
+    } else {
+        None
+    };
     let mut upstream_url = upstream_url;
     let upstream_path = upstream_url.path().to_owned();
     let initial_host = upstream_url.host_str().unwrap_or_default().to_owned();
@@ -2679,7 +2927,7 @@ async fn ajax_passthrough(
         ).await;
     }
 
-    if is_youtube_sabr_request(&upstream_url) {
+    if is_sabr_request {
         let content_length = if has_body_framing || request_body_len > 0 {
             request_body_len.to_string()
         } else {
@@ -2707,6 +2955,35 @@ async fn ajax_passthrough(
                 !request_body.is_empty(),
             ),
         ).await;
+
+        let backoff_observation = session.sabr_backoff
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .map(|window| observe_sabr_backoff(window, Instant::now()));
+        if let Some(metadata) = sabr_request_metadata {
+            let backoff_detail = match backoff_observation {
+                Some(observation) => format!(
+                    " prior_backoff_ms={} elapsed_since_policy_ms={} remaining_ms={} met={}",
+                    observation.backoff_ms,
+                    observation.elapsed_ms,
+                    observation.remaining_ms,
+                    observation.satisfied,
+                ),
+                None => " prior_backoff=unobserved".to_owned(),
+            };
+            push_event(
+                &session,
+                "youtube_sabr_request_metadata",
+                format!("{upstream_host}{upstream_path}"),
+                format!(
+                    "rid={request_id} body_bytes={} {}{}",
+                    request_body.len(),
+                    metadata.summary(),
+                    backoff_detail,
+                ),
+            ).await;
+        }
     }
 
     let upstream = tokio::select! {
@@ -3077,6 +3354,8 @@ async fn ajax_passthrough(
             tokio::select! {
                 _ = wait_for_cancellation(&mut cancellation) => {
                     if is_sabr {
+                        *session.sabr_backoff.lock()
+                            .unwrap_or_else(|error| error.into_inner()) = None;
                         push_event(
                             &session,
                             "youtube_sabr_response_stream_complete",
@@ -3113,6 +3392,8 @@ async fn ajax_passthrough(
                             "AJAX upstream response stream failed"
                         );
                         if is_sabr {
+                            *session.sabr_backoff.lock()
+                                .unwrap_or_else(|error| error.into_inner()) = None;
                             push_event(
                                 &session,
                                 "youtube_sabr_response_stream_complete",
@@ -3134,6 +3415,9 @@ async fn ajax_passthrough(
                     }
                     None => {
                         if is_sabr {
+                            let backoff_window = ump_diagnostics.next_request_backoff_window();
+                            *session.sabr_backoff.lock()
+                                .unwrap_or_else(|error| error.into_inner()) = backoff_window;
                             push_event(
                                 &session,
                                 "youtube_sabr_response_stream_complete",
@@ -5136,6 +5420,7 @@ mod tests {
             max_inflight: 8,
             cookie_jar: Arc::new(SessionCookieJar::default()),
             cookie_tokens: StdMutex::new(HashMap::new()),
+            sabr_backoff: StdMutex::new(None),
         }
     }
 
@@ -5997,6 +6282,7 @@ mod tests {
             max_inflight: 1,
             cookie_jar: Arc::new(SessionCookieJar::default()),
             cookie_tokens: StdMutex::new(HashMap::new()),
+            sabr_backoff: StdMutex::new(None),
         };
         let referer = HeaderValue::from_str(
             "http://session1234567890abcdef1234567890.localhost:5000/p/session1234567890abcdef1234567890/profile"
@@ -6573,7 +6859,10 @@ mod tests {
 #[cfg(test)]
 mod ump_stream_diagnostics_tests {
     use super::{
-        decode_next_request_policy, decode_stream_protection_status, UmpStreamDiagnostics,
+        decode_next_request_policy, decode_sabr_request_metadata,
+        decode_stream_protection_status, observe_sabr_backoff,
+        Duration, Instant, SabrBackoffWindow, SabrRequestParseState,
+        UmpStreamDiagnostics,
     };
 
     #[test]
@@ -6655,6 +6944,70 @@ mod ump_stream_diagnostics_tests {
         assert!(detail.contains("nrp=ta:100,tv:200,max:30,bo:5,mina:10,minv:20"));
         assert!(detail.contains("decode_err=sps:0,nrp:0"));
         assert!(detail.contains("malformed=false frame=true"));
+    }
+
+    #[test]
+    fn scans_sabr_request_streamer_context_without_retaining_token_bytes() {
+        // VideoPlaybackAbrRequest field 19 => StreamerContext.
+        // StreamerContext fields: clientInfo=1, poToken=2, playbackCookie=3.
+        let body = [
+            0x9a, 0x01, 0x0d,
+            0x0a, 0x00,
+            0x12, 0x04, 0xaa, 0xbb, 0xcc, 0xdd,
+            0x1a, 0x03, 0x11, 0x22, 0x33,
+        ];
+        let metadata = decode_sabr_request_metadata(&body, None);
+        assert_eq!(metadata.parse_state, Some(SabrRequestParseState::Ok));
+        assert!(metadata.streamer_context_present);
+        assert!(metadata.client_info_present);
+        assert_eq!(metadata.po_token_bytes, Some(4));
+        assert_eq!(metadata.playback_cookie_bytes, Some(3));
+
+        let summary = metadata.summary();
+        assert!(summary.contains("po=present:4"));
+        assert!(summary.contains("pc=present:3"));
+        assert!(!summary.contains("aabbccdd"));
+    }
+
+    #[test]
+    fn sabr_request_scanner_distinguishes_missing_context_and_unsupported_encoding() {
+        let no_context = decode_sabr_request_metadata(&[0x10, 0x00], None);
+        assert_eq!(no_context.parse_state, Some(SabrRequestParseState::Ok));
+        assert!(!no_context.streamer_context_present);
+        assert_eq!(no_context.po_token_bytes, None);
+
+        let compressed = decode_sabr_request_metadata(&[0x9a, 0x01], Some("gzip"));
+        assert_eq!(compressed.parse_state, Some(SabrRequestParseState::UnsupportedEncoding));
+        assert_eq!(compressed.po_token_bytes, None);
+    }
+
+    #[test]
+    fn sabr_request_scanner_reports_truncated_nested_fields() {
+        // StreamerContext length is complete, but poToken claims five bytes and has one.
+        let body = [0x9a, 0x01, 0x03, 0x12, 0x05, 0xaa];
+        let metadata = decode_sabr_request_metadata(&body, None);
+        assert_eq!(metadata.parse_state, Some(SabrRequestParseState::Truncated));
+    }
+
+    #[test]
+    fn sabr_backoff_observation_compares_elapsed_time_to_server_policy() {
+        let now = Instant::now();
+        let pending = SabrBackoffWindow {
+            backoff_ms: 2_000,
+            policy_observed_at: now - Duration::from_millis(1_999),
+        };
+        let early = observe_sabr_backoff(pending, now);
+        assert_eq!(early.elapsed_ms, 1_999);
+        assert_eq!(early.remaining_ms, 1);
+        assert!(!early.satisfied);
+
+        let after = observe_sabr_backoff(
+            pending,
+            now + Duration::from_millis(2),
+        );
+        assert_eq!(after.elapsed_ms, 2_001);
+        assert_eq!(after.remaining_ms, 0);
+        assert!(after.satisfied);
     }
 
     #[test]
