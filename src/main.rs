@@ -6272,6 +6272,54 @@ mod tests {
     }
 
     #[test]
+    fn playback_context_ids_are_validated_and_attestation_state_is_isolated() {
+        let mut first = HeaderMap::new();
+        first.insert(
+            "x-intercept-playback-context-id",
+            HeaderValue::from_static("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        );
+        let mut second = HeaderMap::new();
+        second.insert(
+            "x-intercept-playback-context-id",
+            HeaderValue::from_static("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        );
+        assert_eq!(
+            youtube_playback_context_id(&first),
+            Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        );
+        assert!(should_skip_request_header(
+            &HeaderName::from_static("x-intercept-playback-context-id")
+        ));
+
+        let mut contexts = HashMap::new();
+        youtube_attestation_context_mut(
+            &mut contexts,
+            &youtube_attestation_context_key(&first),
+        ).observe_proxy_request("GenerateIT", Some("rpc-a"), Instant::now());
+        youtube_attestation_context_mut(
+            &mut contexts,
+            &youtube_attestation_context_key(&second),
+        ).observe_proxy_request("GenerateIT", Some("rpc-b"), Instant::now());
+
+        assert_eq!(contexts.len(), 2);
+        assert_eq!(
+            contexts["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"].last_correlation_id.as_deref(),
+            Some("rpc-a")
+        );
+        assert_eq!(
+            contexts["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"].last_correlation_id.as_deref(),
+            Some("rpc-b")
+        );
+
+        first.insert(
+            "x-intercept-playback-context-id",
+            HeaderValue::from_static("invalid/context"),
+        );
+        assert_eq!(youtube_playback_context_id(&first), None);
+        assert_eq!(youtube_attestation_context_key(&first), "unscoped");
+    }
+
+    #[test]
     fn worker_bootstrap_instruments_waa_fetch_xhr_and_resource_timing() {
         let base = Url::parse("https://www.youtube.com/watch?v=test").unwrap();
         let output = rewrite_worker_javascript(
