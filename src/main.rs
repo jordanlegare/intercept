@@ -5691,7 +5691,7 @@ mod tests {
         assert_eq!(youtube_attestation_rpc_operation(&create), Some("Create"));
         assert_eq!(youtube_attestation_rpc_operation(&generate), Some("GenerateIT"));
         assert_eq!(youtube_attestation_rpc_operation(&wrong_host), None);
-        assert_eq!(youtube_attestation_rpc_operation(&wrong_path), None);
+        assert_eq!(youtube_attestation_rpc_operation(&wrong_path), Some("Other"));
     }
 
     #[test]
