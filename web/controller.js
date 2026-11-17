@@ -2165,6 +2165,7 @@
       // Mark the request explicitly instead of relying on browser-specific
       // Fetch Metadata support. Preserve Request/init overrides and bodies.
       let bodyDetail = fetchBodyDiagnostic(input, init);
+      const originalBodyDetail = bodyDetail;
       let recoveredRequestBody = null;
       if (input instanceof Request
           && input.body === undefined
@@ -2180,6 +2181,7 @@
           const bodyBuffer = await input.clone().arrayBuffer();
           if (bodyBuffer.byteLength > 0) {
             recoveredRequestBody = bodyBuffer;
+            bodyDetail = "body_arg=request_recovered body_arg_bytes=" + bodyBuffer.byteLength;
             record(
               "fetch_request_body_recovered",
               fetchEventPath(source),
@@ -2212,7 +2214,7 @@
         routedRequest = new Request(routed, init);
       }
       if (routedRequest.method === "POST"
-          && bodyDetail === "body_arg=none"
+          && originalBodyDetail === "body_arg=none"
           && youtubeSabrEndpointCheck(source)) {
         const requestInput = input instanceof Request;
         const initPresent = init !== undefined && init !== null;
@@ -2228,7 +2230,8 @@
             + " input=" + (requestInput ? "Request" : input instanceof URL ? "URL" : typeof input)
             + " init_present=" + initPresent
             + " init_body_present=" + initBodyPresent
-            + " body_diag=" + bodyDetail
+            + " body_diag=" + originalBodyDetail
+            + " recovered_body_bytes=" + (recoveredRequestBody ? recoveredRequestBody.byteLength : 0)
             + " input_body_null=" + (inputBodyNull === null ? "n/a" : inputBodyNull)
             + " input_body_used=" + (inputBodyUsed === null ? "n/a" : inputBodyUsed)
             + " routed_body_null=" + (routedRequest.body === null)
