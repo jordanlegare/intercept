@@ -1784,12 +1784,174 @@ struct NextRequestPolicyDiagnostic {
     min_video_readahead_ms: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProtobufReadState {
+    Tag,
+    VarintValue,
+    Length,
+    SkipBytes { remaining: u64 },
+    Malformed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecodedUmpMetadata {
+    StreamProtectionStatus(StreamProtectionStatusDiagnostic),
+    NextRequestPolicy(NextRequestPolicyDiagnostic),
+}
+
+// Incremental wire parser: scalar values are decoded, length-delimited values
+// are skipped in place, and no cookie/video-ID/token bytes are copied.
+struct ProtobufScalarDecoder {
+    part_type: u32,
+    state: ProtobufReadState,
+    field_number: u32,
+    varint_value: u64,
+    varint_bytes: u8,
+    stream_protection_status: StreamProtectionStatusDiagnostic,
+    next_request_policy: NextRequestPolicyDiagnostic,
+}
+
+impl ProtobufScalarDecoder {
+    fn new(part_type: u32) -> Self {
+        Self {
+            part_type,
+            state: ProtobufReadState::Tag,
+            field_number: 0,
+            varint_value: 0,
+            varint_bytes: 0,
+            stream_protection_status: StreamProtectionStatusDiagnostic::default(),
+            next_request_policy: NextRequestPolicyDiagnostic::default(),
+        }
+    }
+
+    fn push_varint_byte(&mut self, byte: u8) -> Result<Option<u64>, ()> {
+        let index = self.varint_bytes;
+        if index >= 10 || (index == 9 && byte > 1) {
+            return Err(());
+        }
+        self.varint_value |= u64::from(byte & 0x7f) << (u32::from(index) * 7);
+        self.varint_bytes += 1;
+        if byte & 0x80 == 0 {
+            let value = self.varint_value;
+            self.varint_value = 0;
+            self.varint_bytes = 0;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn begin_field(&mut self, tag: u64) {
+        if tag == 0 {
+            self.state = ProtobufReadState::Malformed;
+            return;
+        }
+        let Ok(field_number) = u32::try_from(tag >> 3) else {
+            self.state = ProtobufReadState::Malformed;
+            return;
+        };
+        if field_number == 0 || field_number > 0x1fff_ffff {
+            self.state = ProtobufReadState::Malformed;
+            return;
+        }
+        let wire_type = (tag & 0x07) as u8;
+        let expected_wire_type = match (self.part_type, field_number) {
+            (58, 1 | 2) => Some(0),
+            (35, 1..=6) => Some(0),
+            (35, 7 | 8) => Some(2),
+            _ => None,
+        };
+        if expected_wire_type.is_some_and(|expected| expected != wire_type) {
+            self.state = ProtobufReadState::Malformed;
+            return;
+        }
+
+        self.field_number = field_number;
+        self.state = match wire_type {
+            0 => ProtobufReadState::VarintValue,
+            1 => ProtobufReadState::SkipBytes { remaining: 8 },
+            2 => ProtobufReadState::Length,
+            5 => ProtobufReadState::SkipBytes { remaining: 4 },
+            _ => ProtobufReadState::Malformed,
+        };
+    }
+
+    fn record_scalar(&mut self, value: u64) {
+        let value = value as i32;
+        match (self.part_type, self.field_number) {
+            (58, 1) => self.stream_protection_status.status = Some(value),
+            (58, 2) => self.stream_protection_status.max_retries = Some(value),
+            (35, 1) => self.next_request_policy.target_audio_readahead_ms = Some(value),
+            (35, 2) => self.next_request_policy.target_video_readahead_ms = Some(value),
+            (35, 3) => self.next_request_policy.max_time_since_last_request_ms = Some(value),
+            (35, 4) => self.next_request_policy.backoff_time_ms = Some(value),
+            (35, 5) => self.next_request_policy.min_audio_readahead_ms = Some(value),
+            (35, 6) => self.next_request_policy.min_video_readahead_ms = Some(value),
+            _ => {}
+        }
+    }
+
+    fn feed(&mut self, input: &[u8]) {
+        for &byte in input {
+            match self.state {
+                ProtobufReadState::Tag => match self.push_varint_byte(byte) {
+                    Ok(Some(tag)) => self.begin_field(tag),
+                    Ok(None) => {}
+                    Err(()) => self.state = ProtobufReadState::Malformed,
+                },
+                ProtobufReadState::VarintValue => match self.push_varint_byte(byte) {
+                    Ok(Some(value)) => {
+                        self.record_scalar(value);
+                        self.state = ProtobufReadState::Tag;
+                    }
+                    Ok(None) => {}
+                    Err(()) => self.state = ProtobufReadState::Malformed,
+                },
+                ProtobufReadState::Length => match self.push_varint_byte(byte) {
+                    Ok(Some(length)) => {
+                        self.state = if length == 0 {
+                            ProtobufReadState::Tag
+                        } else {
+                            ProtobufReadState::SkipBytes { remaining: length }
+                        };
+                    }
+                    Ok(None) => {}
+                    Err(()) => self.state = ProtobufReadState::Malformed,
+                },
+                ProtobufReadState::SkipBytes { remaining } => {
+                    self.state = if remaining <= 1 {
+                        ProtobufReadState::Tag
+                    } else {
+                        ProtobufReadState::SkipBytes { remaining: remaining - 1 }
+                    };
+                }
+                ProtobufReadState::Malformed => return,
+            }
+        }
+    }
+
+    fn finish(self) -> Option<DecodedUmpMetadata> {
+        if self.state != ProtobufReadState::Tag || self.varint_bytes != 0 {
+            return None;
+        }
+        match self.part_type {
+            58 => Some(DecodedUmpMetadata::StreamProtectionStatus(
+                self.stream_protection_status,
+            )),
+            35 => Some(DecodedUmpMetadata::NextRequestPolicy(
+                self.next_request_policy,
+            )),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct UmpStreamDiagnostics {
     buffer: Vec<u8>,
     payload_remaining: usize,
     current_metadata_part: Option<u32>,
-    current_metadata_payload: Option<Vec<u8>>,
+    current_metadata_decoder: Option<ProtobufScalarDecoder>,
     current_metadata_truncated: bool,
     latest_stream_protection_status: Option<StreamProtectionStatusDiagnostic>,
     latest_next_request_policy: Option<NextRequestPolicyDiagnostic>,
@@ -1803,8 +1965,8 @@ struct UmpStreamDiagnostics {
 }
 
 impl UmpStreamDiagnostics {
-    // Decode only bounded, non-secret scalar fields from the two policy parts.
-    // Media bytes, playback cookies, video IDs, and opaque tokens are never retained.
+    // Decode only scalar values from the two policy parts. Opaque length-delimited
+    // fields are skipped in place; media and sensitive field contents are not copied.
     fn feed(&mut self, chunk: &[u8]) {
         if self.malformed {
             return;
@@ -1813,14 +1975,8 @@ impl UmpStreamDiagnostics {
         loop {
             if self.payload_remaining > 0 {
                 let consumed = self.payload_remaining.min(self.buffer.len());
-                if let Some(payload) = self.current_metadata_payload.as_mut() {
-                    let remaining_capacity =
-                        MAX_UMP_METADATA_PAYLOAD_BYTES.saturating_sub(payload.len());
-                    let captured = consumed.min(remaining_capacity);
-                    payload.extend_from_slice(&self.buffer[..captured]);
-                    if captured < consumed {
-                        self.current_metadata_truncated = true;
-                    }
+                if let Some(decoder) = self.current_metadata_decoder.as_mut() {
+                    decoder.feed(&self.buffer[..consumed]);
                 }
                 self.buffer.drain(..consumed);
                 self.payload_remaining -= consumed;
@@ -1854,10 +2010,8 @@ impl UmpStreamDiagnostics {
             self.current_metadata_part = is_metadata_part.then_some(part_type);
             self.current_metadata_truncated =
                 is_metadata_part && payload_len > MAX_UMP_METADATA_PAYLOAD_BYTES;
-            self.current_metadata_payload = if is_metadata_part
-                && payload_len <= MAX_UMP_METADATA_PAYLOAD_BYTES
-            {
-                Some(Vec::with_capacity(payload_len))
+            self.current_metadata_decoder = if is_metadata_part && !self.current_metadata_truncated {
+                Some(ProtobufScalarDecoder::new(part_type))
             } else {
                 None
             };
@@ -1869,12 +2023,12 @@ impl UmpStreamDiagnostics {
 
     fn finish_metadata_part(&mut self) {
         let Some(part_type) = self.current_metadata_part.take() else {
-            self.current_metadata_payload = None;
+            self.current_metadata_decoder = None;
             self.current_metadata_truncated = false;
             return;
         };
         let truncated = std::mem::take(&mut self.current_metadata_truncated);
-        let Some(payload) = self.current_metadata_payload.take() else {
+        let Some(decoder) = self.current_metadata_decoder.take() else {
             self.record_metadata_decode_error(part_type);
             return;
         };
@@ -1883,16 +2037,14 @@ impl UmpStreamDiagnostics {
             return;
         }
 
-        match part_type {
-            58 => match decode_stream_protection_status(&payload) {
-                Some(decoded) => self.latest_stream_protection_status = Some(decoded),
-                None => self.record_metadata_decode_error(part_type),
-            },
-            35 => match decode_next_request_policy(&payload) {
-                Some(decoded) => self.latest_next_request_policy = Some(decoded),
-                None => self.record_metadata_decode_error(part_type),
-            },
-            _ => {}
+        match decoder.finish() {
+            Some(DecodedUmpMetadata::StreamProtectionStatus(decoded)) => {
+                self.latest_stream_protection_status = Some(decoded);
+            }
+            Some(DecodedUmpMetadata::NextRequestPolicy(decoded)) => {
+                self.latest_next_request_policy = Some(decoded);
+            }
+            None => self.record_metadata_decode_error(part_type),
         }
     }
 
@@ -1962,137 +2114,26 @@ fn diagnostic_i32(value: Option<i32>) -> String {
     value.map(|number| number.to_string()).unwrap_or_else(|| "absent".to_owned())
 }
 
-fn read_protobuf_varint(input: &[u8], position: &mut usize) -> Option<u64> {
-    let mut value = 0u64;
-    for index in 0..10 {
-        let byte = *input.get(*position)?;
-        *position += 1;
-        if index == 9 && byte > 1 {
-            return None;
-        }
-        value |= u64::from(byte & 0x7f) << (index * 7);
-        if byte & 0x80 == 0 {
-            return Some(value);
-        }
-    }
-    None
-}
-
-// Walk protobuf wire fields without copying length-delimited values. This lets
-// us validate and skip opaque cookie/token/string fields without exposing them.
-fn decode_protobuf_wire_fields(input: &[u8]) -> Option<Vec<(u32, u8, Option<u64>)>> {
-    let mut position = 0usize;
-    let mut fields = Vec::new();
-    while position < input.len() {
-        let tag = read_protobuf_varint(input, &mut position)?;
-        if tag == 0 {
-            return None;
-        }
-        let field_number = u32::try_from(tag >> 3).ok()?;
-        if field_number == 0 || field_number > 0x1fff_ffff {
-            return None;
-        }
-        let wire_type = (tag & 0x07) as u8;
-        let value = match wire_type {
-            0 => Some(read_protobuf_varint(input, &mut position)?),
-            1 => {
-                position = position.checked_add(8)?;
-                if position > input.len() {
-                    return None;
-                }
-                None
-            }
-            2 => {
-                let length = usize::try_from(read_protobuf_varint(input, &mut position)?).ok()?;
-                position = position.checked_add(length)?;
-                if position > input.len() {
-                    return None;
-                }
-                None
-            }
-            5 => {
-                position = position.checked_add(4)?;
-                if position > input.len() {
-                    return None;
-                }
-                None
-            }
-            _ => return None,
-        };
-        fields.push((field_number, wire_type, value));
-    }
-    Some(fields)
-}
-
 fn decode_stream_protection_status(
     input: &[u8],
 ) -> Option<StreamProtectionStatusDiagnostic> {
-    let mut decoded = StreamProtectionStatusDiagnostic::default();
-    for (field_number, wire_type, value) in decode_protobuf_wire_fields(input)? {
-        match field_number {
-            1 => {
-                if wire_type != 0 {
-                    return None;
-                }
-                decoded.status = Some(value? as i32);
-            }
-            2 => {
-                if wire_type != 0 {
-                    return None;
-                }
-                decoded.max_retries = Some(value? as i32);
-            }
-            _ => {}
-        }
+    let mut decoder = ProtobufScalarDecoder::new(58);
+    decoder.feed(input);
+    match decoder.finish()? {
+        DecodedUmpMetadata::StreamProtectionStatus(decoded) => Some(decoded),
+        _ => None,
     }
-    Some(decoded)
 }
 
 fn decode_next_request_policy(input: &[u8]) -> Option<NextRequestPolicyDiagnostic> {
-    let mut decoded = NextRequestPolicyDiagnostic::default();
-    for (field_number, wire_type, value) in decode_protobuf_wire_fields(input)? {
-        match field_number {
-            1..=6 => {
-                if wire_type != 0 {
-                    return None;
-                }
-                let number = Some(value? as i32);
-                match field_number {
-                    1 => decoded.target_audio_readahead_ms = number,
-                    2 => decoded.target_video_readahead_ms = number,
-                    3 => decoded.max_time_since_last_request_ms = number,
-                    4 => decoded.backoff_time_ms = number,
-                    5 => decoded.min_audio_readahead_ms = number,
-                    6 => decoded.min_video_readahead_ms = number,
-                    _ => unreachable!(),
-                }
-            }
-            7 | 8 if wire_type != 2 => return None,
-            _ => {}
-        }
+    let mut decoder = ProtobufScalarDecoder::new(35);
+    decoder.feed(input);
+    match decoder.finish()? {
+        DecodedUmpMetadata::NextRequestPolicy(decoded) => Some(decoded),
+        _ => None,
     }
-    Some(decoded)
 }
 
-fn decode_ump_varint(input: &[u8]) -> Option<(u32, usize)> {
-    let first = *input.first()?;
-    let size = (first.leading_ones().min(4) + 1) as usize;
-    if input.len() < size {
-        return None;
-    }
-    let mut value = 0u32;
-    let mut shift = 0;
-    if size != 5 {
-        shift = 8 - size as u32;
-        let mask = ((1u16 << shift) - 1) as u8;
-        value |= (first & mask) as u32;
-    }
-    for byte in input.iter().take(size).skip(1) {
-        value |= (*byte as u32) << shift;
-        shift += 8;
-    }
-    Some((value, size))
-}
 
 fn ump_part_name(part_type: u32) -> String {
     let name = match part_type {
