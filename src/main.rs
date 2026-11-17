@@ -2033,6 +2033,13 @@ fn mark_sabr_response_complete(timing: &mut SabrRequestTiming, completed_at: Ins
     timing.last_response_completed_at = Some(completed_at);
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct YouTubeAttestationResponseMetadata {
+    content_type: String,
+    content_length: String,
+    content_encoding: String,
+}
+
 #[derive(Default)]
 struct YouTubeAttestationTiming {
     proxy_request_count: u64,
@@ -2114,17 +2121,15 @@ impl YouTubeAttestationTiming {
         operation: &'static str,
         correlation_id: Option<&str>,
         status: u16,
-        content_type: String,
-        content_length: String,
-        content_encoding: String,
+        response_metadata: YouTubeAttestationResponseMetadata,
         observed_at: Instant,
     ) {
         self.last_rpc_response_operation = Some(operation);
         self.last_rpc_response_correlation_id = correlation_id.map(str::to_owned);
         self.last_rpc_response_status = Some(status);
-        self.last_rpc_response_content_type = Some(content_type);
-        self.last_rpc_response_content_length = Some(content_length);
-        self.last_rpc_response_content_encoding = Some(content_encoding);
+        self.last_rpc_response_content_type = Some(response_metadata.content_type);
+        self.last_rpc_response_content_length = Some(response_metadata.content_length);
+        self.last_rpc_response_content_encoding = Some(response_metadata.content_encoding);
         self.last_rpc_response_at = Some(observed_at);
     }
 
@@ -3592,9 +3597,11 @@ async fn ajax_passthrough(
                 operation,
                 youtube_attestation_correlation_id(&request_headers),
                 status.as_u16(),
-                response_content_type.clone(),
-                response_content_length.clone(),
-                response_content_encoding.clone(),
+                YouTubeAttestationResponseMetadata {
+                    content_type: response_content_type.clone(),
+                    content_length: response_content_length.clone(),
+                    content_encoding: response_content_encoding.clone(),
+                },
                 Instant::now(),
             );
         }
@@ -7688,7 +7695,7 @@ mod ump_stream_diagnostics_tests {
         decode_stream_protection_status, observe_sabr_backoff,
         mark_sabr_response_complete, observe_sabr_request_gap,
         Duration, Instant, SabrBackoffWindow, SabrRequestParseState, SabrRequestTiming,
-        YouTubeAttestationTiming,
+        YouTubeAttestationTiming, YouTubeAttestationResponseMetadata,
         UmpStreamDiagnostics, event_detail_limit, clean_field,
     };
 
@@ -7711,9 +7718,11 @@ mod ump_stream_diagnostics_tests {
             "GenerateIT",
             Some("mwl4oib2-1-wu4yb4"),
             200,
-            "application/json".to_owned(),
-            "512".to_owned(),
-            "identity".to_owned(),
+            YouTubeAttestationResponseMetadata {
+                content_type: "application/json".to_owned(),
+                content_length: "512".to_owned(),
+                content_encoding: "identity".to_owned(),
+            },
             observed_at,
         );
         let snapshot = timing.snapshot(observed_at + Duration::from_millis(37));
