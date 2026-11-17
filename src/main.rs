@@ -4607,6 +4607,76 @@ fn rewrite_worker_javascript(
       const sessionId={session};
       const primaryOrigin={primary_origin};
       const prefix="/p/"+encodeURIComponent(sessionId);
+      function attestationInfo(value){{
+        try{{
+          const url=new URL(value instanceof URL?value.href:String(value),self.location.href);
+          let hostname=url.hostname.toLowerCase();
+          let pathname=url.pathname;
+          if(url.origin===self.location.origin){{
+            const marker=prefix+"/_/https/";
+            const index=pathname.indexOf(marker);
+            if(index>=0){{
+              const target=pathname.slice(index+marker.length);
+              const slash=target.indexOf("/");
+              if(slash<=0)return null;
+              hostname=target.slice(0,slash).toLowerCase();
+              pathname=target.slice(slash);
+            }}
+          }}
+          const lowerPath=pathname.toLowerCase();
+          const candidate=hostname==="jnn-pa.googleapis.com"
+            ||(hostname.endsWith(".googleapis.com")&&lowerPath.includes("waa"));
+          if(!candidate)return null;
+          const match=pathname.match(/^\\/\\$rpc\\/google\\.internal\\.waa\\.v1\\.Waa\\/(Create|GenerateIT)$/);
+          return {{target:hostname+pathname,operation:match?match[1]:"Other"}};
+        }}catch(_e){{return null}}
+      }}
+      function reportAttestation(info,detail){{
+        if(!info)return;
+        try{{
+          const endpoint=new URL("/_intercept/events",self.location.origin).href;
+          const payload=[{{kind:"youtube_attestation_rpc",target:info.target,detail:String(detail||"").slice(0,300)}}];
+          nativeFetch(endpoint,{{
+            method:"POST",
+            headers:{{"content-type":"application/json"}},
+            body:JSON.stringify(payload),
+            keepalive:true
+          }}).catch(()=>{{}});
+        }}catch(_e){{}}
+      }}
+      function safeResponseHeader(headers,name,mode){{
+        try{{
+          const value=headers.get(name);
+          if(!value)return "absent";
+          if(mode==="mime"){{
+            const mime=String(value).split(";",1)[0].trim().toLowerCase();
+            return /^[a-z0-9.+_-]+\\/[a-z0-9.+_-]+$/.test(mime)?mime:"other";
+          }}
+          if(mode==="length")return /^\\d{{1,15}}$/.test(String(value).trim())?String(value).trim():"absent";
+          const encoding=String(value).trim().toLowerCase();
+          return /^[a-z0-9._-]{{1,16}}$/.test(encoding)?encoding:"other";
+        }}catch(_e){{return "absent"}}
+      }}
+      if(typeof PerformanceObserver==="function"){{
+        try{{
+          const observed=new Set();
+          const observer=new PerformanceObserver(list=>{{
+            for(const entry of list.getEntries()){{
+              const info=attestationInfo(entry.name);
+              if(!info)continue;
+              const key=info.target+"|"+Math.round(entry.startTime*10)+"|"+String(entry.initiatorType||"other");
+              if(observed.has(key))continue;
+              observed.add(key);
+              if(observed.size>256)observed.delete(observed.values().next().value);
+              reportAttestation(info,"phase=worker_resource_timing_observed operation="+info.operation
+                +" initiator="+String(entry.initiatorType||"other").replace(/[^A-Za-z0-9_-]/g,"").slice(0,24)
+                +" duration_ms="+Math.max(0,Math.round(entry.duration))
+                +" transfer_bytes="+Math.max(0,Math.round(entry.transferSize||0)));
+            }}
+          }});
+          observer.observe({{type:"resource",buffered:true}});
+        }}catch(_e){{}}
+      }}
       function route(value){{
         let url;
         try{{url=new URL(value instanceof URL?value.href:String(value),self.location.href)}}catch(_e){{return value}}
@@ -4656,6 +4726,7 @@ fn rewrite_worker_javascript(
           const source=input instanceof Request?input.url:input;
           const method=String((init&&init.method)||(input instanceof Request&&input.method)||"GET").toUpperCase();
           const routed=route(source);
+          const attestation=attestationInfo(source);
           let request;
           if(input instanceof Request){{request=new Request(routed,input);if(init)request=new Request(request,init)}}
           else request=new Request(routed,init);
@@ -4667,7 +4738,22 @@ fn rewrite_worker_javascript(
           headers.set("X-Intercept-Body-Diagnostic",bodyDetail);
           headers.set("X-Intercept-Transport-Diagnostic","worker-fetch");
           reportDispatch(routed,method+" · "+bodyDetail+" · transport=worker-fetch");
-          return nativeFetch(new Request(request,{{headers}}));
+          const pending=nativeFetch(new Request(request,{{headers}}));
+          if(!attestation)return pending;
+          reportAttestation(attestation,"phase=worker_dispatch operation="+attestation.operation
+            +" method="+request.method+" transport=worker-fetch");
+          return pending.then(response=>{{
+            reportAttestation(attestation,"phase=worker_response operation="+attestation.operation
+              +" status="+response.status
+              +" ct="+safeResponseHeader(response.headers,"content-type","mime")
+              +" cl="+safeResponseHeader(response.headers,"content-length","length")
+              +" ce="+safeResponseHeader(response.headers,"content-encoding","encoding"));
+            return response;
+          }},error=>{{
+            const name=String(error&&error.name||"unknown").replace(/[^A-Za-z0-9_-]/g,"").slice(0,40)||"unknown";
+            reportAttestation(attestation,"phase=worker_error operation="+attestation.operation+" error="+name);
+            throw error;
+          }});
         }};
         if(self.XMLHttpRequest){{
           const proto=XMLHttpRequest.prototype;
@@ -4677,7 +4763,7 @@ fn rewrite_worker_javascript(
           const xhrMeta=new WeakMap();
           proto.open=function(method,url,...rest){{
             const routed=route(url);
-            xhrMeta.set(this,{{method:String(method).toUpperCase(),url:routed}});
+            xhrMeta.set(this,{{method:String(method).toUpperCase(),url:routed,attestation:attestationInfo(url)}});
             return nativeOpen.call(this,method,routed,...rest);
           }};
           proto.send=function(...args){{
@@ -4689,7 +4775,24 @@ fn rewrite_worker_javascript(
               nativeSet.call(this,"X-Intercept-Transport-Diagnostic","worker-xhr");
             }}catch(_e){{}}
             if(meta)reportDispatch(meta.url,meta.method+" · "+bodyDetail+" · transport=worker-xhr");
-            return nativeSend.apply(this,args);
+            if(meta&&meta.attestation){{
+              reportAttestation(meta.attestation,"phase=worker_dispatch operation="+meta.attestation.operation
+                +" method="+meta.method+" transport=worker-xhr");
+              this.addEventListener("loadend",()=>{{
+                reportAttestation(meta.attestation,"phase=worker_response operation="+meta.attestation.operation
+                  +" status="+this.status
+                  +" ct="+safeResponseHeader(this,"content-type","mime")
+                  +" cl="+safeResponseHeader(this,"content-length","length")
+                  +" ce="+safeResponseHeader(this,"content-encoding","encoding"));
+              }});
+            }}
+            try{{return nativeSend.apply(this,args)}}catch(error){{
+              if(meta&&meta.attestation){{
+                const name=String(error&&error.name||"unknown").replace(/[^A-Za-z0-9_-]/g,"").slice(0,40)||"unknown";
+                reportAttestation(meta.attestation,"phase=worker_error operation="+meta.attestation.operation+" error="+name);
+              }}
+              throw error;
+            }}
           }};
         }}
       }} else if(self.XMLHttpRequest){{
