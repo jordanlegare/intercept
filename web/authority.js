@@ -165,7 +165,8 @@
         "youtube_player_worker",
         "youtube_sabr_request_gap",
         "youtube_sabr_response_stream_complete",
-        "youtube_sabr_policy_diagnostic"
+        "youtube_sabr_policy_diagnostic",
+        "youtube_sabr_attestation_context"
       ]);
       for (const item of events.filter(item => diagnosticKinds.has(item.kind)).slice(-100)) {
         visible.set(String(item.at_unix_ms) + "|" + item.kind + "|" + item.detail, item);
