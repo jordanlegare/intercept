@@ -1655,7 +1655,7 @@ async fn push_event_with_error_body(
     events.push_back(ActionEvent {
         at_unix_ms: now_ms(),
         kind: clean_field(kind.to_owned(), 80),
-        target: clean_field(target, 240),
+        target: sanitize_event_target(target, 240),
         detail: clean_field(detail, event_detail_limit(kind)),
         upstream_error_body,
     });
@@ -2770,6 +2770,11 @@ async fn ajax_passthrough(
     let is_youtube_next = upstream_path == "/youtubei/v1/next" && is_youtube_inner_tube;
     let is_youtube_feedback = upstream_path == "/youtubei/v1/feedback" && is_youtube_inner_tube;
     let is_youtube_stats = is_youtube_stats_endpoint(&upstream_url);
+    let (stats_euri_present, stats_euri_rewritten) = if is_youtube_stats {
+        rewrite_youtube_stats_euri(&mut upstream_url, &session)
+    } else {
+        (false, false)
+    };
     let is_youtube_log_event = upstream_path == "/youtubei/v1/log_event"
         && (initial_host.eq_ignore_ascii_case("youtube.com")
             || initial_host.to_ascii_lowercase().ends_with(".youtube.com"));
@@ -2954,11 +2959,14 @@ async fn ajax_passthrough(
             &session,
             "youtube_stats_request_profile",
             format!("{upstream_host}{upstream_path}"),
-            format!("rid={request_id} {}", youtube_stats_request_diagnostics(
-                &request_method,
-                &request_headers,
-                &request_body,
-            )),
+            format!(
+                "rid={request_id} euri_present={stats_euri_present} euri_rewritten={stats_euri_rewritten} {}",
+                youtube_stats_request_diagnostics(
+                    &request_method,
+                    &request_headers,
+                    &request_body,
+                )
+            ),
         ).await;
         push_event(
             &session,
@@ -4647,6 +4655,52 @@ fn rewrite_referer(value: &HeaderValue, session: &Session) -> Option<HeaderValue
         referer
     };
     HeaderValue::from_str(upstream.as_str()).ok()
+}
+
+fn rewrite_youtube_stats_euri(url: &mut Url, session: &Session) -> (bool, bool) {
+    let mut pairs = url.query_pairs()
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    let mut euri_present = false;
+    let mut euri_rewritten = false;
+
+    for (name, value) in &mut pairs {
+        if name != "euri" {
+            continue;
+        }
+        euri_present = true;
+        let Ok(header) = HeaderValue::from_str(value) else { continue };
+        let Some(rewritten) = rewrite_referer(&header, session) else { continue };
+        let Ok(rewritten_value) = rewritten.to_str() else { continue };
+        if rewritten_value != value {
+            *value = rewritten_value.to_owned();
+            euri_rewritten = true;
+        }
+    }
+
+    if euri_rewritten {
+        url.query_pairs_mut()
+            .clear()
+            .extend_pairs(pairs.iter().map(|(name, value)| (name.as_str(), value.as_str())));
+    }
+
+    (euri_present, euri_rewritten)
+}
+
+fn sanitize_event_target(value: String, max: usize) -> String {
+    let is_url_like = value.starts_with('/')
+        || value.contains("://")
+        || value.split_once('/')
+            .is_some_and(|(host, _)| host.contains('.'));
+    let sanitized = if is_url_like {
+        value.split(|character| character == '?' || character == '#')
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    } else {
+        value
+    };
+    clean_field(sanitized, max)
 }
 
 fn resource_cache_key(url: &Url, headers: &HeaderMap) -> String {
@@ -7137,6 +7191,73 @@ mod tests {
         assert_eq!(
             rewrite_referer(&referer, &session).unwrap(),
             HeaderValue::from_static("https://example.com/profile")
+        );
+    }
+
+    #[test]
+    fn youtube_stats_euri_rewrites_only_the_session_proxy_page_url() {
+        let session = Session {
+            id: "session1234567890abcdef1234567890".to_owned(),
+            base_url: Url::parse("https://www.youtube.com/start").unwrap(),
+            clients: Mutex::new(UpstreamClientCache::default()),
+            cache: Mutex::new(ResourceCache::default()),
+            gate: Mutex::new(GateState::Waiting),
+            gate_tx: watch::channel(GateState::Waiting).0,
+            cancel_tx: watch::channel(false).0,
+            cancelled: AtomicBool::new(false),
+            events: Mutex::new(VecDeque::new()),
+            policy: AuthorizationPolicy::Standard,
+            rules: Vec::new(),
+            bootstrap_pending: AtomicBool::new(false),
+            last_accessed_ms: AtomicU64::new(0),
+            start_delay_nanos: AtomicU64::new(0),
+            inflight: Arc::new(Semaphore::new(1)),
+            max_inflight: 1,
+            cookie_jar: Arc::new(SessionCookieJar::default()),
+            cookie_tokens: StdMutex::new(HashMap::new()),
+            sabr_backoff: StdMutex::new(None),
+            sabr_request_timing: StdMutex::new(SabrRequestTiming::default()),
+            youtube_attestation_timing: StdMutex::new(YouTubeAttestationTiming::default()),
+        };
+        let mut url = Url::parse(
+            "https://www.youtube.com/api/stats/watchtime?fmt=398&euri=http%3A%2F%2Fsession1234567890abcdef1234567890.localhost%3A5000%2F"
+        ).unwrap();
+        let (present, rewritten) = rewrite_youtube_stats_euri(&mut url, &session);
+        assert!(present);
+        assert!(rewritten);
+        assert_eq!(
+            url.query_pairs().find(|(name, _)| name == "euri").unwrap().1,
+            "https://www.youtube.com/"
+        );
+        assert_eq!(
+            url.query_pairs().find(|(name, _)| name == "fmt").unwrap().1,
+            "398"
+        );
+
+        let mut external = Url::parse(
+            "https://www.youtube.com/api/stats/qoe?euri=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Dredacted"
+        ).unwrap();
+        let (present, rewritten) = rewrite_youtube_stats_euri(&mut external, &session);
+        assert!(present);
+        assert!(!rewritten);
+    }
+
+    #[test]
+    fn event_targets_redact_url_queries_and_fragments() {
+        assert_eq!(
+            sanitize_event_target(
+                "https://rr2---sn.googlevideo.com/videoplayback?expire=secret&id=secret#fragment".to_owned(),
+                240
+            ),
+            "https://rr2---sn.googlevideo.com/videoplayback"
+        );
+        assert_eq!(
+            sanitize_event_target("/p/session/_/https/www.youtube.com/api/stats/qoe?euri=local#part".to_owned(), 240),
+            "/p/session/_/https/www.youtube.com/api/stats/qoe"
+        );
+        assert_eq!(
+            sanitize_event_target("button.ytp-button.ytp-error-button".to_owned(), 240),
+            "button.ytp-button.ytp-error-button"
         );
     }
 
