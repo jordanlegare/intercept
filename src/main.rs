@@ -1777,6 +1777,32 @@ async fn ajax_passthrough(
                 request_body.len()
             ),
         ).await;
+
+        let cookie_header = session.cookie_jar.request_cookie_header(&upstream_url);
+        let origin_host_out = if request_headers.contains_key(header::ORIGIN) {
+            session.base_url.host_str().unwrap_or("unknown")
+        } else {
+            "absent"
+        };
+        let fetch_site_out = if upstream_url.origin() == session.base_url.origin() {
+            "same-origin"
+        } else {
+            "cross-site"
+        };
+        push_event(
+            session,
+            "youtube_search_header_profile",
+            format!("{upstream_host}{upstream_path}"),
+            format!(
+                "rid={request_id} {}",
+                youtube_search_header_profile(
+                    &request_headers,
+                    cookie_header.as_ref(),
+                    origin_host_out,
+                    fetch_site_out,
+                )
+            ),
+        ).await;
     }
 
     let upstream = tokio::select! {
@@ -3422,6 +3448,48 @@ fn rewrite_csp(policy: &str, session_id: &str) -> String {
     rewritten.join("; ")
 }
 
+// Report only whether the important YouTube request headers are present.
+ // Credential and cookie values are never copied into the event stream.
+fn youtube_search_header_profile(
+    headers: &HeaderMap,
+    cookie_header: Option<&HeaderValue>,
+    origin_host_out: &str,
+    fetch_site_out: &str,
+) -> String {
+    let host_for = |name: &str| {
+        headers.get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| Url::parse(value).ok())
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_else(|| "absent".to_owned())
+    };
+    let user_agent = headers.get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            if value.starts_with("Mozilla/") {
+                "browser"
+            } else if value.starts_with("Intercept/") {
+                "intercept"
+            } else {
+                "other"
+            }
+        })
+        .unwrap_or("intercept_default");
+    let cookie = cookie_header
+        .map(|value| format!("jar({}B)", value.as_bytes().len()))
+        .unwrap_or_else(|| "absent".to_owned());
+    format!(
+        "auth={};cookie={cookie};ua={user_agent};origin={origin_host_out};x_origin={};authuser={};visitor={};yt_client={};yt_version={};bootstrap={};fetch_site={fetch_site_out}",
+        if headers.contains_key(header::AUTHORIZATION) { "present" } else { "absent" },
+        host_for("x-origin"),
+        if headers.contains_key("x-goog-authuser") { "present" } else { "absent" },
+        if headers.contains_key("x-goog-visitor-id") { "present" } else { "absent" },
+        if headers.contains_key("x-youtube-client-name") { "present" } else { "absent" },
+        if headers.contains_key("x-youtube-client-version") { "present" } else { "absent" },
+        if headers.contains_key("x-youtube-bootstrap-logged-in") { "present" } else { "absent" },
+    )
+}
+
 fn request_body_encoding_diagnostic(headers: &HeaderMap, body: &[u8]) -> &'static str {
     let content_encoding = headers.get(header::CONTENT_ENCODING)
         .and_then(|value| value.to_str().ok())
@@ -3749,6 +3817,59 @@ mod tests {
             cookie_jar: Arc::new(SessionCookieJar::default()),
             cookie_tokens: StdMutex::new(HashMap::new()),
         }
+    }
+
+    #[test]
+    fn youtube_search_header_profile_reports_presence_without_secrets() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer secret-token"));
+        headers.insert(header::USER_AGENT, HeaderValue::from_static("Mozilla/5.0 Firefox/153.0"));
+        headers.insert("x-origin", HeaderValue::from_static("https://www.youtube.com"));
+        headers.insert("x-goog-authuser", HeaderValue::from_static("0"));
+        headers.insert("x-goog-visitor-id", HeaderValue::from_static("visitor-secret"));
+        headers.insert("x-youtube-client-name", HeaderValue::from_static("1"));
+        headers.insert("x-youtube-client-version", HeaderValue::from_static("test-version"));
+        headers.insert("x-youtube-bootstrap-logged-in", HeaderValue::from_static("true"));
+        let cookie = HeaderValue::from_static("SID=cookie-secret");
+
+        let detail = youtube_search_header_profile(
+            &headers,
+            Some(&cookie),
+            "www.youtube.com",
+            "same-origin",
+        );
+        assert!(detail.contains("auth=present"));
+        assert!(detail.contains("cookie=jar("));
+        assert!(detail.contains("ua=browser"));
+        assert!(detail.contains("origin=www.youtube.com"));
+        assert!(detail.contains("x_origin=www.youtube.com"));
+        assert!(detail.contains("authuser=present"));
+        assert!(detail.contains("visitor=present"));
+        assert!(detail.contains("yt_client=present"));
+        assert!(detail.contains("yt_version=present"));
+        assert!(detail.contains("bootstrap=present"));
+        assert!(detail.contains("fetch_site=same-origin"));
+        assert!(!detail.contains("secret-token"));
+        assert!(!detail.contains("cookie-secret"));
+        assert!(!detail.contains("visitor-secret"));
+    }
+
+    #[test]
+    fn youtube_search_header_profile_identifies_missing_auth_and_default_user_agent() {
+        let headers = HeaderMap::new();
+        let detail = youtube_search_header_profile(
+            &headers,
+            None,
+            "absent",
+            "cross-site",
+        );
+        assert!(detail.contains("auth=absent"));
+        assert!(detail.contains("cookie=absent"));
+        assert!(detail.contains("ua=intercept_default"));
+        assert!(detail.contains("x_origin=absent"));
+        assert!(detail.contains("authuser=absent"));
+        assert!(detail.contains("visitor=absent"));
+        assert!(detail.contains("fetch_site=cross-site"));
     }
 
     #[test]
