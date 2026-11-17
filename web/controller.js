@@ -905,78 +905,19 @@
         headers["X-Goog-Visitor-Id"] = client.visitorData.trim();
       }
 
-      // Recreate the browser's live InnerTube authentication envelope for
-      // this fallback only. Cookie values and the resulting digest stay in
-      // memory and are never written to the event stream.
-      const youtubeOrigin = (() => {
-        try { return new URL(upstreamOrigin).origin; }
-        catch (_) { return ""; }
-      })();
-      if (youtubeOrigin) {
-        headers["X-Origin"] = youtubeOrigin;
+      // HttpOnly SAPISID cookies are intentionally unavailable to page
+      // JavaScript. Pass only the live dataSyncId to the local proxy so it can
+      // derive Authorization from its own cookie jar without exposing cookies.
+      const dataSyncId = configValue("DATASYNC_ID");
+      if (typeof dataSyncId === "string" && dataSyncId.length > 0
+          && dataSyncId.length <= 512) {
+        headers["X-Intercept-YouTube-DataSync-Id"] = dataSyncId;
       }
-
-      const sessionIndex = configValue("SESSION_INDEX");
-      headers["X-Goog-AuthUser"] = (
-        (typeof sessionIndex === "number" && Number.isFinite(sessionIndex))
-        || (typeof sessionIndex === "string" && /^\d+$/.test(sessionIndex))
-      ) ? String(sessionIndex) : "0";
-      const delegatedSessionId = configValue("DELEGATED_SESSION_ID");
-      if (typeof delegatedSessionId === "string" && delegatedSessionId.trim()) {
-        headers["X-Goog-PageId"] = delegatedSessionId.trim();
-      }
-
-      const readCookie = name => {
-        const prefix = name + "=";
-        for (const part of cookieMirror.split(/;\s*/)) {
-          if (part.startsWith(prefix)) return part.slice(prefix.length);
-        }
-        return "";
-      };
-      let authorizationStatus = "crypto_unavailable";
-      const authorizationSchemes = [];
-      if (youtubeOrigin && window.crypto && window.crypto.subtle
-          && typeof window.crypto.subtle.digest === "function") {
-        const timestamp = String(Math.floor(Date.now() / 1000));
-        const dataSyncId = configValue("DATASYNC_ID");
-        const userSessionId = typeof dataSyncId === "string"
-          ? dataSyncId.split("||")[1] || ""
-          : "";
-        const sessionHashPrefix = userSessionId ? userSessionId + " " : "";
-        const sidCookies = [
-          ["SAPISIDHASH", readCookie("SAPISID") || readCookie("__Secure-3PAPISID")],
-          ["SAPISID1PHASH", readCookie("__Secure-1PAPISID")],
-          ["SAPISID3PHASH", readCookie("__Secure-3PAPISID")]
-        ];
-        try {
-          const generated = [];
-          for (const [scheme, sid] of sidCookies) {
-            if (!sid) continue;
-            const input = sessionHashPrefix + timestamp + " " + sid + " " + youtubeOrigin;
-            const digest = await window.crypto.subtle.digest(
-              "SHA-1",
-              new TextEncoder().encode(input)
-            );
-            const hash = Array.from(new Uint8Array(digest), byte =>
-              byte.toString(16).padStart(2, "0")
-            ).join("");
-            generated.push(scheme + " " + timestamp + "_" + hash
-              + (userSessionId ? "_u" + userSessionId : ""));
-            authorizationSchemes.push(scheme);
-          }
-          if (generated.length) {
-            headers.Authorization = generated.join(" ");
-            authorizationStatus = "generated";
-          } else {
-            authorizationStatus = "cookie_unavailable";
-          }
-        } catch (_) {
-          authorizationStatus = "digest_failed";
-        }
-      }
-      const authDiagnostic = "authorization=" + authorizationStatus
-        + " · schemes=" + (authorizationSchemes.join(",") || "none")
-        + " · origin_host=" + (youtubeOrigin ? new URL(youtubeOrigin).host : "absent");
+      const authDiagnostic = "authorization=deferred_to_proxy"
+        + " · data_sync_id=" + (
+          typeof dataSyncId === "string" && dataSyncId.length > 0
+            ? "present" : "absent"
+        );
 
       const keys = Object.keys(payload);
       const clientName = typeof client.clientName === "string"
