@@ -1925,20 +1925,17 @@ fn scan_sabr_streamer_context(
 ) -> Result<(), SabrRequestParseError> {
     let mut cursor = 0;
     while let Some(field) = protobuf_next_field(input, &mut cursor)? {
-        match field.number {
-            1..=3 => {
-                if field.wire_type != 2 {
-                    return Err(SabrRequestParseError::UnsupportedWireType);
-                }
-                let payload_len = field.payload.map(|payload| payload.len()).unwrap_or_default();
-                match field.number {
-                    1 => metadata.client_info_present = true,
-                    2 => metadata.po_token_bytes = Some(payload_len),
-                    3 => metadata.playback_cookie_bytes = Some(payload_len),
-                    _ => unreachable!(),
-                }
+        if let 1..=3 = field.number {
+            if field.wire_type != 2 {
+                return Err(SabrRequestParseError::UnsupportedWireType);
             }
-            _ => {}
+            let payload_len = field.payload.map(|payload| payload.len()).unwrap_or_default();
+            match field.number {
+                1 => metadata.client_info_present = true,
+                2 => metadata.po_token_bytes = Some(payload_len),
+                3 => metadata.playback_cookie_bytes = Some(payload_len),
+                _ => unreachable!(),
+            }
         }
     }
     Ok(())
