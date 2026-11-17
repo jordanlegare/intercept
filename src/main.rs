@@ -1694,12 +1694,16 @@ async fn ajax_passthrough(
     let initial_host = upstream_url.host_str().unwrap_or_default().to_owned();
     let is_youtube_inner_tube = (upstream_path == "/youtubei/v1/search"
         || upstream_path == "/youtubei/v1/player"
-        || upstream_path == "/youtubei/v1/get_watch")
+        || upstream_path == "/youtubei/v1/get_watch"
+        || upstream_path == "/youtubei/v1/next"
+        || upstream_path == "/youtubei/v1/feedback")
         && (initial_host.eq_ignore_ascii_case("youtube.com")
             || initial_host.to_ascii_lowercase().ends_with(".youtube.com"));
     let is_youtube_search = upstream_path == "/youtubei/v1/search" && is_youtube_inner_tube;
     let is_youtube_player = upstream_path == "/youtubei/v1/player" && is_youtube_inner_tube;
     let is_youtube_get_watch = upstream_path == "/youtubei/v1/get_watch" && is_youtube_inner_tube;
+    let is_youtube_next = upstream_path == "/youtubei/v1/next" && is_youtube_inner_tube;
+    let is_youtube_feedback = upstream_path == "/youtubei/v1/feedback" && is_youtube_inner_tube;
     if is_youtube_inner_tube && initial_host.eq_ignore_ascii_case("youtube.com") {
         let x_origin_host = request_headers.get("x-origin")
             .and_then(normalized_youtube_origin)
@@ -1929,6 +1933,60 @@ async fn ajax_passthrough(
             session,
             "youtube_get_watch_header_profile",
             format!("{upstream_host}{upstream_path}"),
+            format!(
+                "rid={request_id} auth_source={youtube_auth_source} {}",
+                youtube_search_header_profile(
+                    &request_headers,
+                    youtube_cookie_header.as_ref(),
+                    &origin_host_out,
+                    "same-origin",
+                )
+            ),
+        ).await;
+    }
+
+    for (endpoint, enabled, label) in [
+        ("/youtubei/v1/next", is_youtube_next, "next"),
+        ("/youtubei/v1/feedback", is_youtube_feedback, "feedback"),
+    ] {
+        if !enabled { continue; }
+        let content_encoding_out = request_headers.get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 32))
+            .unwrap_or_else(|| "absent".to_owned());
+        let content_type_out = request_headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 80))
+            .unwrap_or_else(|| "absent".to_owned());
+        let body_encoding_out = request_body_encoding_diagnostic(&request_headers, &request_body);
+        let json_shape_out = youtube_search_json_shape_diagnostic(&request_body);
+        push_event(
+            session,
+            if label == "next" { "youtube_next_upstream_dispatch" } else { "youtube_feedback_upstream_dispatch" },
+            format!("{upstream_host}{endpoint}"),
+            format!(
+                "rid={request_id} method={request_method} body_bytes={} body_encoding={body_encoding_out} content_encoding={content_encoding_out} content_type={content_type_out} json_shape={json_shape_out}",
+                request_body.len()
+            ),
+        ).await;
+        push_event(
+            session,
+            if label == "next" { "youtube_next_cookie_profile" } else { "youtube_feedback_cookie_profile" },
+            format!("{upstream_host}{endpoint}"),
+            format!(
+                "rid={request_id} host={upstream_host} {}",
+                youtube_search_cookie_profile(youtube_cookie_header.as_ref())
+            ),
+        ).await;
+        let origin_host_out = request_headers.get("x-origin")
+            .and_then(normalized_youtube_origin)
+            .and_then(|value| Url::parse(&value).ok())
+            .and_then(|value| value.host_str().map(str::to_owned))
+            .unwrap_or_else(|| upstream_host.clone());
+        push_event(
+            session,
+            if label == "next" { "youtube_next_header_profile" } else { "youtube_feedback_header_profile" },
+            format!("{upstream_host}{endpoint}"),
             format!(
                 "rid={request_id} auth_source={youtube_auth_source} {}",
                 youtube_search_header_profile(
