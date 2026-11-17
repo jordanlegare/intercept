@@ -163,6 +163,7 @@
         "youtube_attestation_resource",
         "youtube_player_state",
         "youtube_player_worker",
+        "youtube_player_runtime",
         "youtube_sabr_request_gap",
         "youtube_sabr_response_stream_complete",
         "youtube_sabr_policy_diagnostic",
