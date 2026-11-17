@@ -1875,7 +1875,7 @@ async fn ajax_passthrough(
         origin.and_then(|value| HeaderValue::from_str(&value).ok())
     });
     let outbound_referer = request_headers.get(header::REFERER)
-        .and_then(|value| rewrite_referer(value, session));
+        .and_then(|value| rewrite_referer(value, &session));
     let outbound_fetch_site = outbound_fetch_site_header(
         request_headers.contains_key("sec-fetch-site"),
         is_youtube_inner_tube,
@@ -2499,7 +2499,7 @@ async fn ajax_passthrough(
         String::new()
     };
     push_event_with_error_body(
-        session,
+        &session,
         "ajax_response",
         format!("{upstream_host}{upstream_path}"),
         format!(
