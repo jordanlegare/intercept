@@ -4652,7 +4652,7 @@ fn rewrite_worker_javascript(
             const mime=String(value).split(";",1)[0].trim().toLowerCase();
             return /^[a-z0-9.+_-]+\/[a-z0-9.+_-]+$/.test(mime)?mime:"other";
           }}
-          if(mode==="length")return /^\\d{{1,15}}$/.test(String(value).trim())?String(value).trim():"absent";
+          if(mode==="length")return /^\d{{1,15}}$/.test(String(value).trim())?String(value).trim():"absent";
           const encoding=String(value).trim().toLowerCase();
           return /^[a-z0-9._-]{{1,16}}$/.test(encoding)?encoding:"other";
         }}catch(_e){{return "absent"}}
