@@ -47,6 +47,7 @@
       event.kind === "youtube_attestation_rpc"
       || event.kind === "youtube_attestation_resource"
       || event.kind === "youtube_player_state"
+      || event.kind === "youtube_player_watchdog"
       || event.kind === "youtube_player_worker"
       || event.kind === "youtube_player_runtime"
       || event.kind === "youtube_sabr_request_gap"
@@ -65,7 +66,8 @@
   function record(kind, target, detail) {
     if (INTERNAL_AUTHORITY_EVENTS.has(kind)) return;
     const eventKind = String(kind).slice(0, 80);
-    const detailLimit = eventKind === "youtube_player_state" ? 640 : 300;
+    const detailLimit = eventKind === "youtube_player_watchdog" ? 900
+      : eventKind === "youtube_player_state" ? 640 : 300;
     eventBuffer.push({
       kind: eventKind,
       target: String(target || "").slice(0, 240),
@@ -1021,7 +1023,12 @@
     if (upstreamHost !== "youtube.com" && !upstreamHost.endsWith(".youtube.com")) return;
 
     const observedVideos = new WeakSet();
+    const observedVideoElements = new Set();
     const lastSampleAt = new WeakMap();
+    const watchStates = new WeakMap();
+    const WATCHDOG_INTERVAL_MS = 1000;
+    const WATCHDOG_STALL_MS = 4500;
+    const WATCHDOG_HEARTBEAT_MS = 12000;
     const eventNames = [
       "loadstart", "loadedmetadata", "loadeddata", "canplay", "canplaythrough",
       "play", "playing", "waiting", "stalled", "pause", "ended", "error",
@@ -1109,12 +1116,153 @@
         + " media_error_code=" + (Number.isFinite(errorCode) && errorCode > 0 ? errorCode : "none");
     }
 
+    function getWatchState(video, now) {
+      let state = watchStates.get(video);
+      if (!state) {
+        const currentTime = Number(video.currentTime);
+        state = {
+          lastCurrentTime: Number.isFinite(currentTime) ? currentTime : 0,
+          lastAdvanceAt: now,
+          lastHeartbeatAt: now,
+          playbackStarted: false,
+          stallStartedAt: null
+        };
+        watchStates.set(video, state);
+      }
+      return state;
+    }
+
+    function bufferedAheadSeconds(video) {
+      const currentTime = Number(video.currentTime);
+      if (!Number.isFinite(currentTime)) return null;
+      try {
+        const ranges = video.buffered;
+        for (let index = 0; index < ranges.length; index++) {
+          const start = ranges.start(index);
+          const end = ranges.end(index);
+          if (start <= currentTime && end >= currentTime) {
+            return Math.max(0, end - currentTime);
+          }
+        }
+      } catch (_) {}
+      return null;
+    }
+
+    function classifyClockStall(video) {
+      if (document.visibilityState === "hidden") return "background_tab";
+      if (Number(video.networkState) === 3) return "no_source";
+      if (!video.currentSrc && !video.hasAttribute("src")
+          && video.srcObject === null && video.querySelectorAll("source").length === 0) {
+        return "source_unselected";
+      }
+      if (Number(video.readyState) < 3) return "insufficient_media_data";
+      const bufferedAhead = bufferedAheadSeconds(video);
+      if (bufferedAhead !== null && bufferedAhead <= 0.25) return "buffer_empty";
+      return "clock_stopped_with_buffer";
+    }
+
+    function recordWatchdog(video, eventName, now, state, stalledForMs) {
+      const detail = snapshot(video, eventName)
+        + " last_advance_ago_ms=" + Math.max(0, Math.round(now - state.lastAdvanceAt))
+        + " stalled_for_ms=" + Math.max(0, Math.round(stalledForMs || 0))
+        + " visibility_state=" + (document.visibilityState || "unknown")
+        + " stall_cause=" + (state.stallStartedAt === null ? "none" : classifyClockStall(video));
+      record("youtube_player_watchdog", "video", detail);
+    }
+
+    function pollPlaybackClock() {
+      const now = performance.now();
+      for (const video of observedVideoElements) {
+        if (!video.isConnected) {
+          observedVideoElements.delete(video);
+          continue;
+        }
+        const state = getWatchState(video, now);
+        const currentTime = Number(video.currentTime);
+        if (!Number.isFinite(currentTime)) continue;
+
+        if (video.seeking || video.paused || video.ended || Number(video.playbackRate) === 0) {
+          state.lastCurrentTime = currentTime;
+          state.lastAdvanceAt = now;
+          state.playbackStarted = !video.paused && !video.ended && !video.seeking;
+          state.stallStartedAt = null;
+          continue;
+        }
+
+        if (!state.playbackStarted && currentTime > 0.05) {
+          state.playbackStarted = true;
+          state.lastAdvanceAt = now;
+          state.lastCurrentTime = currentTime;
+        }
+        if (!state.playbackStarted) continue;
+
+        const delta = currentTime - state.lastCurrentTime;
+        if (delta >= 0.04) {
+          state.lastCurrentTime = currentTime;
+          state.lastAdvanceAt = now;
+          if (state.stallStartedAt !== null) {
+            recordWatchdog(video, "clock_resumed", now, state, now - state.stallStartedAt);
+            state.stallStartedAt = null;
+            state.lastHeartbeatAt = now;
+          }
+        } else if (delta < -0.25) {
+          // A seek or source reset moved the playhead backwards; start a new baseline.
+          state.lastCurrentTime = currentTime;
+          state.lastAdvanceAt = now;
+          state.stallStartedAt = null;
+        } else {
+          state.lastCurrentTime = currentTime;
+        }
+
+        const noAdvanceMs = now - state.lastAdvanceAt;
+        if (state.stallStartedAt === null && noAdvanceMs >= WATCHDOG_STALL_MS) {
+          state.stallStartedAt = state.lastAdvanceAt;
+          recordWatchdog(video, "clock_stalled", now, state, noAdvanceMs);
+          state.lastHeartbeatAt = now;
+        } else if (now - state.lastHeartbeatAt >= WATCHDOG_HEARTBEAT_MS) {
+          const eventName = state.stallStartedAt === null ? "heartbeat" : "stalled_heartbeat";
+          recordWatchdog(
+            video,
+            eventName,
+            now,
+            state,
+            state.stallStartedAt === null ? 0 : now - state.stallStartedAt
+          );
+          state.lastHeartbeatAt = now;
+        }
+      }
+    }
+
     function observeVideo(video) {
-      if (!(video instanceof HTMLVideoElement) || observedVideos.has(video)) return;
+      if (!(video instanceof HTMLVideoElement)) return;
+      observedVideoElements.add(video);
+      const now = performance.now();
+      const state = getWatchState(video, now);
+      if (observedVideos.has(video)) return;
       observedVideos.add(video);
       for (const eventName of eventNames) {
         nativeAdd.call(video, eventName, () => {
-          const now = performance.now();
+          const eventAt = performance.now();
+          if (eventName === "playing") {
+            state.playbackStarted = true;
+            state.lastCurrentTime = Number(video.currentTime) || 0;
+            state.lastAdvanceAt = eventAt;
+            state.lastHeartbeatAt = eventAt;
+            state.stallStartedAt = null;
+          } else if (eventName === "play" && !video.paused) {
+            state.playbackStarted = true;
+            state.lastCurrentTime = Number(video.currentTime) || 0;
+            state.lastAdvanceAt = eventAt;
+          } else if (eventName === "seeking" || eventName === "seeked"
+              || eventName === "pause" || eventName === "ended"
+              || eventName === "emptied" || eventName === "error") {
+            state.lastCurrentTime = Number(video.currentTime) || 0;
+            state.lastAdvanceAt = eventAt;
+            state.stallStartedAt = null;
+            if (video.paused || video.ended || eventName === "emptied" || eventName === "error") {
+              state.playbackStarted = false;
+            }
+          }
           if (sampledEvents.has(eventName)) {
             let samples = lastSampleAt.get(video);
             if (!samples) {
@@ -1140,6 +1288,7 @@
     }
 
     observeTree(document);
+    window.setInterval(pollPlaybackClock, WATCHDOG_INTERVAL_MS);
     try {
       const observer = new MutationObserver(records => {
         for (const mutation of records) {
