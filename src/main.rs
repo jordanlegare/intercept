@@ -1171,7 +1171,7 @@ async fn create_session(
         max_inflight: state.max_inflight_per_session,
         cookie_jar,
         cookie_tokens: StdMutex::new(HashMap::new()),
-            sabr_backoff: StdMutex::new(None),
+        sabr_backoff: StdMutex::new(None),
     });
 
     // Preserve the submitted destination path, query, and browser-side fragment
@@ -1859,7 +1859,7 @@ fn read_protobuf_varint(
         if index == 9 && byte > 1 {
             return Err(SabrRequestParseError::Malformed);
         }
-        value |= u64::from(byte & 0x7f) << (index * 7);
+        value |= u64::from(byte & 0x7f) << ((index as u32) * 7);
         if byte & 0x80 == 0 {
             return Ok(value);
         }
@@ -6984,7 +6984,7 @@ mod ump_stream_diagnostics_tests {
     #[test]
     fn sabr_request_scanner_reports_truncated_nested_fields() {
         // StreamerContext length is complete, but poToken claims five bytes and has one.
-        let body = [0x9a, 0x01, 0x05, 0x12, 0x05, 0xaa];
+        let body = [0x9a, 0x01, 0x03, 0x12, 0x05, 0xaa];
         let metadata = decode_sabr_request_metadata(&body, None);
         assert_eq!(metadata.parse_state, Some(SabrRequestParseState::Truncated));
     }
