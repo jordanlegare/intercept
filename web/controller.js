@@ -1205,7 +1205,7 @@
           if (state.stallStartedAt !== null) {
             recordWatchdog(video, "clock_resumed", now, state, now - state.stallStartedAt);
             state.stallStartedAt = null;
-          state.stallCause = null;
+            state.stallCause = null;
             state.lastHeartbeatAt = now;
           }
         } else if (delta < -0.25) {
@@ -1254,7 +1254,7 @@
             state.lastAdvanceAt = eventAt;
             state.lastHeartbeatAt = eventAt;
             state.stallStartedAt = null;
-          state.stallCause = null;
+            state.stallCause = null;
           } else if (eventName === "play" && !video.paused) {
             state.playbackStarted = true;
             state.lastCurrentTime = Number(video.currentTime) || 0;
@@ -1265,7 +1265,7 @@
             state.lastCurrentTime = Number(video.currentTime) || 0;
             state.lastAdvanceAt = eventAt;
             state.stallStartedAt = null;
-          state.stallCause = null;
+            state.stallCause = null;
             if (video.paused || video.ended || eventName === "emptied" || eventName === "error") {
               state.playbackStarted = false;
             }
