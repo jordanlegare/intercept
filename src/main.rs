@@ -2459,6 +2459,30 @@ fn is_youtube_sabr_request(url: &Url) -> bool {
         && url.query_pairs().any(|(name, _)| name == "sabr")
 }
 
+fn youtube_attestation_rpc_operation(url: &Url) -> Option<&'static str> {
+    if !url.host_str().is_some_and(|host| host.eq_ignore_ascii_case("jnn-pa.googleapis.com")) {
+        return None;
+    }
+
+    match url.path() {
+        "/$rpc/google.internal.waa.v1.Waa/Create" => Some("Create"),
+        "/$rpc/google.internal.waa.v1.Waa/GenerateIT" => Some("GenerateIT"),
+        _ => None,
+    }
+}
+
+fn youtube_attestation_transport(headers: &HeaderMap) -> &'static str {
+    match headers.get("x-intercept-transport-diagnostic")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some("window-fetch") => "window-fetch",
+        Some("window-xhr") => "window-xhr",
+        Some("worker-fetch") => "worker-fetch",
+        Some("worker-xhr") => "worker-xhr",
+        _ => "unreported",
+    }
+}
+
 fn is_ajax_request(headers: &HeaderMap) -> bool {
     let value_is = |name: &str, expected: &str| {
         headers.get(name)
@@ -2487,6 +2511,7 @@ async fn ajax_passthrough(
     context: ProxyRequestContext,
 ) -> Response<Body> {
     let ProxyRequestContext { request_id, started_at: request_started, permit: request_permit } = context;
+    let attestation_operation = youtube_attestation_rpc_operation(&upstream_url);
     let is_sabr_request = is_youtube_sabr_request(&upstream_url);
     let sabr_request_metadata = if is_sabr_request {
         let content_encoding = request_headers.get(header::CONTENT_ENCODING)
@@ -2592,6 +2617,17 @@ async fn ajax_passthrough(
         result = client_for(&session, &upstream_url) => match result {
             Ok(client) => client,
             Err((status, message)) => {
+                if let Some(operation) = attestation_operation {
+                    push_event(
+                        &session,
+                        "youtube_attestation_rpc",
+                        format!("{upstream_host}{upstream_path}"),
+                        format!(
+                            "rid={request_id} phase=upstream_error operation={operation} stage=client_init status={}",
+                            status.as_u16()
+                        ),
+                    ).await;
+                }
                 push_event(
             &session,
                     "ajax_error",
@@ -3010,6 +3046,17 @@ async fn ajax_passthrough(
             } else {
                 "request"
             };
+            if let Some(operation) = attestation_operation {
+                push_event(
+                    &session,
+                    "youtube_attestation_rpc",
+                    format!("{upstream_host}{upstream_path}"),
+                    format!(
+                        "rid={request_id} phase=upstream_error operation={operation} stage=send error_kind={failure_kind} elapsed_ms={}",
+                        request_started.elapsed().as_millis()
+                    ),
+                ).await;
+            }
             // Signed media URLs carry expiring authorization in their query.
             // Strip the URL before logging and report only its host/path.
             let safe_error = error.without_url().to_string();
@@ -3043,6 +3090,34 @@ async fn ajax_passthrough(
     let upstream_headers = upstream.headers().clone();
     let upstream_set_cookie = upstream_headers.contains_key(header::SET_COOKIE);
     let upstream_elapsed_ms = request_started.elapsed().as_millis();
+
+    if let Some(operation) = attestation_operation {
+        let content_type = upstream_headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 64))
+            .unwrap_or_else(|| "absent".to_owned());
+        let content_length = upstream_headers.get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 24))
+            .unwrap_or_else(|| "absent".to_owned());
+        let content_encoding = upstream_headers.get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 24))
+            .unwrap_or_else(|| "absent".to_owned());
+        let server = upstream_headers.get(header::SERVER)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 40))
+            .unwrap_or_else(|| "absent".to_owned());
+        push_event(
+            &session,
+            "youtube_attestation_rpc",
+            format!("{upstream_host}{upstream_path}"),
+            format!(
+                "rid={request_id} phase=upstream_response operation={operation} status={} elapsed_ms={upstream_elapsed_ms} ct={content_type} cl={content_length} ce={content_encoding} server={server}",
+                status.as_u16()
+            ),
+        ).await;
+    }
 
     if is_youtube_sabr_request(&upstream_url) {
         let content_type = upstream_headers.get(header::CONTENT_TYPE)
@@ -3543,7 +3618,11 @@ async fn proxy(
     }
 
     let (parts, body) = request.into_parts();
-    let ajax_request = is_ajax_request(&parts.headers);
+    // WAA RPCs are opaque application requests even when a browser context
+    // omits Fetch Metadata or the controller's AJAX marker. Keep them on the
+    // streaming passthrough path and diagnose them at the proxy boundary.
+    let attestation_operation = youtube_attestation_rpc_operation(&upstream_url);
+    let ajax_request = is_ajax_request(&parts.headers) || attestation_operation.is_some();
     let input_trace = input_event_trace(&parts.headers);
     let worker_script = parts.headers.get("sec-fetch-dest")
         .and_then(|value| value.to_str().ok())
@@ -3557,6 +3636,27 @@ async fn proxy(
             Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "Request body exceeds the 8 MiB limit"),
         }
     };
+    if let Some(operation) = attestation_operation {
+        let content_type = parts.headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 64))
+            .unwrap_or_else(|| "absent".to_owned());
+        let content_encoding = parts.headers.get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 24))
+            .unwrap_or_else(|| "absent".to_owned());
+        push_event(
+            &session,
+            "youtube_attestation_rpc",
+            format!("{}{}", upstream_url.host_str().unwrap_or_default(), upstream_url.path()),
+            format!(
+                "rid={request_id} phase=proxy_ingress operation={operation} method={} body_bytes={} ct={content_type} ce={content_encoding} transport={}",
+                parts.method,
+                body.len(),
+                youtube_attestation_transport(&parts.headers),
+            ),
+        ).await;
+    }
     if is_youtube_sabr_request(&upstream_url) {
         let declared_length = parts.headers.get(header::CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
@@ -5424,6 +5524,27 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn recognizes_youtube_waa_create_and_generate_it_rpc_paths() {
+        let create = Url::parse(
+            "https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/Create?key=redacted&alt=proto"
+        ).unwrap();
+        let generate = Url::parse(
+            "https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/GenerateIT?alt=proto"
+        ).unwrap();
+        let wrong_host = Url::parse(
+            "https://example.com/$rpc/google.internal.waa.v1.Waa/Create"
+        ).unwrap();
+        let wrong_path = Url::parse(
+            "https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/Other"
+        ).unwrap();
+
+        assert_eq!(youtube_attestation_rpc_operation(&create), Some("Create"));
+        assert_eq!(youtube_attestation_rpc_operation(&generate), Some("GenerateIT"));
+        assert_eq!(youtube_attestation_rpc_operation(&wrong_host), None);
+        assert_eq!(youtube_attestation_rpc_operation(&wrong_path), None);
+    }
 
     #[test]
     fn upstream_client_cache_evicts_least_recently_used_origin() {
