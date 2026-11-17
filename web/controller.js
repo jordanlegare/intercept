@@ -41,14 +41,19 @@
     "controller_loaded"
   ]);
 
-  function isYouTubeAttestationEvent(event) {
-    return event && (event.kind === "youtube_attestation_rpc"
-      || event.kind === "youtube_attestation_resource");
+  function isPriorityYouTubeDiagnosticEvent(event) {
+    return event && (
+      event.kind === "youtube_attestation_rpc"
+      || event.kind === "youtube_attestation_resource"
+      || event.kind === "youtube_player_state"
+      || event.kind === "youtube_sabr_request_gap"
+      || event.kind === "youtube_sabr_response_stream_complete"
+    );
   }
 
   function trimEventBuffer() {
-    while (eventBuffer.length > 120) {
-      const discardIndex = eventBuffer.findIndex(event => !isYouTubeAttestationEvent(event));
+    while (eventBuffer.length > 160) {
+      const discardIndex = eventBuffer.findIndex(event => !isPriorityYouTubeDiagnosticEvent(event));
       eventBuffer.splice(discardIndex >= 0 ? discardIndex : 0, 1);
     }
   }
@@ -975,6 +980,111 @@
   }
 
   observeYouTubeAttestationResources();
+
+  // Observe the actual HTMLMediaElement state on YouTube. This is deliberately
+  // metadata-only: never read currentSrc/src, media bytes, captions, or page data.
+  function observeYouTubePlayerState() {
+    let upstreamHost = "";
+    try { upstreamHost = new URL(upstreamOrigin).hostname.toLowerCase(); } catch (_) {}
+    if (upstreamHost !== "youtube.com" && !upstreamHost.endsWith(".youtube.com")) return;
+
+    const observedVideos = new WeakSet();
+    const lastSampleAt = new WeakMap();
+    const eventNames = [
+      "loadstart", "loadedmetadata", "loadeddata", "canplay", "canplaythrough",
+      "play", "playing", "waiting", "stalled", "pause", "ended", "error",
+      "seeking", "seeked", "emptied", "durationchange", "timeupdate", "progress"
+    ];
+    const sampledEvents = new Set(["timeupdate", "progress"]);
+    const sampleIntervalMs = 4000;
+
+    function metric(value, digits = 1) {
+      const number = Number(value);
+      return Number.isFinite(number) ? String(Number(number.toFixed(digits))) : "unknown";
+    }
+
+    function snapshot(video, eventName) {
+      const currentTime = Number(video.currentTime);
+      const duration = Number(video.duration);
+      const errorCode = video.error && Number(video.error.code);
+      let bufferedCount = 0;
+      let currentBufferedEnd = "none";
+      let furthestBufferedEnd = "none";
+      try {
+        const ranges = video.buffered;
+        bufferedCount = Math.min(Number(ranges.length) || 0, 64);
+        let furthest = -1;
+        for (let index = 0; index < bufferedCount; index++) {
+          const start = ranges.start(index);
+          const end = ranges.end(index);
+          if (Number.isFinite(currentTime) && start <= currentTime && end >= currentTime) {
+            currentBufferedEnd = metric(end);
+          }
+          if (end > furthest) furthest = end;
+        }
+        if (furthest >= 0) furthestBufferedEnd = metric(furthest);
+      } catch (_) {}
+
+      return "event=" + eventName
+        + " current_time=" + metric(currentTime)
+        + " duration=" + metric(duration)
+        + " ready_state=" + (Number(video.readyState) || 0)
+        + " network_state=" + (Number(video.networkState) || 0)
+        + " paused=" + Boolean(video.paused)
+        + " ended=" + Boolean(video.ended)
+        + " seeking=" + Boolean(video.seeking)
+        + " playback_rate=" + metric(video.playbackRate, 2)
+        + " video_size=" + (Number(video.videoWidth) || 0) + "x" + (Number(video.videoHeight) || 0)
+        + " buffered_ranges=" + bufferedCount
+        + " current_buffer_end=" + currentBufferedEnd
+        + " furthest_buffer_end=" + furthestBufferedEnd
+        + " media_error_code=" + (Number.isFinite(errorCode) && errorCode > 0 ? errorCode : "none");
+    }
+
+    function observeVideo(video) {
+      if (!(video instanceof HTMLVideoElement) || observedVideos.has(video)) return;
+      observedVideos.add(video);
+      for (const eventName of eventNames) {
+        nativeAdd.call(video, eventName, () => {
+          const now = performance.now();
+          if (sampledEvents.has(eventName)) {
+            let samples = lastSampleAt.get(video);
+            if (!samples) {
+              samples = new Map();
+              lastSampleAt.set(video, samples);
+            }
+            const previous = samples.get(eventName);
+            if (previous !== undefined && now - previous < sampleIntervalMs) return;
+            samples.set(eventName, now);
+          }
+          record("youtube_player_state", "video", snapshot(video, eventName));
+        });
+      }
+      record("youtube_player_state", "video", snapshot(video, "observed"));
+    }
+
+    function observeTree(root) {
+      if (!root) return;
+      if (root instanceof HTMLVideoElement) observeVideo(root);
+      if (typeof root.querySelectorAll === "function") {
+        for (const video of root.querySelectorAll("video")) observeVideo(video);
+      }
+    }
+
+    observeTree(document);
+    try {
+      const observer = new MutationObserver(records => {
+        for (const mutation of records) {
+          for (const node of mutation.addedNodes) observeTree(node);
+        }
+      });
+      observer.observe(document.documentElement || document, {childList: true, subtree: true});
+    } catch (_) {
+      // Video lifecycle diagnostics are optional and must not affect playback.
+    }
+  }
+
+  observeYouTubePlayerState();
 
   function sanitizedYouTubeFetchCallsite() {
     try {
