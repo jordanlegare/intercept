@@ -65,9 +65,11 @@
 
   function sanitizeEventTarget(target) {
     const value = String(target || "");
+    const slashIndex = value.indexOf("/");
+    const firstSegment = slashIndex > 0 ? value.slice(0, slashIndex) : "";
     const urlLike = value.startsWith("/")
       || value.includes("://")
-      || /^[a-z0-9.-]+(?::\\d+)?\\//i.test(value);
+      || (slashIndex > 0 && firstSegment.includes("."));
     return urlLike ? value.split(/[?#]/, 1)[0] : value;
   }
 
