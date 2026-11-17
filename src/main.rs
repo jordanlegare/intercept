@@ -2040,6 +2040,59 @@ struct YouTubeAttestationResponseMetadata {
     content_encoding: String,
 }
 
+#[derive(Clone, Debug, Default)]
+struct YouTubeSabrAttestationRequestSnapshot {
+    operation: Option<&'static str>,
+    correlation_id: Option<String>,
+    response_status: Option<u16>,
+    response_age_ms: Option<u64>,
+    po_present: bool,
+    pc_present: bool,
+}
+
+// Observational age buckets for comparing traces, not token expiration limits.
+fn youtube_attestation_age_band(age_ms: Option<u64>) -> &'static str {
+    match age_ms {
+        Some(age) if age < 30_000 => "recent",
+        Some(age) if age < 60_000 => "aging",
+        Some(_) => "old",
+        None => "unobserved",
+    }
+}
+
+#[derive(Clone)]
+struct YouTubeStatus3Observation {
+    request_id: String,
+    waa_id: Option<String>,
+    waa_age_ms: Option<u64>,
+    observed_at: Instant,
+}
+
+#[derive(Clone)]
+struct YouTubeGenerateItAfterStatus3Observation {
+    status3_request_id: String,
+    status3_waa_id: Option<String>,
+    status3_waa_age_ms: Option<u64>,
+    correlation_id: Option<String>,
+    correlation_changed: bool,
+    observed_at: Instant,
+}
+
+struct YouTubeSabrMediaAfterStatus3Observation {
+    status3_request_id: String,
+    status3_waa_id: Option<String>,
+    status3_waa_age_ms: Option<u64>,
+    current_waa_id: Option<String>,
+    current_waa_age_ms: Option<u64>,
+    new_generate_it_after_status3: bool,
+    generate_it_correlation_changed: Option<bool>,
+    elapsed_since_status3_ms: u64,
+    media_payload_bytes: u64,
+    protection_status: i32,
+    po_present: bool,
+    pc_present: bool,
+}
+
 #[derive(Default)]
 struct YouTubeAttestationTiming {
     proxy_request_count: u64,
@@ -2059,6 +2112,8 @@ struct YouTubeAttestationTiming {
     last_rpc_response_content_length: Option<String>,
     last_rpc_response_content_encoding: Option<String>,
     last_rpc_response_at: Option<Instant>,
+    last_status3_observation: Option<YouTubeStatus3Observation>,
+    last_generate_it_after_status3: Option<YouTubeGenerateItAfterStatus3Observation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2123,7 +2178,29 @@ impl YouTubeAttestationTiming {
         status: u16,
         response_metadata: YouTubeAttestationResponseMetadata,
         observed_at: Instant,
-    ) {
+    ) -> Option<YouTubeGenerateItAfterStatus3Observation> {
+        let generate_it_after_status3 = if operation == "GenerateIT" && status == 200 {
+            self.last_status3_observation.as_ref().and_then(|status3| {
+                (observed_at >= status3.observed_at).then(|| {
+                    let correlation_id = correlation_id.map(str::to_owned);
+                    YouTubeGenerateItAfterStatus3Observation {
+                        status3_request_id: status3.request_id.clone(),
+                        status3_waa_id: status3.waa_id.clone(),
+                        status3_waa_age_ms: status3.waa_age_ms,
+                        correlation_changed: correlation_id.is_some()
+                            && correlation_id != status3.waa_id,
+                        correlation_id,
+                        observed_at,
+                    }
+                })
+            })
+        } else {
+            None
+        };
+
+        if let Some(observation) = generate_it_after_status3.as_ref() {
+            self.last_generate_it_after_status3 = Some(observation.clone());
+        }
         self.last_rpc_response_operation = Some(operation);
         self.last_rpc_response_correlation_id = correlation_id.map(str::to_owned);
         self.last_rpc_response_status = Some(status);
@@ -2131,6 +2208,57 @@ impl YouTubeAttestationTiming {
         self.last_rpc_response_content_length = Some(response_metadata.content_length);
         self.last_rpc_response_content_encoding = Some(response_metadata.content_encoding);
         self.last_rpc_response_at = Some(observed_at);
+        generate_it_after_status3
+    }
+
+    fn observe_sabr_status3(
+        &mut self,
+        request_id: &str,
+        request: &YouTubeSabrAttestationRequestSnapshot,
+        observed_at: Instant,
+    ) {
+        self.last_status3_observation = Some(YouTubeStatus3Observation {
+            request_id: request_id.to_owned(),
+            waa_id: request.correlation_id.clone(),
+            waa_age_ms: request.response_age_ms,
+            observed_at,
+        });
+        // A later status-3 starts a new observation cycle.
+        self.last_generate_it_after_status3 = None;
+    }
+
+    fn observe_sabr_media_after_status3(
+        &self,
+        request: &YouTubeSabrAttestationRequestSnapshot,
+        protection_status: i32,
+        media_payload_bytes: u64,
+        observed_at: Instant,
+    ) -> Option<YouTubeSabrMediaAfterStatus3Observation> {
+        if media_payload_bytes == 0 || !matches!(protection_status, 1 | 2) {
+            return None;
+        }
+        let status3 = self.last_status3_observation.as_ref()?;
+        let refreshed = self.last_generate_it_after_status3.as_ref().filter(|refresh| {
+            request.response_status == Some(200)
+                && request.correlation_id.is_some()
+                && request.correlation_id == refresh.correlation_id
+        });
+        Some(YouTubeSabrMediaAfterStatus3Observation {
+            status3_request_id: status3.request_id.clone(),
+            status3_waa_id: status3.waa_id.clone(),
+            status3_waa_age_ms: status3.waa_age_ms,
+            current_waa_id: request.correlation_id.clone(),
+            current_waa_age_ms: request.response_age_ms,
+            new_generate_it_after_status3: refreshed.is_some(),
+            generate_it_correlation_changed: refreshed.map(|value| value.correlation_changed),
+            elapsed_since_status3_ms: duration_millis(
+                observed_at.saturating_duration_since(status3.observed_at)
+            ),
+            media_payload_bytes,
+            protection_status,
+            po_present: request.po_present,
+            pc_present: request.pc_present,
+        })
     }
 
     fn snapshot(&self, observed_at: Instant) -> YouTubeAttestationTimingSnapshot {
@@ -3323,6 +3451,7 @@ async fn ajax_passthrough(
             .unwrap_or_else(|error| error.into_inner())
             .take()
             .map(|window| observe_sabr_backoff(window, Instant::now()));
+        let mut sabr_attestation_request = None;
         if let Some(metadata) = sabr_request_metadata {
             // Snapshot the latest WAA upstream response at the time this SABR
             // request arrives. Only scalar metadata and the opaque RPC ID are
@@ -3334,19 +3463,29 @@ async fn ajax_passthrough(
                 youtube_attestation_context_mut(&mut contexts, &playback_context_id)
                     .snapshot(Instant::now())
             };
+            let request_attestation = YouTubeSabrAttestationRequestSnapshot {
+                operation: waa_snapshot.last_rpc_response_operation,
+                correlation_id: waa_snapshot.last_rpc_response_correlation_id.clone(),
+                response_status: waa_snapshot.last_rpc_response_status,
+                response_age_ms: waa_snapshot.last_rpc_response_ago_ms,
+                po_present: metadata.po_token_bytes.is_some(),
+                pc_present: metadata.playback_cookie_bytes.is_some(),
+            };
+            sabr_attestation_request = Some(request_attestation);
             let waa_detail = match (
                 waa_snapshot.last_rpc_response_operation,
                 waa_snapshot.last_rpc_response_status,
                 waa_snapshot.last_rpc_response_ago_ms,
             ) {
                 (Some(operation), Some(status), Some(age_ms)) => format!(
-                    " waa_op={operation} waa_id={} waa_status={status} waa_ct={} waa_cl={} waa_ce={} waa_age_ms={age_ms}",
+                    " waa_op={operation} waa_id={} waa_status={status} waa_ct={} waa_cl={} waa_ce={} waa_age_ms={age_ms} waa_age_band={}",
                     waa_snapshot.last_rpc_response_correlation_id.as_deref().unwrap_or("unmatched"),
                     waa_snapshot.last_rpc_response_content_type.as_deref().unwrap_or("absent"),
                     waa_snapshot.last_rpc_response_content_length.as_deref().unwrap_or("absent"),
                     waa_snapshot.last_rpc_response_content_encoding.as_deref().unwrap_or("absent"),
+                    youtube_attestation_age_band(Some(age_ms)),
                 ),
-                _ => " waa_response=unobserved".to_owned(),
+                _ => " waa_response=unobserved waa_age_band=unobserved".to_owned(),
             };
             let backoff_detail = match backoff_observation {
                 Some(observation) => format!(
@@ -3686,7 +3825,7 @@ async fn ajax_passthrough(
             .and_then(|value| value.to_str().ok())
             .map(|value| clean_field(value.to_owned(), 24))
             .unwrap_or_else(|| "absent".to_owned());
-        {
+        let freshness_observation = {
             let playback_context_id = youtube_attestation_context_key(&request_headers);
             let mut contexts = session.youtube_attestation_timing.lock().unwrap_or_else(|error| error.into_inner());
             youtube_attestation_context_mut(&mut contexts, &playback_context_id).observe_proxy_response(
@@ -3699,7 +3838,25 @@ async fn ajax_passthrough(
                     content_encoding: response_content_encoding.clone(),
                 },
                 Instant::now(),
-            );
+            )
+        };
+        if let Some(refresh) = freshness_observation {
+            push_event(
+                &session,
+                "youtube_attestation_freshness",
+                format!("{upstream_host}{upstream_path}"),
+                format!(
+                    "rid={request_id} rpc={attestation_rpc_id} phase=generateit_after_status3 status={} status3_rid={} status3_waa_id={} status3_waa_age_ms={} status3_age_band={} new_waa_id={} correlation_changed={} elapsed_since_status3_ms={}",
+                    status.as_u16(),
+                    refresh.status3_request_id,
+                    refresh.status3_waa_id.as_deref().unwrap_or("unmatched"),
+                    refresh.status3_waa_age_ms.map(|value| value.to_string()).unwrap_or_else(|| "unobserved".to_owned()),
+                    youtube_attestation_age_band(refresh.status3_waa_age_ms),
+                    refresh.correlation_id.as_deref().unwrap_or("unmatched"),
+                    refresh.correlation_changed,
+                    duration_millis(Instant::now().saturating_duration_since(refresh.observed_at)),
+                ),
+            ).await;
         }
         push_event(
             &session,
@@ -3832,12 +3989,14 @@ async fn ajax_passthrough(
         error_prefix.into_iter().map(Ok::<_, io::Error>)
     );
     let playback_context_id = youtube_attestation_context_key(&request_headers);
+    let sabr_attestation_request = sabr_attestation_request.unwrap_or_default();
     let remainder_stream = futures_util::stream::unfold(
         (
             upstream.bytes_stream(),
             session.clone(),
             request_id.clone(),
             playback_context_id,
+            sabr_attestation_request,
             stream_target.clone(),
             request_permit,
             session.cancel_tx.subscribe(),
@@ -3846,7 +4005,7 @@ async fn ajax_passthrough(
             is_youtube_sabr_request(&upstream_url),
             UmpStreamDiagnostics::default(),
         ),
-        |(mut upstream_stream, session, request_id, playback_context_id, stream_target, request_permit,
+        |(mut upstream_stream, session, request_id, playback_context_id, sabr_attestation_request, stream_target, request_permit,
           mut cancellation, mut response_bytes, finished, is_sabr, mut ump_diagnostics)| async move {
             if finished {
                 return None;
@@ -3879,7 +4038,7 @@ async fn ajax_passthrough(
                         }
                         Some((
                             Ok(chunk),
-                            (upstream_stream, session, request_id, playback_context_id, stream_target,
+                            (upstream_stream, session, request_id, playback_context_id, sabr_attestation_request, stream_target,
                              request_permit, cancellation, response_bytes, false, is_sabr, ump_diagnostics),
                         ))
                     }
@@ -3909,15 +4068,44 @@ async fn ajax_passthrough(
                         }
                         Some((
                             Err(io::Error::other(safe_error)),
-                            (upstream_stream, session, request_id, playback_context_id, stream_target,
+                            (upstream_stream, session, request_id, playback_context_id, sabr_attestation_request, stream_target,
                              request_permit, cancellation, response_bytes, true, is_sabr, ump_diagnostics),
                         ))
                     }
                     None => {
                         if is_sabr {
-                            if ump_diagnostics.latest_stream_protection_status
-                                .and_then(|status| status.status) == Some(3)
-                            {
+                            let protection_status = ump_diagnostics.latest_stream_protection_status
+                                .and_then(|status| status.status);
+                            let media_payload_bytes = ump_diagnostics.part_payload_bytes
+                                .get(&21).copied().unwrap_or_default();
+                            let completed_at = Instant::now();
+                            if protection_status == Some(3) {
+                                let freshness_detail = {
+                                    let mut contexts = session.youtube_attestation_timing.lock()
+                                        .unwrap_or_else(|error| error.into_inner());
+                                    youtube_attestation_context_mut(&mut contexts, &playback_context_id)
+                                        .observe_sabr_status3(
+                                            &request_id,
+                                            &sabr_attestation_request,
+                                            completed_at,
+                                        );
+                                    format!(
+                                        "rid={request_id} phase=status3 playback_context={playback_context_id} waa_op={} waa_id={} waa_status={} waa_age_ms={} waa_age_band={} po_present={} pc_present={} media_payload_bytes={media_payload_bytes}",
+                                        sabr_attestation_request.operation.unwrap_or("none"),
+                                        sabr_attestation_request.correlation_id.as_deref().unwrap_or("unmatched"),
+                                        sabr_attestation_request.response_status.map(|value| value.to_string()).unwrap_or_else(|| "unobserved".to_owned()),
+                                        sabr_attestation_request.response_age_ms.map(|value| value.to_string()).unwrap_or_else(|| "unobserved".to_owned()),
+                                        youtube_attestation_age_band(sabr_attestation_request.response_age_ms),
+                                        sabr_attestation_request.po_present,
+                                        sabr_attestation_request.pc_present,
+                                    )
+                                };
+                                push_event(
+                                    &session,
+                                    "youtube_attestation_freshness",
+                                    stream_target.clone(),
+                                    freshness_detail,
+                                ).await;
                                 let attestation = {
                                     let mut contexts = session.youtube_attestation_timing.lock()
                                         .unwrap_or_else(|error| error.into_inner());
@@ -3952,6 +4140,42 @@ async fn ajax_passthrough(
                                         attestation.last_rpc_response_ago_ms.map(|value| value.to_string()).unwrap_or_else(|| "never".to_owned()),
                                     ),
                                 ).await;
+                            } else if let Some(status) = protection_status {
+                                let recovery = {
+                                    let mut contexts = session.youtube_attestation_timing.lock()
+                                        .unwrap_or_else(|error| error.into_inner());
+                                    youtube_attestation_context_mut(&mut contexts, &playback_context_id)
+                                        .observe_sabr_media_after_status3(
+                                            &sabr_attestation_request,
+                                            status,
+                                            media_payload_bytes,
+                                            completed_at,
+                                        )
+                                };
+                                if let Some(recovery) = recovery {
+                                    push_event(
+                                        &session,
+                                        "youtube_attestation_freshness",
+                                        stream_target.clone(),
+                                        format!(
+                                            "rid={request_id} phase=media_after_status3 status={} media_payload_bytes={} status3_rid={} status3_waa_id={} status3_waa_age_ms={} status3_age_band={} current_waa_id={} current_waa_age_ms={} current_age_band={} new_generateit_after_status3={} correlation_changed={} elapsed_since_status3_ms={} po_present={} pc_present={}",
+                                            recovery.protection_status,
+                                            recovery.media_payload_bytes,
+                                            recovery.status3_request_id,
+                                            recovery.status3_waa_id.as_deref().unwrap_or("unmatched"),
+                                            recovery.status3_waa_age_ms.map(|value| value.to_string()).unwrap_or_else(|| "unobserved".to_owned()),
+                                            youtube_attestation_age_band(recovery.status3_waa_age_ms),
+                                            recovery.current_waa_id.as_deref().unwrap_or("unmatched"),
+                                            recovery.current_waa_age_ms.map(|value| value.to_string()).unwrap_or_else(|| "unobserved".to_owned()),
+                                            youtube_attestation_age_band(recovery.current_waa_age_ms),
+                                            recovery.new_generate_it_after_status3,
+                                            recovery.generate_it_correlation_changed.map(|value| value.to_string()).unwrap_or_else(|| "not_applicable".to_owned()),
+                                            recovery.elapsed_since_status3_ms,
+                                            recovery.po_present,
+                                            recovery.pc_present,
+                                        ),
+                                    ).await;
+                                }
                             }
                             {
                                 let mut timing = session.sabr_request_timing.lock()
@@ -6197,6 +6421,7 @@ fn event_detail_limit(kind: &str) -> usize {
         "youtube_player_state" => 640,
         "youtube_sabr_attestation_context"
         | "youtube_sabr_request_metadata"
+        | "youtube_attestation_freshness"
         | "youtube_attestation_rpc"
         | "youtube_attestation_resource_header_profile" => 480,
         _ => 300,
@@ -7984,7 +8209,7 @@ mod ump_stream_diagnostics_tests {
     fn correlates_latest_waa_response_metadata_with_following_sabr_po_presence() {
         let observed_at = Instant::now();
         let mut timing = YouTubeAttestationTiming::default();
-        timing.observe_proxy_response(
+        let refresh = timing.observe_proxy_response(
             "GenerateIT",
             Some("mwl4oib2-1-wu4yb4"),
             200,
@@ -7995,6 +8220,7 @@ mod ump_stream_diagnostics_tests {
             },
             observed_at,
         );
+        assert!(refresh.is_none());
         let snapshot = timing.snapshot(observed_at + Duration::from_millis(37));
         assert_eq!(snapshot.last_rpc_response_operation, Some("GenerateIT"));
         assert_eq!(
@@ -8018,6 +8244,77 @@ mod ump_stream_diagnostics_tests {
         assert_eq!(metadata.po_token_bytes, Some(4));
         assert!(metadata.summary().contains("po=present:4"));
         assert!(!metadata.summary().contains("aabbccdd"));
+    }
+
+    #[test]
+    fn attestation_age_bands_are_diagnostic_buckets_not_expiry_decisions() {
+        assert_eq!(youtube_attestation_age_band(None), "unobserved");
+        assert_eq!(youtube_attestation_age_band(Some(29_999)), "recent");
+        assert_eq!(youtube_attestation_age_band(Some(30_000)), "aging");
+        assert_eq!(youtube_attestation_age_band(Some(59_999)), "aging");
+        assert_eq!(youtube_attestation_age_band(Some(60_000)), "old");
+    }
+
+    #[test]
+    fn correlates_generateit_refresh_and_media_recovery_after_status3() {
+        let start = Instant::now();
+        let mut timing = YouTubeAttestationTiming::default();
+        let old_request = YouTubeSabrAttestationRequestSnapshot {
+            operation: Some("GenerateIT"),
+            correlation_id: Some("waa-old".to_owned()),
+            response_status: Some(200),
+            response_age_ms: Some(75_844),
+            po_present: true,
+            pc_present: true,
+        };
+
+        timing.observe_sabr_status3("sabr-status3", &old_request, start);
+        let old_media = timing.observe_sabr_media_after_status3(
+            &old_request,
+            2,
+            100_000,
+            start + Duration::from_millis(100),
+        ).expect("media after status 3 is diagnostically relevant");
+        assert!(!old_media.new_generate_it_after_status3);
+        assert_eq!(old_media.status3_request_id, "sabr-status3");
+
+        let refresh = timing.observe_proxy_response(
+            "GenerateIT",
+            Some("waa-new"),
+            200,
+            YouTubeAttestationResponseMetadata {
+                content_type: "application/json+protobuf".to_owned(),
+                content_length: "absent".to_owned(),
+                content_encoding: "absent".to_owned(),
+            },
+            start + Duration::from_millis(2_000),
+        ).expect("new GenerateIT response after status 3");
+        assert_eq!(refresh.status3_request_id, "sabr-status3");
+        assert_eq!(refresh.status3_waa_id.as_deref(), Some("waa-old"));
+        assert_eq!(refresh.correlation_id.as_deref(), Some("waa-new"));
+        assert!(refresh.correlation_changed);
+
+        let refreshed_request = YouTubeSabrAttestationRequestSnapshot {
+            operation: Some("GenerateIT"),
+            correlation_id: Some("waa-new".to_owned()),
+            response_status: Some(200),
+            response_age_ms: Some(250),
+            po_present: true,
+            pc_present: true,
+        };
+        let recovery = timing.observe_sabr_media_after_status3(
+            &refreshed_request,
+            2,
+            250_000,
+            start + Duration::from_millis(3_000),
+        ).expect("media associated with refreshed GenerateIT response");
+        assert!(recovery.new_generate_it_after_status3);
+        assert_eq!(recovery.current_waa_id.as_deref(), Some("waa-new"));
+        assert_eq!(recovery.current_waa_age_ms, Some(250));
+        assert_eq!(recovery.media_payload_bytes, 250_000);
+        assert_eq!(recovery.elapsed_since_status3_ms, 3_000);
+        assert!(recovery.po_present);
+        assert!(recovery.pc_present);
     }
 
     #[test]
