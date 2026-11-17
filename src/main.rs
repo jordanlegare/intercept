@@ -2638,6 +2638,23 @@ fn is_youtube_sabr_request(url: &Url) -> bool {
         && url.query_pairs().any(|(name, _)| name == "sabr")
 }
 
+fn is_youtube_inner_tube_endpoint(url: &Url) -> bool {
+    let youtube_host = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("youtube.com")
+            || host.to_ascii_lowercase().ends_with(".youtube.com")
+    });
+    youtube_host && matches!(
+        url.path(),
+        "/youtubei/v1/search"
+            | "/youtubei/v1/player"
+            | "/youtubei/v1/get_watch"
+            | "/youtubei/v1/next"
+            | "/youtubei/v1/feedback"
+            | "/youtubei/v1/att/get"
+            | "/youtubei/v1/att/log"
+    )
+}
+
 fn youtube_attestation_rpc_operation(url: &Url) -> Option<&'static str> {
     let host = url.host_str()?.to_ascii_lowercase();
     let path = url.path();
@@ -2790,13 +2807,7 @@ async fn ajax_passthrough(
     let mut upstream_url = upstream_url;
     let upstream_path = upstream_url.path().to_owned();
     let initial_host = upstream_url.host_str().unwrap_or_default().to_owned();
-    let is_youtube_inner_tube = (upstream_path == "/youtubei/v1/search"
-        || upstream_path == "/youtubei/v1/player"
-        || upstream_path == "/youtubei/v1/get_watch"
-        || upstream_path == "/youtubei/v1/next"
-        || upstream_path == "/youtubei/v1/feedback")
-        && (initial_host.eq_ignore_ascii_case("youtube.com")
-            || initial_host.to_ascii_lowercase().ends_with(".youtube.com"));
+    let is_youtube_inner_tube = is_youtube_inner_tube_endpoint(&upstream_url);
     let is_youtube_search = upstream_path == "/youtubei/v1/search" && is_youtube_inner_tube;
     let is_youtube_player = upstream_path == "/youtubei/v1/player" && is_youtube_inner_tube;
     let is_youtube_get_watch = upstream_path == "/youtubei/v1/get_watch" && is_youtube_inner_tube;
@@ -3111,6 +3122,31 @@ async fn ajax_passthrough(
                     &origin_host_out,
                     "same-origin",
                 )
+            ),
+        ).await;
+    }
+
+    if let Some(operation) = attestation_resource_operation {
+        let origin_host_out = request_headers.get("x-origin")
+            .and_then(normalized_youtube_origin)
+            .and_then(|value| Url::parse(&value).ok())
+            .and_then(|value| value.host_str().map(str::to_owned))
+            .unwrap_or_else(|| upstream_host.clone());
+        let cookie_scope_profile = session.cookie_jar.request_cookie_scope_profile(&upstream_url);
+        push_event(
+            &session,
+            "youtube_attestation_resource_header_profile",
+            format!("{upstream_host}{upstream_path}"),
+            format!(
+                "rid={request_id} operation={operation} auth_source={youtube_auth_source} {} {} {}",
+                youtube_search_header_profile(
+                    &request_headers,
+                    youtube_cookie_header.as_ref(),
+                    &origin_host_out,
+                    "same-origin",
+                ),
+                youtube_search_cookie_profile(youtube_cookie_header.as_ref()),
+                cookie_scope_profile,
             ),
         ).await;
     }
@@ -6157,7 +6193,8 @@ fn event_detail_limit(kind: &str) -> usize {
         "youtube_player_state" => 640,
         "youtube_sabr_attestation_context"
         | "youtube_sabr_request_metadata"
-        | "youtube_attestation_rpc" => 480,
+        | "youtube_attestation_rpc"
+        | "youtube_attestation_resource_header_profile" => 480,
         _ => 300,
     }
 }
@@ -6270,6 +6307,19 @@ mod tests {
             HeaderValue::from_static("invalid/id?secret"),
         );
         assert_eq!(youtube_attestation_correlation_id(&headers), None);
+    }
+
+    #[test]
+    fn youtube_attestation_resources_use_inner_tube_cookie_auth_path() {
+        let att_get = Url::parse("https://www.youtube.com/youtubei/v1/att/get").unwrap();
+        let att_log = Url::parse("https://youtube.com/youtubei/v1/att/log").unwrap();
+        let wrong_host = Url::parse("https://example.com/youtubei/v1/att/get").unwrap();
+        let wrong_path = Url::parse("https://www.youtube.com/youtubei/v1/player/att/get").unwrap();
+
+        assert!(is_youtube_inner_tube_endpoint(&att_get));
+        assert!(is_youtube_inner_tube_endpoint(&att_log));
+        assert!(!is_youtube_inner_tube_endpoint(&wrong_host));
+        assert!(!is_youtube_inner_tube_endpoint(&wrong_path));
     }
 
     #[test]
