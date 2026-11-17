@@ -4067,7 +4067,7 @@ fn append_qoe_session_token_to_body(
         return (body.clone(), "body_not_utf8");
     };
     let already_present = body_text
-        .split(['&', '?', '\\n', '\\r'])
+        .split(['&', '?', '\n', '\r'])
         .filter_map(|field| field.split_once('='))
         .any(|(name, _)| name == "session_token");
     if already_present {
