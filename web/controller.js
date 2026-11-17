@@ -667,6 +667,139 @@
     }
   }
 
+  let youtubeAttestationRpcSequence = 0;
+
+  function youtubeAttestationRpcInfo(source) {
+    try {
+      const candidate = new URL(
+        source instanceof Request ? source.url : String(source),
+        document.baseURI
+      );
+      let hostname = candidate.hostname.toLowerCase();
+      let pathname = candidate.pathname;
+
+      // WAA RPCs can arrive directly or through this session's origin-qualified
+      // route. Recover only the host/path envelope; never inspect or retain the
+      // query string, which may carry request-specific credentials.
+      if (candidate.origin === location.origin) {
+        const routeMarker = sessionPrefix + "/_/https/";
+        const routeIndex = pathname.indexOf(routeMarker);
+        if (routeIndex >= 0) {
+          const target = pathname.slice(routeIndex + routeMarker.length);
+          const slash = target.indexOf("/");
+          if (slash <= 0) return null;
+          hostname = target.slice(0, slash).toLowerCase();
+          pathname = target.slice(slash);
+        }
+      }
+
+      if (hostname !== "jnn-pa.googleapis.com") return null;
+      const match = pathname.match(
+        /^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/
+      );
+      if (!match) return null;
+      return {operation: match[1], target: hostname + pathname};
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function beginYouTubeAttestationRpc(info, method, transport) {
+    youtubeAttestationRpcSequence = (youtubeAttestationRpcSequence % 999999) + 1;
+    return {
+      id: Date.now().toString(36) + "-" + youtubeAttestationRpcSequence,
+      info,
+      method,
+      transport,
+      startedAt: null
+    };
+  }
+
+  function youtubeAttestationHeader(headers, name) {
+    try {
+      if (headers && typeof headers.get === "function") return headers.get(name);
+      if (headers && typeof headers.getResponseHeader === "function") {
+        return headers.getResponseHeader(name);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function youtubeAttestationContentType(headers) {
+    const value = youtubeAttestationHeader(headers, "content-type");
+    if (!value) return "absent";
+    const mime = String(value).split(";", 1)[0].trim().toLowerCase();
+    return /^[a-z0-9.+_-]+\/[a-z0-9.+_-]+$/.test(mime) ? mime : "other";
+  }
+
+  function youtubeAttestationContentLength(headers) {
+    const value = youtubeAttestationHeader(headers, "content-length");
+    const normalized = value === null || value === undefined ? "" : String(value).trim();
+    return /^\d{1,15}$/.test(normalized) ? normalized : "absent";
+  }
+
+  function youtubeAttestationContentEncoding(headers) {
+    const value = youtubeAttestationHeader(headers, "content-encoding");
+    if (!value) return "absent";
+    const encodings = String(value).split(",").map(token => token.trim().toLowerCase());
+    if (!encodings.length || encodings.some(token => !/^[a-z0-9._-]{1,16}$/.test(token))) {
+      return "other";
+    }
+    return encodings.join(",").slice(0, 32);
+  }
+
+  function recordYouTubeAttestationRpcDispatch(call) {
+    if (!call) return;
+    call.startedAt = performance.now();
+    record(
+      "youtube_attestation_rpc",
+      call.info.target,
+      "rpc=" + call.id
+        + " operation=" + call.info.operation
+        + " phase=dispatch method=" + call.method
+        + " transport=" + call.transport
+    );
+  }
+
+  function recordYouTubeAttestationRpcResponse(call, status, headers) {
+    if (!call) return;
+    const elapsed = call.startedAt === null
+      ? "not_dispatched"
+      : String(Math.max(0, Math.round(performance.now() - call.startedAt)));
+    const statusCode = Number(status) || 0;
+    const outcome = statusCode > 0 ? "http" : "no_http_response";
+    record(
+      "youtube_attestation_rpc",
+      call.info.target,
+      "rpc=" + call.id
+        + " operation=" + call.info.operation
+        + " phase=response status=" + statusCode
+        + " outcome=" + outcome
+        + " elapsed_ms=" + elapsed
+        + " ct=" + youtubeAttestationContentType(headers)
+        + " cl=" + youtubeAttestationContentLength(headers)
+        + " ce=" + youtubeAttestationContentEncoding(headers)
+    );
+  }
+
+  function recordYouTubeAttestationRpcFailure(call, error) {
+    if (!call) return;
+    const elapsed = call.startedAt === null
+      ? "not_dispatched"
+      : String(Math.max(0, Math.round(performance.now() - call.startedAt)));
+    const errorName = String(error && error.name || "unknown")
+      .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "unknown";
+    record(
+      "youtube_attestation_rpc",
+      call.info.target,
+      "rpc=" + call.id
+        + " operation=" + call.info.operation
+        + " phase=error elapsed_ms=" + elapsed
+        + " error=" + errorName
+        + " transport=" + call.transport
+    );
+  }
+
   function sanitizedYouTubeFetchCallsite() {
     try {
       const frames = String(new Error().stack || "").split("\n").slice(3);
@@ -2159,7 +2292,8 @@
     const source = input instanceof Request ? input.url : input;
     const method = String((init && init.method) || (input instanceof Request && input.method) || "GET").toUpperCase();
     const routed = routeToProxy(source);
-    record("fetch", String(source), method);
+    const attestationInfo = youtubeAttestationRpcInfo(source);
+    record("fetch", attestationInfo ? attestationInfo.target : String(source), method);
     if (!routed) return Promise.reject(new TypeError("Intercept only proxies HTTP and HTTPS requests."));
     try {
       // Mark the request explicitly instead of relying on browser-specific
@@ -2535,10 +2669,13 @@
       const markedRequest = new Request(routedRequest, {headers});
       record(
         "ajax_dispatch",
-        routed,
+        attestationInfo ? attestationInfo.target : routed,
         method + " · " + bodyDetail + inputCorrelationDetail(inputContext)
       );
       const fetchEventTarget = fetchEventPath(source);
+      const attestationCall = attestationInfo
+        ? beginYouTubeAttestationRpc(attestationInfo, markedRequest.method, "fetch")
+        : null;
       return cookieWriteQueue.then(() => {
         // ajax_dispatch is recorded before cookie synchronization finishes.
         // This marker proves the request has reached the actual native Fetch call.
@@ -2566,8 +2703,10 @@
             method + " · " + bodyDetail
           );
         }
+        recordYouTubeAttestationRpcDispatch(attestationCall);
         return nativeFetch(markedRequest);
       }).then(response => {
+        recordYouTubeAttestationRpcResponse(attestationCall, response.status, response.headers);
         record(
           "fetch_response",
           fetchEventTarget,
@@ -2578,6 +2717,7 @@
         }
         return response;
       }, error => {
+        recordYouTubeAttestationRpcFailure(attestationCall, error);
         // Do not log the error message: browser errors may contain full URLs
         // or other request-specific values. The error class is sufficient to
         // distinguish a rejected Fetch from an HTTP response.
@@ -2586,7 +2726,13 @@
         throw error;
       });
     } catch (error) {
-      record("ajax_route_error", String(source), String(error && error.message || error));
+      record(
+        "ajax_route_error",
+        attestationInfo ? attestationInfo.target : String(source),
+        attestationInfo
+          ? "error_name=" + String(error && error.name || "unknown").slice(0, 40)
+          : String(error && error.message || error)
+      );
       return Promise.reject(error);
     }
   };
@@ -2598,16 +2744,27 @@
   XMLHttpRequest.prototype.open = function(method, url, ...rest) {
     const routed = routeToProxy(url);
     if (!routed) throw new DOMException("Intercept only proxies HTTP and HTTPS requests.", "SecurityError");
-    xhrMeta.set(this, {method: String(method).toUpperCase(), url: routed, async: rest[0] !== false});
+    const attestation = youtubeAttestationRpcInfo(url);
+    xhrMeta.set(this, {
+      method: String(method).toUpperCase(),
+      url: routed,
+      eventTarget: attestation ? attestation.target : routed,
+      async: rest[0] !== false,
+      attestation
+    });
     return nativeXhrOpen.call(this, method, routed, ...rest);
   };
   XMLHttpRequest.prototype.send = function(...args) {
     const meta = xhrMeta.get(this);
+    const attestationCall = meta && meta.attestation
+      ? beginYouTubeAttestationRpc(meta.attestation, meta.method, "xhr")
+      : null;
     if (meta) {
       nativeAdd.call(this, "loadend", () => {
         try {
           if (this.getResponseHeader("X-Intercept-Cookie-Updated") === "1") refreshCookieMirror();
         } catch (_) {}
+        recordYouTubeAttestationRpcResponse(attestationCall, this.status, this);
       });
       const inputContext = currentInputEvent();
       const bodyDetail = requestBodyDiagnostic(args[0], args.length > 0);
@@ -2625,20 +2782,37 @@
           );
         }
       } catch (error) {
-        record("xhr_marker_error", meta.url, String(error && error.message || error));
+        record(
+          "xhr_marker_error",
+          meta.eventTarget || meta.url,
+          meta.attestation
+            ? "error_name=" + String(error && error.name || "unknown").slice(0, 40)
+            : String(error && error.message || error)
+        );
       }
-      record("xhr", meta.url, meta.method + inputCorrelationDetail(inputContext));
+      record("xhr", meta.eventTarget || meta.url, meta.method + inputCorrelationDetail(inputContext));
       record(
         "ajax_dispatch",
-        meta.url,
+        meta.eventTarget || meta.url,
         meta.method + " · " + bodyDetail + inputCorrelationDetail(inputContext)
       );
     }
+    const dispatchXhr = () => {
+      recordYouTubeAttestationRpcDispatch(attestationCall);
+      try {
+        return nativeXhrSend.apply(this, args);
+      } catch (error) {
+        recordYouTubeAttestationRpcFailure(attestationCall, error);
+        throw error;
+      }
+    };
     if (meta && meta.async && cookieWriteQueue) {
-      cookieWriteQueue.then(() => nativeXhrSend.apply(this, args));
+      cookieWriteQueue.then(dispatchXhr, error => {
+        recordYouTubeAttestationRpcFailure(attestationCall, error);
+      });
       return;
     }
-    return nativeXhrSend.apply(this, args);
+    return dispatchXhr();
   };
 
   if (navigator.sendBeacon) {
