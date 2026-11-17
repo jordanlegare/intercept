@@ -174,6 +174,31 @@ impl SessionCookieJar {
         if value.is_empty() { None } else { HeaderValue::from_str(&value).ok() }
     }
 
+    fn request_cookie_scope_profile(&self, url: &Url) -> String {
+        let store = self.lock();
+        let stored = store.iter_unexpired().count();
+        let target_matches = store.matches(url).len();
+
+        let mut root_path_url = url.clone();
+        root_path_url.set_path("/");
+        root_path_url.set_query(None);
+        root_path_url.set_fragment(None);
+        let root_path_matches = store.matches(&root_path_url).len();
+
+        let mut apex_url = url.clone();
+        if url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("youtube.com")
+                || host.to_ascii_lowercase().ends_with(".youtube.com")
+        }) {
+            let _ = apex_url.set_host(Some("youtube.com"));
+        }
+        let apex_matches = store.matches(&apex_url).len();
+
+        format!(
+            "cookie_scope=stored:{stored};target:{target_matches};root_path:{root_path_matches};apex_target:{apex_matches}"
+        )
+    }
+
     fn document_cookie_header(&self, url: &Url) -> String {
         let store = self.lock();
         store.matches(url).into_iter()
@@ -672,6 +697,16 @@ async fn cookie_bridge_set(
             );
             (StatusCode::BAD_REQUEST, message)
         })?;
+    let target_host = upstream_url.host_str().unwrap_or_default().to_owned();
+    let target_path = upstream_url.path().to_owned();
+    let cookie_bytes = input.cookie.len();
+    let cookie_profile = session.cookie_jar.request_cookie_scope_profile(&upstream_url);
+    push_event(
+        &session,
+        "cookie_bridge_write",
+        target_host,
+        format!("path={target_path} assignment_bytes={cookie_bytes} {cookie_profile}"),
+    ).await;
     Ok(Json(CookieBridgeResponse {
         cookie: session.cookie_jar.document_cookie_header(&upstream_url),
     }))
@@ -1707,6 +1742,9 @@ async fn ajax_passthrough(
     let is_youtube_qoe = upstream_path == "/api/stats/qoe"
         && (initial_host.eq_ignore_ascii_case("youtube.com")
             || initial_host.to_ascii_lowercase().ends_with(".youtube.com"));
+    let is_youtube_log_event = upstream_path == "/youtubei/v1/log_event"
+        && (initial_host.eq_ignore_ascii_case("youtube.com")
+            || initial_host.to_ascii_lowercase().ends_with(".youtube.com"));
     if is_youtube_inner_tube && initial_host.eq_ignore_ascii_case("youtube.com") {
         let x_origin_host = request_headers.get("x-origin")
             .and_then(normalized_youtube_origin)
@@ -1861,6 +1899,7 @@ async fn ajax_passthrough(
     }
     if is_youtube_qoe {
         let cookie_header = session.cookie_jar.request_cookie_header(&upstream_url);
+        let cookie_scope_profile = session.cookie_jar.request_cookie_scope_profile(&upstream_url);
         push_event(
             session,
             "youtube_qoe_request_profile",
@@ -1875,13 +1914,13 @@ async fn ajax_passthrough(
             session,
             "youtube_qoe_outbound_header_profile",
             format!("{upstream_host}{upstream_path}"),
-            format!("rid={request_id} {}", youtube_qoe_outbound_header_diagnostics(
+            format!("rid={request_id} {} {}", youtube_qoe_outbound_header_diagnostics(
                 &request_headers,
                 outbound_origin.as_ref(),
                 outbound_referer.as_ref(),
                 outbound_fetch_site,
                 cookie_header.as_ref(),
-            )),
+            ), cookie_scope_profile),
         ).await;
     }
 
@@ -2098,6 +2137,22 @@ async fn ajax_passthrough(
                     youtube_cookie_header.as_ref(),
                     &origin_host_out,
                     fetch_site_out,
+                )
+            ),
+        ).await;
+    }
+
+    if is_youtube_log_event {
+        push_event(
+            session,
+            "youtube_log_event_upstream_dispatch",
+            format!("{upstream_host}{upstream_path}"),
+            format!(
+                "rid={request_id} {}",
+                youtube_log_event_dispatch_diagnostics(
+                    &request_method,
+                    &request_headers,
+                    request_body.len(),
                 )
             ),
         ).await;
@@ -4073,6 +4128,29 @@ fn youtube_qoe_outbound_header_diagnostics(
     )
 }
 
+fn youtube_log_event_dispatch_diagnostics(
+    method: &Method,
+    headers: &HeaderMap,
+    body_len: usize,
+) -> String {
+    let content_length_in = headers.get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| clean_field(value.to_owned(), 24))
+        .unwrap_or_else(|| "absent".to_owned());
+    let content_type = headers.get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| clean_field(value.to_owned(), 80))
+        .unwrap_or_else(|| "absent".to_owned());
+    let content_encoding = headers.get(header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| clean_field(value.to_owned(), 32))
+        .unwrap_or_else(|| "absent".to_owned());
+
+    format!(
+        "method={method} body_bytes={body_len} content_length_out={body_len} content_length_in={content_length_in} content_type={content_type} content_encoding={content_encoding}"
+    )
+}
+
 fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -> String {
     let header_text = |name: &str, limit: usize| {
         headers.get(name)
@@ -4150,7 +4228,7 @@ fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -
     // clues when a browser request reaches Rust without a matching
     // browser-side ajax_dispatch event.
     format!(
-        "method={method} · body_bytes={} · dispatch_marker={dispatch_marker}{browser_body}{transport} · sec_fetch_dest={fetch_dest} · sec_fetch_mode={fetch_mode} · sec_fetch_site={fetch_site} · x_requested_with={requested_with} · content_length_out={}{}{}{}{} · content_encoding_in={content_encoding} · body_encoding={body_encoding} · cookie_header_in={cookie_header_in} · json={json_state}{client_headers}",
+        "method={method} · body_bytes={} · dispatch_marker={dispatch_marker}{browser_body}{transport} · sec_fetch_dest={fetch_dest} · sec_fetch_mode={fetch_mode} · sec_fetch_site={fetch_site} · x_requested_with={requested_with} · content_length_expected_out={}{}{}{}{} · content_encoding_in={content_encoding} · body_encoding={body_encoding} · cookie_header_in={cookie_header_in} · json={json_state}{client_headers}",
         body.len(),
         body.len(),
         content_type,
@@ -4336,6 +4414,54 @@ mod tests {
             cookie_jar: Arc::new(SessionCookieJar::default()),
             cookie_tokens: StdMutex::new(HashMap::new()),
         }
+    }
+
+    #[test]
+    fn cookie_scope_diagnostics_distinguish_empty_and_host_scoped_jars() {
+        let jar = SessionCookieJar::default();
+        let qoe_url = Url::parse("https://www.youtube.com/api/stats/qoe").unwrap();
+
+        let empty = jar.request_cookie_scope_profile(&qoe_url);
+        assert!(empty.contains("stored:0"));
+        assert!(empty.contains("target:0"));
+
+        // A host-only cookie for the apex host is stored, but must not be
+        // sent to www.youtube.com.
+        let apex_url = Url::parse("https://youtube.com/").unwrap();
+        assert!(jar.set_document_cookie("apex=present; Path=/; Secure", &apex_url).is_ok());
+        let apex_only = jar.request_cookie_scope_profile(&qoe_url);
+        assert!(apex_only.contains("stored:1"));
+        assert!(apex_only.contains("target:0"));
+        assert!(apex_only.contains("apex_target:1"));
+
+        // A Domain=youtube.com cookie should match both the apex and www host.
+        let www_url = Url::parse("https://www.youtube.com/").unwrap();
+        assert!(jar.set_document_cookie(
+            "site=present; Domain=youtube.com; Path=/; Secure",
+            &www_url,
+        ).is_ok());
+        let with_domain_cookie = jar.request_cookie_scope_profile(&qoe_url);
+        assert!(with_domain_cookie.contains("stored:2"));
+        assert!(with_domain_cookie.contains("target:1"));
+        assert!(with_domain_cookie.contains("root_path:1"));
+        assert!(with_domain_cookie.contains("apex_target:2"));
+    }
+
+    #[test]
+    fn youtube_log_event_dispatch_reports_buffered_length_not_declared_length() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("50"));
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let body_len = 5_007;
+        let detail = youtube_log_event_dispatch_diagnostics(
+            &Method::POST,
+            &headers,
+            body_len,
+        );
+
+        assert!(detail.contains("body_bytes=5007"));
+        assert!(detail.contains("content_length_out=5007"));
+        assert!(detail.contains("content_length_in=50"));
     }
 
     #[test]
@@ -4867,7 +4993,7 @@ mod tests {
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
         let detail = ajax_request_diagnostics(&Method::POST, &headers, b"{broken");
 
-        assert!(detail.contains("content_length_out=7"));
+        assert!(detail.contains("content_length_expected_out=7"));
         assert!(detail.contains("origin_host_in=absent"));
         assert!(detail.contains("referer_host_in=absent"));
         assert!(detail.contains("cookie_header_in=absent"));
