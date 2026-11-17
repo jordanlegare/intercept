@@ -1696,6 +1696,15 @@ async fn wait_for_authorization(session: &Session) -> bool {
     }
 }
 
+fn is_youtube_sabr_request(url: &Url) -> bool {
+    url.path() == "/videoplayback"
+        && url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("googlevideo.com")
+                || host.to_ascii_lowercase().ends_with(".googlevideo.com")
+        })
+        && url.query_pairs().any(|(name, _)| name == "sabr")
+}
+
 fn is_ajax_request(headers: &HeaderMap) -> bool {
     let value_is = |name: &str, expected: &str| {
         headers.get(name)
@@ -1715,7 +1724,7 @@ fn is_ajax_request(headers: &HeaderMap) -> bool {
 }
 
 async fn ajax_passthrough(
-    session: &Session,
+    session: Arc<Session>,
     upstream_url: Url,
     request_method: Method,
     request_headers: HeaderMap,
@@ -2171,6 +2180,36 @@ async fn ajax_passthrough(
         ).await;
     }
 
+    if is_youtube_sabr_request(&upstream_url) {
+        let content_length = if has_body_framing || request_body_len > 0 {
+            request_body_len.to_string()
+        } else {
+            "not_set".to_owned()
+        };
+        let content_type = request_headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 80))
+            .unwrap_or_else(|| "absent".to_owned());
+        let content_encoding = request_headers.get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 32))
+            .unwrap_or_else(|| "absent".to_owned());
+        let browser_body_marker = request_headers.get("x-intercept-body-diagnostic")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 100))
+            .unwrap_or_else(|| "absent".to_owned());
+        push_event(
+            session,
+            "youtube_sabr_upstream_dispatch",
+            format!("{upstream_host}{upstream_path}"),
+            format!(
+                "rid={request_id} method={request_method} body_bytes={} body_present={} content_length_out={content_length} content_type={content_type} content_encoding={content_encoding} browser_body_marker={browser_body_marker}",
+                request_body.len(),
+                !request_body.is_empty(),
+            ),
+        ).await;
+    }
+
     let upstream = tokio::select! {
         _ = wait_for_session_termination(session) => {
             return plain(StatusCode::GONE, "Session terminated");
@@ -2228,6 +2267,38 @@ async fn ajax_passthrough(
     let upstream_headers = upstream.headers().clone();
     let upstream_set_cookie = upstream_headers.contains_key(header::SET_COOKIE);
     let upstream_elapsed_ms = request_started.elapsed().as_millis();
+
+    if is_youtube_sabr_request(&upstream_url) {
+        let content_type = upstream_headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 96))
+            .unwrap_or_else(|| "absent".to_owned());
+        let content_length = upstream_headers.get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 24))
+            .unwrap_or_else(|| "absent".to_owned());
+        let content_encoding = upstream_headers.get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 32))
+            .unwrap_or_else(|| "absent".to_owned());
+        let transfer_encoding = upstream_headers.get(header::TRANSFER_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 32))
+            .unwrap_or_else(|| "absent".to_owned());
+        let server = upstream_headers.get(header::SERVER)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 64))
+            .unwrap_or_else(|| "absent".to_owned());
+        push_event(
+            session,
+            "youtube_sabr_upstream_response",
+            format!("{upstream_host}{upstream_path}"),
+            format!(
+                "rid={request_id} status={} elapsed_ms={upstream_elapsed_ms} content_type={content_type} content_length={content_length} content_encoding={content_encoding} transfer_encoding={transfer_encoding} server={server}",
+                status.as_u16()
+            ),
+        ).await;
+    }
 
     if is_youtube_qoe {
         let response_content_type = upstream_headers.get(header::CONTENT_TYPE)
@@ -2452,26 +2523,85 @@ async fn ajax_passthrough(
     );
 
     let stream_target = format!("{upstream_host}{upstream_path}");
-    let mut cancellation = session.cancel_tx.subscribe();
-    let cancelled = async move {
-        wait_for_cancellation(&mut cancellation).await;
-    };
     let prefix_stream = futures_util::stream::iter(
         error_prefix.into_iter().map(Ok::<_, io::Error>)
     );
-    let remainder_stream = upstream.bytes_stream().take_until(cancelled).map(move |chunk| {
-        let _keep_request_slot = &request_permit;
-        chunk.map_err(|error| {
-            let safe_error = error.without_url().to_string();
-            warn!(
-                error = %safe_error,
-                request_id = %request_id,
-                target = %stream_target,
-                "AJAX upstream response stream failed"
-            );
-            io::Error::other(safe_error)
-        })
-    });
+    let remainder_stream = futures_util::stream::unfold(
+        (
+            upstream.bytes_stream(),
+            session.clone(),
+            request_id.clone(),
+            stream_target.clone(),
+            request_permit,
+            session.cancel_tx.subscribe(),
+            0u64,
+            false,
+            is_youtube_sabr_request(&upstream_url),
+        ),
+        |(mut upstream_stream, session, request_id, stream_target, request_permit,
+          mut cancellation, mut response_bytes, finished, is_sabr)| async move {
+            if finished {
+                return None;
+            }
+            tokio::select! {
+                _ = wait_for_cancellation(&mut cancellation) => {
+                    if is_sabr {
+                        push_event(
+                            &session,
+                            "youtube_sabr_response_stream_complete",
+                            stream_target.clone(),
+                            format!("rid={request_id} outcome=cancelled response_bytes={response_bytes}"),
+                        ).await;
+                    }
+                    None
+                }
+                chunk = upstream_stream.next() => match chunk {
+                    Some(Ok(chunk)) => {
+                        response_bytes = response_bytes.saturating_add(chunk.len() as u64);
+                        let _keep_request_slot = &request_permit;
+                        Some((
+                            Ok(chunk),
+                            (upstream_stream, session, request_id, stream_target,
+                             request_permit, cancellation, response_bytes, false, is_sabr),
+                        ))
+                    }
+                    Some(Err(error)) => {
+                        let safe_error = error.without_url().to_string();
+                        warn!(
+                            error = %safe_error,
+                            request_id = %request_id,
+                            target = %stream_target,
+                            "AJAX upstream response stream failed"
+                        );
+                        if is_sabr {
+                            push_event(
+                                &session,
+                                "youtube_sabr_response_stream_complete",
+                                stream_target.clone(),
+                                format!("rid={request_id} outcome=stream_error response_bytes={response_bytes}"),
+                            ).await;
+                        }
+                        Some((
+                            Err(io::Error::other(safe_error)),
+                            (upstream_stream, session, request_id, stream_target,
+                             request_permit, cancellation, response_bytes, true, is_sabr),
+                        ))
+                    }
+                    None => {
+                        if is_sabr {
+                            push_event(
+                                &session,
+                                "youtube_sabr_response_stream_complete",
+                                stream_target,
+                                format!("rid={request_id} outcome=complete response_bytes={response_bytes}"),
+                            ).await;
+                        }
+                        None
+                    }
+                }
+            }
+        },
+    );
     let body_stream = prefix_stream.chain(remainder_stream);
     response.body(Body::from_stream(body_stream))
         .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "Could not build AJAX passthrough response"))
@@ -2592,6 +2722,35 @@ async fn proxy(
             Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "Request body exceeds the 8 MiB limit"),
         }
     };
+    if is_youtube_sabr_request(&upstream_url) {
+        let declared_length = parts.headers.get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 24))
+            .unwrap_or_else(|| "absent".to_owned());
+        let content_type = parts.headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 80))
+            .unwrap_or_else(|| "absent".to_owned());
+        let content_encoding = parts.headers.get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 32))
+            .unwrap_or_else(|| "absent".to_owned());
+        let browser_body_marker = parts.headers.get("x-intercept-body-diagnostic")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 100))
+            .unwrap_or_else(|| "absent".to_owned());
+        push_event(
+            &session,
+            "youtube_sabr_request_ingress",
+            format!("{}{}", upstream_url.host_str().unwrap_or_default(), upstream_url.path()),
+            format!(
+                "rid={request_id} method={} body_bytes={} body_present={} declared_content_length={declared_length} content_type={content_type} content_encoding={content_encoding} browser_body_marker={browser_body_marker}",
+                parts.method,
+                body.len(),
+                !body.is_empty(),
+            ),
+        ).await;
+    }
     let request_detail = if ajax_request {
         format!(
             "rid={request_id} {}{}",
@@ -2649,7 +2808,7 @@ async fn proxy(
     // bytes directly to the browser.
     if ajax_request {
         return ajax_passthrough(
-            &session,
+            session.clone(),
             upstream_url,
             parts.method,
             parts.headers,
