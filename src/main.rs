@@ -3791,11 +3791,13 @@ async fn ajax_passthrough(
     let prefix_stream = futures_util::stream::iter(
         error_prefix.into_iter().map(Ok::<_, io::Error>)
     );
+    let playback_context_id = youtube_attestation_context_key(&request_headers);
     let remainder_stream = futures_util::stream::unfold(
         (
             upstream.bytes_stream(),
             session.clone(),
             request_id.clone(),
+            playback_context_id,
             stream_target.clone(),
             request_permit,
             session.cancel_tx.subscribe(),
@@ -3804,7 +3806,7 @@ async fn ajax_passthrough(
             is_youtube_sabr_request(&upstream_url),
             UmpStreamDiagnostics::default(),
         ),
-        |(mut upstream_stream, session, request_id, stream_target, request_permit,
+        |(mut upstream_stream, session, request_id, playback_context_id, stream_target, request_permit,
           mut cancellation, mut response_bytes, finished, is_sabr, mut ump_diagnostics)| async move {
             if finished {
                 return None;
@@ -3837,7 +3839,7 @@ async fn ajax_passthrough(
                         }
                         Some((
                             Ok(chunk),
-                            (upstream_stream, session, request_id, stream_target,
+                            (upstream_stream, session, request_id, playback_context_id, stream_target,
                              request_permit, cancellation, response_bytes, false, is_sabr, ump_diagnostics),
                         ))
                     }
@@ -3867,7 +3869,7 @@ async fn ajax_passthrough(
                         }
                         Some((
                             Err(io::Error::other(safe_error)),
-                            (upstream_stream, session, request_id, stream_target,
+                            (upstream_stream, session, request_id, playback_context_id, stream_target,
                              request_permit, cancellation, response_bytes, true, is_sabr, ump_diagnostics),
                         ))
                     }
@@ -3876,7 +3878,6 @@ async fn ajax_passthrough(
                             if ump_diagnostics.latest_stream_protection_status
                                 .and_then(|status| status.status) == Some(3)
                             {
-                                let playback_context_id = youtube_attestation_context_key(&request_headers);
                                 let attestation = {
                                     let mut contexts = session.youtube_attestation_timing.lock()
                                         .unwrap_or_else(|error| error.into_inner());

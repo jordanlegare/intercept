@@ -818,7 +818,6 @@
       call.info.kind || "youtube_attestation_rpc",
       call.info.target,
       "rpc=" + call.id
-        + " playback_context=" + playbackContextId
         + " operation=" + call.info.operation
         + " phase=dispatch method=" + call.method
         + " transport=" + call.transport
@@ -835,7 +834,6 @@
       call.info.kind || "youtube_attestation_rpc",
       call.info.target,
       "rpc=" + call.id
-        + " playback_context=" + playbackContextId
         + " operation=" + call.info.operation
         + " phase=response_headers status=" + (Number(status) || 0)
         + " elapsed_ms=" + elapsed
@@ -855,7 +853,6 @@
       call.info.kind || "youtube_attestation_rpc",
       call.info.target,
       "rpc=" + call.id
-        + " playback_context=" + playbackContextId
         + " operation=" + call.info.operation
         + " phase=response status=" + statusCode
         + " outcome=" + outcome
@@ -878,7 +875,6 @@
       call.info.kind || "youtube_attestation_rpc",
       call.info.target,
       "rpc=" + call.id
-        + " playback_context=" + playbackContextId
         + " operation=" + call.info.operation
         + " phase=" + (phase || "error")
         + " elapsed_ms=" + elapsed
