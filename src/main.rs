@@ -1766,10 +1766,197 @@ async fn wait_for_authorization(session: &Session) -> bool {
     }
 }
 
+const MAX_UMP_METADATA_PAYLOAD_BYTES: usize = 512;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct StreamProtectionStatusDiagnostic {
+    status: Option<i32>,
+    max_retries: Option<i32>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct NextRequestPolicyDiagnostic {
+    target_audio_readahead_ms: Option<i32>,
+    target_video_readahead_ms: Option<i32>,
+    max_time_since_last_request_ms: Option<i32>,
+    backoff_time_ms: Option<i32>,
+    min_audio_readahead_ms: Option<i32>,
+    min_video_readahead_ms: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProtobufReadState {
+    Tag,
+    VarintValue,
+    Length,
+    SkipBytes { remaining: u64 },
+    Malformed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecodedUmpMetadata {
+    StreamProtectionStatus(StreamProtectionStatusDiagnostic),
+    NextRequestPolicy(NextRequestPolicyDiagnostic),
+}
+
+// Incremental wire parser: scalar values are decoded, length-delimited values
+// are skipped in place, and no cookie/video-ID/token bytes are copied.
+struct ProtobufScalarDecoder {
+    part_type: u32,
+    state: ProtobufReadState,
+    field_number: u32,
+    varint_value: u64,
+    varint_bytes: u8,
+    stream_protection_status: StreamProtectionStatusDiagnostic,
+    next_request_policy: NextRequestPolicyDiagnostic,
+}
+
+impl ProtobufScalarDecoder {
+    fn new(part_type: u32) -> Self {
+        Self {
+            part_type,
+            state: ProtobufReadState::Tag,
+            field_number: 0,
+            varint_value: 0,
+            varint_bytes: 0,
+            stream_protection_status: StreamProtectionStatusDiagnostic::default(),
+            next_request_policy: NextRequestPolicyDiagnostic::default(),
+        }
+    }
+
+    fn push_varint_byte(&mut self, byte: u8) -> Result<Option<u64>, ()> {
+        let index = self.varint_bytes;
+        if index >= 10 || (index == 9 && byte > 1) {
+            return Err(());
+        }
+        self.varint_value |= u64::from(byte & 0x7f) << (u32::from(index) * 7);
+        self.varint_bytes += 1;
+        if byte & 0x80 == 0 {
+            let value = self.varint_value;
+            self.varint_value = 0;
+            self.varint_bytes = 0;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn begin_field(&mut self, tag: u64) {
+        if tag == 0 {
+            self.state = ProtobufReadState::Malformed;
+            return;
+        }
+        let Ok(field_number) = u32::try_from(tag >> 3) else {
+            self.state = ProtobufReadState::Malformed;
+            return;
+        };
+        if field_number == 0 || field_number > 0x1fff_ffff {
+            self.state = ProtobufReadState::Malformed;
+            return;
+        }
+        let wire_type = (tag & 0x07) as u8;
+        let expected_wire_type = match (self.part_type, field_number) {
+            (58, 1 | 2) => Some(0),
+            (35, 1..=6) => Some(0),
+            (35, 7 | 8) => Some(2),
+            _ => None,
+        };
+        if expected_wire_type.is_some_and(|expected| expected != wire_type) {
+            self.state = ProtobufReadState::Malformed;
+            return;
+        }
+
+        self.field_number = field_number;
+        self.state = match wire_type {
+            0 => ProtobufReadState::VarintValue,
+            1 => ProtobufReadState::SkipBytes { remaining: 8 },
+            2 => ProtobufReadState::Length,
+            5 => ProtobufReadState::SkipBytes { remaining: 4 },
+            _ => ProtobufReadState::Malformed,
+        };
+    }
+
+    fn record_scalar(&mut self, value: u64) {
+        let value = value as i32;
+        match (self.part_type, self.field_number) {
+            (58, 1) => self.stream_protection_status.status = Some(value),
+            (58, 2) => self.stream_protection_status.max_retries = Some(value),
+            (35, 1) => self.next_request_policy.target_audio_readahead_ms = Some(value),
+            (35, 2) => self.next_request_policy.target_video_readahead_ms = Some(value),
+            (35, 3) => self.next_request_policy.max_time_since_last_request_ms = Some(value),
+            (35, 4) => self.next_request_policy.backoff_time_ms = Some(value),
+            (35, 5) => self.next_request_policy.min_audio_readahead_ms = Some(value),
+            (35, 6) => self.next_request_policy.min_video_readahead_ms = Some(value),
+            _ => {}
+        }
+    }
+
+    fn feed(&mut self, input: &[u8]) {
+        for &byte in input {
+            match self.state {
+                ProtobufReadState::Tag => match self.push_varint_byte(byte) {
+                    Ok(Some(tag)) => self.begin_field(tag),
+                    Ok(None) => {}
+                    Err(()) => self.state = ProtobufReadState::Malformed,
+                },
+                ProtobufReadState::VarintValue => match self.push_varint_byte(byte) {
+                    Ok(Some(value)) => {
+                        self.record_scalar(value);
+                        self.state = ProtobufReadState::Tag;
+                    }
+                    Ok(None) => {}
+                    Err(()) => self.state = ProtobufReadState::Malformed,
+                },
+                ProtobufReadState::Length => match self.push_varint_byte(byte) {
+                    Ok(Some(length)) => {
+                        self.state = if length == 0 {
+                            ProtobufReadState::Tag
+                        } else {
+                            ProtobufReadState::SkipBytes { remaining: length }
+                        };
+                    }
+                    Ok(None) => {}
+                    Err(()) => self.state = ProtobufReadState::Malformed,
+                },
+                ProtobufReadState::SkipBytes { remaining } => {
+                    self.state = if remaining <= 1 {
+                        ProtobufReadState::Tag
+                    } else {
+                        ProtobufReadState::SkipBytes { remaining: remaining - 1 }
+                    };
+                }
+                ProtobufReadState::Malformed => return,
+            }
+        }
+    }
+
+    fn finish(self) -> Option<DecodedUmpMetadata> {
+        if self.state != ProtobufReadState::Tag || self.varint_bytes != 0 {
+            return None;
+        }
+        match self.part_type {
+            58 => Some(DecodedUmpMetadata::StreamProtectionStatus(
+                self.stream_protection_status,
+            )),
+            35 => Some(DecodedUmpMetadata::NextRequestPolicy(
+                self.next_request_policy,
+            )),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct UmpStreamDiagnostics {
     buffer: Vec<u8>,
     payload_remaining: usize,
+    current_metadata_part: Option<u32>,
+    current_metadata_decoder: Option<ProtobufScalarDecoder>,
+    current_metadata_truncated: bool,
+    latest_stream_protection_status: Option<StreamProtectionStatusDiagnostic>,
+    latest_next_request_policy: Option<NextRequestPolicyDiagnostic>,
+    stream_protection_status_decode_errors: usize,
+    next_request_policy_decode_errors: usize,
     part_counts: std::collections::BTreeMap<u32, usize>,
     part_payload_bytes: std::collections::BTreeMap<u32, u64>,
     total_parts: usize,
@@ -1778,8 +1965,8 @@ struct UmpStreamDiagnostics {
 }
 
 impl UmpStreamDiagnostics {
-    // UMP frames contain prefix-encoded part type and payload length, then opaque payload bytes.
-    // This parser counts framing metadata only; it never decodes or logs payload contents.
+    // Decode only scalar values from the two policy parts. Opaque length-delimited
+    // fields are skipped in place; media and sensitive field contents are not copied.
     fn feed(&mut self, chunk: &[u8]) {
         if self.malformed {
             return;
@@ -1788,11 +1975,15 @@ impl UmpStreamDiagnostics {
         loop {
             if self.payload_remaining > 0 {
                 let consumed = self.payload_remaining.min(self.buffer.len());
+                if let Some(decoder) = self.current_metadata_decoder.as_mut() {
+                    decoder.feed(&self.buffer[..consumed]);
+                }
                 self.buffer.drain(..consumed);
                 self.payload_remaining -= consumed;
                 if self.payload_remaining > 0 {
                     break;
                 }
+                self.finish_metadata_part();
                 continue;
             }
             let Some((part_type, type_len)) = decode_ump_varint(&self.buffer) else {
@@ -1814,6 +2005,54 @@ impl UmpStreamDiagnostics {
             self.total_parts += 1;
             self.total_payload_bytes = self.total_payload_bytes.saturating_add(payload_len as u64);
             self.payload_remaining = payload_len;
+
+            let is_metadata_part = matches!(part_type, 35 | 58);
+            self.current_metadata_part = is_metadata_part.then_some(part_type);
+            self.current_metadata_truncated =
+                is_metadata_part && payload_len > MAX_UMP_METADATA_PAYLOAD_BYTES;
+            self.current_metadata_decoder = if is_metadata_part && !self.current_metadata_truncated {
+                Some(ProtobufScalarDecoder::new(part_type))
+            } else {
+                None
+            };
+            if self.payload_remaining == 0 {
+                self.finish_metadata_part();
+            }
+        }
+    }
+
+    fn finish_metadata_part(&mut self) {
+        let Some(part_type) = self.current_metadata_part.take() else {
+            self.current_metadata_decoder = None;
+            self.current_metadata_truncated = false;
+            return;
+        };
+        let truncated = std::mem::take(&mut self.current_metadata_truncated);
+        let Some(decoder) = self.current_metadata_decoder.take() else {
+            self.record_metadata_decode_error(part_type);
+            return;
+        };
+        if truncated {
+            self.record_metadata_decode_error(part_type);
+            return;
+        }
+
+        match decoder.finish() {
+            Some(DecodedUmpMetadata::StreamProtectionStatus(decoded)) => {
+                self.latest_stream_protection_status = Some(decoded);
+            }
+            Some(DecodedUmpMetadata::NextRequestPolicy(decoded)) => {
+                self.latest_next_request_policy = Some(decoded);
+            }
+            None => self.record_metadata_decode_error(part_type),
+        }
+    }
+
+    fn record_metadata_decode_error(&mut self, part_type: u32) {
+        match part_type {
+            58 => self.stream_protection_status_decode_errors += 1,
+            35 => self.next_request_policy_decode_errors += 1,
+            _ => {}
         }
     }
 
@@ -1827,13 +2066,76 @@ impl UmpStreamDiagnostics {
         let frame_complete =
             !self.malformed && self.buffer.is_empty() && self.payload_remaining == 0;
         let media_payload_bytes = self.part_payload_bytes.get(&21).copied().unwrap_or_default();
+
+        let mut decoded_metadata = Vec::new();
+        if let Some(status) = self.latest_stream_protection_status {
+            decoded_metadata.push(format!(
+                "stream_protection_status=status:{},max_retries:{}",
+                diagnostic_i32(status.status),
+                diagnostic_i32(status.max_retries),
+            ));
+        }
+        if let Some(policy) = self.latest_next_request_policy {
+            decoded_metadata.push(format!(
+                "next_request_policy=target_audio_readahead_ms:{},target_video_readahead_ms:{},max_time_since_last_request_ms:{},backoff_time_ms:{},min_audio_readahead_ms:{},min_video_readahead_ms:{}",
+                diagnostic_i32(policy.target_audio_readahead_ms),
+                diagnostic_i32(policy.target_video_readahead_ms),
+                diagnostic_i32(policy.max_time_since_last_request_ms),
+                diagnostic_i32(policy.backoff_time_ms),
+                diagnostic_i32(policy.min_audio_readahead_ms),
+                diagnostic_i32(policy.min_video_readahead_ms),
+            ));
+        }
+        if self.stream_protection_status_decode_errors > 0
+            || self.next_request_policy_decode_errors > 0
+        {
+            decoded_metadata.push(format!(
+                "metadata_decode_errors=sps:{},next_policy:{}",
+                self.stream_protection_status_decode_errors,
+                self.next_request_policy_decode_errors,
+            ));
+        }
+        let decoded_metadata = if decoded_metadata.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", decoded_metadata.join(" "))
+        };
+
         format!(
-            "ump_parts={} total_parts={} total_payload_bytes={} media_payload_bytes={} frame_complete={} partial_header_bytes={} payload_remaining={} malformed={}",
+            "ump_parts={} total_parts={} total_payload_bytes={} media_payload_bytes={} frame_complete={} partial_header_bytes={} payload_remaining={} malformed={}{}",
             parts, self.total_parts, self.total_payload_bytes, media_payload_bytes,
             frame_complete, self.buffer.len(), self.payload_remaining, self.malformed,
+            decoded_metadata,
         )
     }
 }
+
+fn diagnostic_i32(value: Option<i32>) -> String {
+    value.map(|number| number.to_string()).unwrap_or_else(|| "absent".to_owned())
+}
+
+#[cfg(test)]
+fn decode_stream_protection_status(
+    input: &[u8],
+) -> Option<StreamProtectionStatusDiagnostic> {
+    let mut decoder = ProtobufScalarDecoder::new(58);
+    decoder.feed(input);
+    match decoder.finish()? {
+        DecodedUmpMetadata::StreamProtectionStatus(decoded) => Some(decoded),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn decode_next_request_policy(input: &[u8]) -> Option<NextRequestPolicyDiagnostic> {
+    let mut decoder = ProtobufScalarDecoder::new(35);
+    decoder.feed(input);
+    match decoder.finish()? {
+        DecodedUmpMetadata::NextRequestPolicy(decoded) => Some(decoded),
+        _ => None,
+    }
+}
+
 
 fn decode_ump_varint(input: &[u8]) -> Option<(u32, usize)> {
     let first = *input.first()?;
@@ -2609,6 +2911,34 @@ async fn ajax_passthrough(
         error_sampled_bytes,
         error_read_failed,
     );
+    if is_youtube_player {
+        let response_content_type = upstream_headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 96))
+            .unwrap_or_else(|| "absent".to_owned());
+        let response_content_length = upstream_headers.get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 24))
+            .unwrap_or_else(|| "absent".to_owned());
+        let response_server = upstream_headers.get(header::SERVER)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 64))
+            .unwrap_or_else(|| "absent".to_owned());
+        let error_preview = error_preview.as_deref()
+            .map(|value| format!(" error_preview={}", clean_field(value.to_owned(), 200)))
+            .unwrap_or_default();
+        push_event(
+            &session,
+            "youtube_player_upstream_response",
+            format!("{upstream_host}{upstream_path}"),
+            format!(
+                "rid={request_id} status={} elapsed_ms={upstream_elapsed_ms} content_type={response_content_type} content_length={response_content_length} server={response_server} body_state={error_body_state} body_captured_bytes={}{}",
+                status.as_u16(),
+                error_body_capture.len(),
+                error_preview,
+            ),
+        ).await;
+    }
     let mut response = Response::builder().status(status);
     let response_headers = response.headers_mut().expect("fresh response builder");
     response_headers.insert("origin-agent-cluster", HeaderValue::from_static("?1"));
@@ -6199,7 +6529,9 @@ mod tests {
 
 #[cfg(test)]
 mod ump_stream_diagnostics_tests {
-    use super::UmpStreamDiagnostics;
+    use super::{
+        decode_next_request_policy, decode_stream_protection_status, UmpStreamDiagnostics,
+    };
 
     #[test]
     fn parses_parts_across_arbitrary_chunk_boundaries() {
@@ -6214,6 +6546,46 @@ mod ump_stream_diagnostics_tests {
         assert!(summary.contains("media_payload_bytes=3"));
         assert!(summary.contains("frame_complete=true"));
         assert!(summary.contains("malformed=false"));
+    }
+
+    #[test]
+    fn decodes_stream_protection_status_and_optional_retry_count() {
+        let status_only = decode_stream_protection_status(&[0x08, 0x02]).unwrap();
+        assert_eq!(status_only.status, Some(2));
+        assert_eq!(status_only.max_retries, None);
+
+        let with_retries =
+            decode_stream_protection_status(&[0x08, 0x02, 0x10, 0x00]).unwrap();
+        assert_eq!(with_retries.status, Some(2));
+        assert_eq!(with_retries.max_retries, Some(0));
+    }
+
+    #[test]
+    fn decodes_next_request_policy_timing_fields_and_skips_opaque_fields() {
+        // target_audio_readahead_ms=100, backoff_time_ms=500,
+        // followed by length-delimited playbackCookie and videoId fields.
+        let policy = decode_next_request_policy(&[
+            0x08, 0x64, 0x20, 0xf4, 0x03,
+            0x3a, 0x02, 0xaa, 0xbb,
+            0x42, 0x03, b'v', b'i', b'd',
+        ]).unwrap();
+        assert_eq!(policy.target_audio_readahead_ms, Some(100));
+        assert_eq!(policy.backoff_time_ms, Some(500));
+        assert_eq!(policy.target_video_readahead_ms, None);
+    }
+
+    #[test]
+    fn includes_decoded_protection_and_policy_fields_in_ump_summary() {
+        let mut frame = vec![58, 4, 0x08, 0x02, 0x10, 0x00];
+        frame.extend_from_slice(&[35, 5, 0x08, 0x64, 0x20, 0xf4, 0x03]);
+        let mut diagnostics = UmpStreamDiagnostics::default();
+        diagnostics.feed(&frame[..4]);
+        diagnostics.feed(&frame[4..]);
+        let summary = diagnostics.summary();
+        assert!(summary.contains("stream_protection_status=status:2,max_retries:0"));
+        assert!(summary.contains("target_audio_readahead_ms:100"));
+        assert!(summary.contains("backoff_time_ms:500"));
+        assert!(summary.contains("frame_complete=true"));
     }
 
     #[test]
