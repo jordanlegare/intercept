@@ -6057,6 +6057,7 @@ fn event_detail_limit(kind: &str) -> usize {
     // conservative default for ordinary events.
     match kind {
         "youtube_sabr_response_stream_complete" => 1024,
+        "youtube_player_watchdog" => 900,
         "youtube_player_state" => 640,
         "youtube_sabr_attestation_context"
         | "youtube_sabr_request_metadata"
@@ -7719,6 +7720,9 @@ mod ump_stream_diagnostics_tests {
         let stored = clean_field(detail, event_detail_limit("youtube_sabr_attestation_context"));
         assert!(stored.len() > 300);
         assert!(stored.ends_with("last_rpc_response_status=200 last_rpc_response_ago_ms=42"));
+
+        let watchdog = clean_field("x".repeat(1_000), event_detail_limit("youtube_player_watchdog"));
+        assert_eq!(watchdog.len(), 900);
 
         let ordinary = clean_field("x".repeat(400), event_detail_limit("ajax_response"));
         assert_eq!(ordinary.len(), 300);
