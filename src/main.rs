@@ -3476,7 +3476,11 @@ fn youtube_search_json_shape_diagnostic(body: &[u8]) -> String {
         "top={top_keys};ctx={context_keys};client={client_keys};{optional_fields}"
     );
     if summary.len() > 260 {
-        summary.truncate(260);
+        let mut boundary = 260;
+        while !summary.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        summary.truncate(boundary);
     }
     summary
 }
