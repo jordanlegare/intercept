@@ -152,29 +152,8 @@
       exportEventsButton.disabled = false;
       eventExportStatus.textContent = events.length + " retained events · snapshot " + latestEventsAt.toLocaleTimeString();
       eventSummary.textContent = "EVENT STREAM · " + events.length + " retained";
-      // Keep playback, SABR handoff, and attestation evidence visible even when
-      // unrelated traffic pushes it outside the short recent-activity window.
-      const visible = new Map();
-      for (const item of events.slice(-35)) {
-        visible.set(String(item.at_unix_ms) + "|" + item.kind + "|" + item.detail, item);
-      }
-      const diagnosticKinds = new Set([
-        "youtube_attestation_rpc",
-        "youtube_attestation_resource",
-        "youtube_player_state",
-        "youtube_player_worker",
-        "youtube_player_runtime",
-        "youtube_sabr_request_gap",
-        "youtube_sabr_response_stream_complete",
-        "youtube_sabr_policy_diagnostic",
-        "youtube_sabr_attestation_context"
-      ]);
-      for (const item of events.filter(item => diagnosticKinds.has(item.kind)).slice(-100)) {
-        visible.set(String(item.at_unix_ms) + "|" + item.kind + "|" + item.detail, item);
-      }
-      eventsNode.textContent = Array.from(visible.values())
-        .sort((left, right) => Number(right.at_unix_ms) - Number(left.at_unix_ms))
-        .slice(0, 90)
+      // Render the full retained server history, newest first (up to 2,000 events).
+      eventsNode.textContent = events.slice(-2_000).slice().reverse()
         .map(item => {
           const time = new Date(Number(item.at_unix_ms)).toLocaleTimeString();
           return "[" + time + "] " + item.kind + " · " + item.detail + " · " + item.target;
@@ -197,7 +176,7 @@
       exported_at: exportedAt.toISOString(),
       snapshot_at: latestEventsAt ? latestEventsAt.toISOString() : exportedAt.toISOString(),
       event_count: latestEvents.length,
-      retained_event_limit: 500,
+      retained_event_limit: 2000,
       events: latestEvents
     };
     const blob = new Blob([JSON.stringify(payload, null, 2) + "\n"], {
