@@ -2643,15 +2643,19 @@ fn is_youtube_inner_tube_endpoint(url: &Url) -> bool {
         host.eq_ignore_ascii_case("youtube.com")
             || host.to_ascii_lowercase().ends_with(".youtube.com")
     });
-    youtube_host && matches!(
-        url.path(),
-        "/youtubei/v1/search"
-            | "/youtubei/v1/player"
-            | "/youtubei/v1/get_watch"
-            | "/youtubei/v1/next"
-            | "/youtubei/v1/feedback"
-            | "/youtubei/v1/att/get"
-            | "/youtubei/v1/att/log"
+    let path = url.path().to_ascii_lowercase();
+    youtube_host && (
+        matches!(
+            path.as_str(),
+            "/youtubei/v1/search"
+                | "/youtubei/v1/player"
+                | "/youtubei/v1/get_watch"
+                | "/youtubei/v1/next"
+                | "/youtubei/v1/feedback"
+                | "/youtubei/v1/att/get"
+                | "/youtubei/v1/att/log"
+        )
+        || path.starts_with("/api/jnn/v1/")
     )
 }
 
@@ -6313,11 +6317,13 @@ mod tests {
     fn youtube_attestation_resources_use_inner_tube_cookie_auth_path() {
         let att_get = Url::parse("https://www.youtube.com/youtubei/v1/att/get").unwrap();
         let att_log = Url::parse("https://youtube.com/youtubei/v1/att/log").unwrap();
+        let jnn_rpc = Url::parse("https://www.youtube.com/api/jnn/v1/GenerateIT").unwrap();
         let wrong_host = Url::parse("https://example.com/youtubei/v1/att/get").unwrap();
         let wrong_path = Url::parse("https://www.youtube.com/youtubei/v1/player/att/get").unwrap();
 
         assert!(is_youtube_inner_tube_endpoint(&att_get));
         assert!(is_youtube_inner_tube_endpoint(&att_log));
+        assert!(is_youtube_inner_tube_endpoint(&jnn_rpc));
         assert!(!is_youtube_inner_tube_endpoint(&wrong_host));
         assert!(!is_youtube_inner_tube_endpoint(&wrong_path));
     }
