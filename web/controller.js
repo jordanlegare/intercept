@@ -64,10 +64,12 @@
 
   function record(kind, target, detail) {
     if (INTERNAL_AUTHORITY_EVENTS.has(kind)) return;
+    const eventKind = String(kind).slice(0, 80);
+    const detailLimit = eventKind === "youtube_player_state" ? 480 : 300;
     eventBuffer.push({
-      kind: String(kind).slice(0, 80),
+      kind: eventKind,
       target: String(target || "").slice(0, 240),
-      detail: String(detail || "").slice(0, 300)
+      detail: String(detail || "").slice(0, detailLimit)
     });
     trimEventBuffer();
   }
@@ -1039,6 +1041,7 @@
       const errorCode = video.error && Number(video.error.code);
       let bufferedCount = 0;
       let currentBufferedEnd = "none";
+      let currentBufferedAhead = "none";
       let furthestBufferedEnd = "none";
       try {
         const ranges = video.buffered;
@@ -1049,11 +1052,32 @@
           const end = ranges.end(index);
           if (Number.isFinite(currentTime) && start <= currentTime && end >= currentTime) {
             currentBufferedEnd = metric(end);
+            currentBufferedAhead = metric(Math.max(0, end - currentTime));
           }
           if (end > furthest) furthest = end;
         }
         if (furthest >= 0) furthestBufferedEnd = metric(furthest);
       } catch (_) {}
+
+      let totalFrames = "unknown";
+      let droppedFrames = "unknown";
+      let corruptedFrames = "unknown";
+      try {
+        if (typeof video.getVideoPlaybackQuality === "function") {
+          const quality = video.getVideoPlaybackQuality();
+          if (quality) {
+            totalFrames = metric(quality.totalVideoFrames, 0);
+            droppedFrames = metric(quality.droppedVideoFrames, 0);
+            corruptedFrames = metric(quality.corruptedVideoFrames, 0);
+          }
+        }
+      } catch (_) {}
+      if (totalFrames === "unknown" && Number.isFinite(Number(video.webkitDecodedFrameCount))) {
+        totalFrames = metric(video.webkitDecodedFrameCount, 0);
+      }
+      if (droppedFrames === "unknown" && Number.isFinite(Number(video.webkitDroppedFrameCount))) {
+        droppedFrames = metric(video.webkitDroppedFrameCount, 0);
+      }
 
       return "event=" + eventName
         + " current_time=" + metric(currentTime)
@@ -1067,7 +1091,11 @@
         + " video_size=" + (Number(video.videoWidth) || 0) + "x" + (Number(video.videoHeight) || 0)
         + " buffered_ranges=" + bufferedCount
         + " current_buffer_end=" + currentBufferedEnd
+        + " buffered_ahead_s=" + currentBufferedAhead
         + " furthest_buffer_end=" + furthestBufferedEnd
+        + " frames_total=" + totalFrames
+        + " frames_dropped=" + droppedFrames
+        + " frames_corrupted=" + corruptedFrames
         + " media_error_code=" + (Number.isFinite(errorCode) && errorCode > 0 ? errorCode : "none");
     }
 
