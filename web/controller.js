@@ -707,7 +707,7 @@
   function beginYouTubeAttestationRpc(info, method, transport) {
     youtubeAttestationRpcSequence = (youtubeAttestationRpcSequence % 999999) + 1;
     return {
-      id: youtubeAttestationRpcSequence,
+      id: Date.now().toString(36) + "-" + youtubeAttestationRpcSequence,
       info,
       method,
       transport,
@@ -766,12 +766,15 @@
     const elapsed = call.startedAt === null
       ? "not_dispatched"
       : String(Math.max(0, Math.round(performance.now() - call.startedAt)));
+    const statusCode = Number(status) || 0;
+    const outcome = statusCode > 0 ? "http" : "no_http_response";
     record(
       "youtube_attestation_rpc",
       call.info.target,
       "rpc=" + call.id
         + " operation=" + call.info.operation
-        + " phase=response status=" + (Number(status) || 0)
+        + " phase=response status=" + statusCode
+        + " outcome=" + outcome
         + " elapsed_ms=" + elapsed
         + " ct=" + youtubeAttestationContentType(headers)
         + " cl=" + youtubeAttestationContentLength(headers)
