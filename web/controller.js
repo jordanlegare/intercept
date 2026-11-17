@@ -3171,6 +3171,98 @@
     window.EventSource.prototype = NativeEventSource.prototype;
   }
 
+  // Blob-backed workers bypass rewrite_worker_javascript because their source
+  // never crosses the proxy as a worker-script response. For JavaScript Blobs
+  // created by YouTube pages, prepend a guarded worker-only bootstrap that
+  // routes fetch/XHR/importScripts through this session. In window/script
+  // contexts the bootstrap exits without changing browser behavior.
+  function youtubeBlobWorkerBootstrap() {
+    const prefixLiteral = JSON.stringify(sessionPrefix);
+    const primaryOriginLiteral = JSON.stringify(upstreamOrigin);
+    return "(function(){try{"
+      + "if(typeof WorkerGlobalScope==='undefined'||!(self instanceof WorkerGlobalScope))return;"
+      + "const prefix=" + prefixLiteral + ",primaryOrigin=" + primaryOriginLiteral + ";"
+      + "const rawFetch=typeof self.fetch==='function'?self.fetch.bind(self):null;"
+      + "function route(value){"
+      + "const raw=value instanceof Request?value.url:value instanceof URL?value.href:String(value);"
+      + "const url=new URL(raw,self.location.href);"
+      + "if(url.protocol!=='http:'&&url.protocol!=='https:')return url.href;"
+      + "if(url.origin===self.location.origin)return url.href;"
+      + "const path=url.pathname+url.search+url.hash;"
+      + "if(url.origin===primaryOrigin)return path;"
+      + "return prefix+'/_/'+url.protocol.slice(0,-1)+'/'+url.host+path;"
+      + "}"
+      + "function attestationInfo(value){try{"
+      + "const url=new URL(value instanceof Request?value.url:value instanceof URL?value.href:String(value),self.location.href);"
+      + "let host=url.hostname.toLowerCase(),path=url.pathname;"
+      + "if(url.origin===self.location.origin){const marker=prefix+'/_/https/';const at=path.indexOf(marker);"
+      + "if(at>=0){const target=path.slice(at+marker.length),slash=target.indexOf('/');if(slash>0){host=target.slice(0,slash).toLowerCase();path=target.slice(slash);}}}"
+      + "if(host==='jnn-pa.googleapis.com'||(host.endsWith('.googleapis.com')&&path.toLowerCase().includes('waa')))"
+      + "return {target:host+path,operation:(path.match(/^\\/$rpc\\/google\\.internal\\.waa\\.v1\\.Waa\\/(Create|GenerateIT)$/)||[])[1]||'Other'};"
+      + "}catch(_e){return null}}"
+      + "function report(info,detail){if(!info||!rawFetch)return;try{"
+      + "rawFetch(new URL('/_intercept/events',self.location.origin).href,{method:'POST',"
+      + "headers:{'content-type':'application/json'},body:JSON.stringify([{kind:'youtube_attestation_rpc',"
+      + "target:info.target,detail:String(detail||'').slice(0,300)}]),keepalive:true}).catch(()=>{});"
+      + "}catch(_e){}}"
+      + "if(rawFetch){self.fetch=function(input,init){"
+      + "const source=input instanceof Request?input.url:input;"
+      + "const routed=route(source);let request=input instanceof Request?new Request(routed,input):new Request(routed,init);"
+      + "if(input instanceof Request&&init)request=new Request(request,init);"
+      + "const headers=new Headers(request.headers);headers.set('X-Intercept-Proxy-Mode','ajax');"
+      + "headers.set('X-Intercept-Transport-Diagnostic','worker-fetch');"
+      + "const marked=new Request(request,{headers});const info=attestationInfo(source);"
+      + "if(info)report(info,'phase=blob_worker_dispatch operation='+info.operation+' method='+marked.method+' transport=worker-fetch');"
+      + "return rawFetch(marked).then(response=>{if(info)report(info,'phase=blob_worker_response operation='+info.operation+' status='+response.status);return response;});"
+      + "};}"
+      + "if(self.XMLHttpRequest){const X=self.XMLHttpRequest,open=X.prototype.open,send=X.prototype.send,meta=new WeakMap();"
+      + "X.prototype.open=function(method,url,...rest){const info=attestationInfo(url),routed=route(url);"
+      + "meta.set(this,{info,method:String(method).toUpperCase()});return open.call(this,method,routed,...rest);};"
+      + "X.prototype.send=function(...args){const call=meta.get(this);if(!call)return send.apply(this,args);"
+      + "try{this.setRequestHeader('X-Intercept-Proxy-Mode','ajax');"
+      + "this.setRequestHeader('X-Intercept-Transport-Diagnostic','worker-xhr');}catch(_e){}"
+      + "if(call.info)report(call.info,'phase=blob_worker_dispatch operation='+call.info.operation+' method='+call.method+' transport=worker-xhr');"
+      + "this.addEventListener('load',()=>{if(call.info)report(call.info,'phase=blob_worker_response operation='+call.info.operation+' status='+this.status);},{once:true});"
+      + "this.addEventListener('error',()=>{if(call.info)report(call.info,'phase=blob_worker_error operation='+call.info.operation+' error=network');},{once:true});"
+      + "return send.apply(this,args);};}"
+      + "if(typeof self.importScripts==='function'){const nativeImport=self.importScripts.bind(self);self.importScripts=function(...urls){"
+      + "return nativeImport(...urls.map(route));};}"
+      + "}catch(_e){}})();\n";
+  }
+
+  (function instrumentYouTubeJavascriptBlobs() {
+    let primaryHost = "";
+    try { primaryHost = new URL(upstreamOrigin).hostname.toLowerCase(); } catch (_) {}
+    if (primaryHost !== "youtube.com" && !primaryHost.endsWith(".youtube.com")) return;
+    if (typeof window.Blob !== "function") return;
+    const NativeBlob = window.Blob;
+    const blobWorkerBootstrap = youtubeBlobWorkerBootstrap();
+    const javascriptMimeTypes = new Set([
+      "text/javascript", "application/javascript", "application/x-javascript",
+      "text/ecmascript", "application/ecmascript"
+    ]);
+    try {
+      window.Blob = new Proxy(NativeBlob, {
+        construct(target, args, newTarget) {
+          const options = args[1] || {};
+          const mime = String(options.type || "").split(";", 1)[0].trim().toLowerCase();
+          if (!javascriptMimeTypes.has(mime)) {
+            return Reflect.construct(target, args, newTarget);
+          }
+          let parts;
+          try { parts = Array.from(args[0] || []); } catch (_) {
+            return Reflect.construct(target, args, newTarget);
+          }
+          record("youtube_player_worker", "blob:worker",
+            "phase=javascript_blob_created parts=" + parts.length + " bootstrap=worker_only");
+          return Reflect.construct(target, [[blobWorkerBootstrap, ...parts], options], newTarget);
+        }
+      });
+    } catch (_) {
+      record("youtube_player_worker", "blob:worker", "phase=blob_constructor_patch_failed");
+    }
+  })();
+
   function youtubeWorkerResourceInfo(source) {
     let primaryHost = "";
     try { primaryHost = new URL(upstreamOrigin).hostname.toLowerCase(); } catch (_) {}
