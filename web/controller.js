@@ -2290,7 +2290,7 @@
     const method = String((init && init.method) || (input instanceof Request && input.method) || "GET").toUpperCase();
     const routed = routeToProxy(source);
     const attestationInfo = youtubeAttestationRpcInfo(source);
-    record("fetch", String(source), method);
+    record("fetch", attestationInfo ? attestationInfo.target : String(source), method);
     if (!routed) return Promise.reject(new TypeError("Intercept only proxies HTTP and HTTPS requests."));
     try {
       // Mark the request explicitly instead of relying on browser-specific
@@ -2666,7 +2666,7 @@
       const markedRequest = new Request(routedRequest, {headers});
       record(
         "ajax_dispatch",
-        routed,
+        attestationInfo ? attestationInfo.target : routed,
         method + " · " + bodyDetail + inputCorrelationDetail(inputContext)
       );
       const fetchEventTarget = fetchEventPath(source);
@@ -2723,7 +2723,13 @@
         throw error;
       });
     } catch (error) {
-      record("ajax_route_error", String(source), String(error && error.message || error));
+      record(
+        "ajax_route_error",
+        attestationInfo ? attestationInfo.target : String(source),
+        attestationInfo
+          ? "error_name=" + String(error && error.name || "unknown").slice(0, 40)
+          : String(error && error.message || error)
+      );
       return Promise.reject(error);
     }
   };
@@ -2735,11 +2741,13 @@
   XMLHttpRequest.prototype.open = function(method, url, ...rest) {
     const routed = routeToProxy(url);
     if (!routed) throw new DOMException("Intercept only proxies HTTP and HTTPS requests.", "SecurityError");
+    const attestation = youtubeAttestationRpcInfo(url);
     xhrMeta.set(this, {
       method: String(method).toUpperCase(),
       url: routed,
+      eventTarget: attestation ? attestation.target : routed,
       async: rest[0] !== false,
-      attestation: youtubeAttestationRpcInfo(url)
+      attestation
     });
     return nativeXhrOpen.call(this, method, routed, ...rest);
   };
@@ -2771,12 +2779,12 @@
           );
         }
       } catch (error) {
-        record("xhr_marker_error", meta.url, String(error && error.message || error));
+        record("xhr_marker_error", meta.eventTarget || meta.url, String(error && error.message || error));
       }
-      record("xhr", meta.url, meta.method + inputCorrelationDetail(inputContext));
+      record("xhr", meta.eventTarget || meta.url, meta.method + inputCorrelationDetail(inputContext));
       record(
         "ajax_dispatch",
-        meta.url,
+        meta.eventTarget || meta.url,
         meta.method + " · " + bodyDetail + inputCorrelationDetail(inputContext)
       );
     }
