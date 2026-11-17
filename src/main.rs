@@ -1696,6 +1696,101 @@ async fn wait_for_authorization(session: &Session) -> bool {
     }
 }
 
+
+#[derive(Default)]
+struct UmpStreamDiagnostics {
+    buffer: Vec<u8>,
+    payload_remaining: usize,
+    part_counts: std::collections::BTreeMap<u32, usize>,
+    part_payload_bytes: std::collections::BTreeMap<u32, u64>,
+    total_parts: usize,
+    total_payload_bytes: u64,
+    malformed: bool,
+}
+
+impl UmpStreamDiagnostics {
+    // UMP frames contain prefix-encoded part type and payload length, then opaque payload bytes.
+    // This parser counts framing metadata only; it never decodes or logs payload contents.
+    fn feed(&mut self, chunk: &[u8]) {
+        if self.malformed { return; }
+        self.buffer.extend_from_slice(chunk);
+        loop {
+            if self.payload_remaining > 0 {
+                let consumed = self.payload_remaining.min(self.buffer.len());
+                self.buffer.drain(..consumed);
+                self.payload_remaining -= consumed;
+                if self.payload_remaining > 0 { break; }
+                continue;
+            }
+            let Some((part_type, type_len)) = decode_ump_varint(&self.buffer) else {
+                if self.buffer.len() > 5 { self.malformed = true; }
+                break;
+            };
+            let Some((payload_len, length_len)) = decode_ump_varint(&self.buffer[type_len..]) else {
+                if self.buffer.len() > 10 { self.malformed = true; }
+                break;
+            };
+            self.buffer.drain(..type_len + length_len);
+            let payload_len = payload_len as usize;
+            *self.part_counts.entry(part_type).or_default() += 1;
+            *self.part_payload_bytes.entry(part_type).or_default() += payload_len as u64;
+            self.total_parts += 1;
+            self.total_payload_bytes = self.total_payload_bytes.saturating_add(payload_len as u64);
+            self.payload_remaining = payload_len;
+        }
+    }
+
+    fn summary(&self) -> String {
+        let parts = self.part_counts.iter().map(|(part_type, count)| {
+            let name = ump_part_name(*part_type);
+            let bytes = self.part_payload_bytes.get(part_type).copied().unwrap_or_default();
+            format!("{name}:{count}/{bytes}B")
+        }).collect::<Vec<_>>().join(",");
+        let parts = if parts.is_empty() { "none".to_owned() } else { parts };
+        let frame_complete = !self.malformed && self.buffer.is_empty() && self.payload_remaining == 0;
+        let media_payload_bytes = self.part_payload_bytes.get(&21).copied().unwrap_or_default();
+        format!(
+            "ump_parts={} total_parts={} total_payload_bytes={} media_payload_bytes={} frame_complete={} partial_header_bytes={} payload_remaining={} malformed={}",
+            parts, self.total_parts, self.total_payload_bytes, media_payload_bytes,
+            frame_complete, self.buffer.len(), self.payload_remaining, self.malformed,
+        )
+    }
+}
+
+fn decode_ump_varint(input: &[u8]) -> Option<(u32, usize)> {
+    let first = *input.first()?;
+    let size = (first.leading_ones().min(4) + 1) as usize;
+    if input.len() < size { return None; }
+    let mut value = 0u32;
+    let mut shift = 0;
+    if size != 5 {
+        shift = 8 - size as u32;
+        let mask = ((1u16 << shift) - 1) as u8;
+        value |= (first & mask) as u32;
+    }
+    for byte in input.iter().take(size).skip(1) {
+        value |= (*byte as u32) << shift;
+        shift += 8;
+    }
+    Some((value, size))
+}
+
+fn ump_part_name(part_type: u32) -> String {
+    let name = match part_type {
+        10 => "ONESIE_HEADER", 11 => "ONESIE_DATA", 12 => "ONESIE_ENCRYPTED_MEDIA",
+        20 => "MEDIA_HEADER", 21 => "MEDIA", 22 => "MEDIA_END", 31 => "LIVE_METADATA",
+        35 => "NEXT_REQUEST_POLICY", 37 => "FORMAT_SELECTION_CONFIG",
+        38 => "USTREAMER_SELECTED_MEDIA_STREAM", 42 => "FORMAT_INITIALIZATION_METADATA",
+        43 => "SABR_REDIRECT", 44 => "SABR_ERROR", 45 => "SABR_SEEK",
+        46 => "RELOAD_PLAYER_RESPONSE", 47 => "PLAYBACK_START_POLICY",
+        51 => "SELECTABLE_FORMATS", 52 => "REQUEST_IDENTIFIER", 57 => "SABR_CONTEXT_UPDATE",
+        58 => "STREAM_PROTECTION_STATUS", 59 => "SABR_CONTEXT_SENDING_POLICY",
+        61 => "SABR_ACK", 62 => "END_OF_TRACK", 65 => "PREWARM_CONNECTION",
+        _ => return format!("TYPE_{part_type}"),
+    };
+    name.to_owned()
+}
+
 fn is_youtube_sabr_request(url: &Url) -> bool {
     url.path() == "/videoplayback"
         && url.host_str().is_some_and(|host| {
@@ -2540,9 +2635,10 @@ async fn ajax_passthrough(
             prefix_bytes,
             false,
             is_youtube_sabr_request(&upstream_url),
+            UmpStreamDiagnostics::default(),
         ),
         |(mut upstream_stream, session, request_id, stream_target, request_permit,
-          mut cancellation, mut response_bytes, finished, is_sabr)| async move {
+          mut cancellation, mut response_bytes, finished, is_sabr, mut ump_diagnostics)| async move {
             if finished {
                 return None;
             }
@@ -2553,7 +2649,7 @@ async fn ajax_passthrough(
                             &session,
                             "youtube_sabr_response_stream_complete",
                             stream_target.clone(),
-                            format!("rid={request_id} outcome=cancelled response_bytes={response_bytes}"),
+                            format!("rid={request_id} outcome=cancelled response_bytes={response_bytes} · {}", ump_diagnostics.summary()),
                         ).await;
                     }
                     None
@@ -2561,10 +2657,11 @@ async fn ajax_passthrough(
                 chunk = upstream_stream.next() => match chunk {
                     Some(Ok(chunk)) => {
                         response_bytes = response_bytes.saturating_add(chunk.len() as u64);
+                        if is_sabr { ump_diagnostics.feed(&chunk); }
                         Some((
                             Ok(chunk),
                             (upstream_stream, session, request_id, stream_target,
-                             request_permit, cancellation, response_bytes, false, is_sabr),
+                             request_permit, cancellation, response_bytes, false, is_sabr, ump_diagnostics),
                         ))
                     }
                     Some(Err(error)) => {
@@ -2580,13 +2677,13 @@ async fn ajax_passthrough(
                                 &session,
                                 "youtube_sabr_response_stream_complete",
                                 stream_target.clone(),
-                                format!("rid={request_id} outcome=stream_error response_bytes={response_bytes}"),
+                                format!("rid={request_id} outcome=stream_error response_bytes={response_bytes} · {}", ump_diagnostics.summary()),
                             ).await;
                         }
                         Some((
                             Err(io::Error::other(safe_error)),
                             (upstream_stream, session, request_id, stream_target,
-                             request_permit, cancellation, response_bytes, true, is_sabr),
+                             request_permit, cancellation, response_bytes, true, is_sabr, ump_diagnostics),
                         ))
                     }
                     None => {
@@ -2595,7 +2692,7 @@ async fn ajax_passthrough(
                                 &session,
                                 "youtube_sabr_response_stream_complete",
                                 stream_target,
-                                format!("rid={request_id} outcome=complete response_bytes={response_bytes}"),
+                                format!("rid={request_id} outcome=complete response_bytes={response_bytes} · {}", ump_diagnostics.summary()),
                             ).await;
                         }
                         None
@@ -6000,5 +6097,36 @@ mod tests {
             "http://localhost:5000"
         ));
         assert!(!is_dashboard_host("example.com:5000"));
+    }
+}
+
+
+#[cfg(test)]
+mod ump_stream_diagnostics_tests {
+    use super::UmpStreamDiagnostics;
+
+    #[test]
+    fn parses_parts_across_arbitrary_chunk_boundaries() {
+        let frame = [21, 3, 0, 1, 2, 22, 1, 0];
+        let mut diagnostics = UmpStreamDiagnostics::default();
+        diagnostics.feed(&frame[..2]);
+        diagnostics.feed(&frame[2..6]);
+        diagnostics.feed(&frame[6..]);
+        let summary = diagnostics.summary();
+        assert!(summary.contains("MEDIA:1/3B"));
+        assert!(summary.contains("MEDIA_END:1/1B"));
+        assert!(summary.contains("media_payload_bytes=3"));
+        assert!(summary.contains("frame_complete=true"));
+        assert!(summary.contains("malformed=false"));
+    }
+
+    #[test]
+    fn reports_incomplete_payload_without_buffering_the_payload() {
+        let mut diagnostics = UmpStreamDiagnostics::default();
+        diagnostics.feed(&[21, 5, 0, 1]);
+        let summary = diagnostics.summary();
+        assert!(summary.contains("MEDIA:1/5B"));
+        assert!(summary.contains("frame_complete=false"));
+        assert!(summary.contains("payload_remaining=3"));
     }
 }
