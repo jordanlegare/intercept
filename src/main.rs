@@ -2048,6 +2048,9 @@ struct YouTubeAttestationTiming {
     last_rpc_response_operation: Option<&'static str>,
     last_rpc_response_correlation_id: Option<String>,
     last_rpc_response_status: Option<u16>,
+    last_rpc_response_content_type: Option<String>,
+    last_rpc_response_content_length: Option<String>,
+    last_rpc_response_content_encoding: Option<String>,
     last_rpc_response_at: Option<Instant>,
 }
 
@@ -2066,6 +2069,9 @@ struct YouTubeAttestationTimingSnapshot {
     last_rpc_response_operation: Option<&'static str>,
     last_rpc_response_correlation_id: Option<String>,
     last_rpc_response_status: Option<u16>,
+    last_rpc_response_content_type: Option<String>,
+    last_rpc_response_content_length: Option<String>,
+    last_rpc_response_content_encoding: Option<String>,
     last_rpc_response_ago_ms: Option<u64>,
 }
 
@@ -2103,10 +2109,22 @@ impl YouTubeAttestationTiming {
         }
     }
 
-    fn observe_proxy_response(&mut self, operation: &'static str, correlation_id: Option<&str>, status: u16, observed_at: Instant) {
+    fn observe_proxy_response(
+        &mut self,
+        operation: &'static str,
+        correlation_id: Option<&str>,
+        status: u16,
+        content_type: String,
+        content_length: String,
+        content_encoding: String,
+        observed_at: Instant,
+    ) {
         self.last_rpc_response_operation = Some(operation);
         self.last_rpc_response_correlation_id = correlation_id.map(str::to_owned);
         self.last_rpc_response_status = Some(status);
+        self.last_rpc_response_content_type = Some(content_type);
+        self.last_rpc_response_content_length = Some(content_length);
+        self.last_rpc_response_content_encoding = Some(content_encoding);
         self.last_rpc_response_at = Some(observed_at);
     }
 
@@ -2131,6 +2149,9 @@ impl YouTubeAttestationTiming {
             last_rpc_response_operation: self.last_rpc_response_operation,
             last_rpc_response_correlation_id: self.last_rpc_response_correlation_id.clone(),
             last_rpc_response_status: self.last_rpc_response_status,
+            last_rpc_response_content_type: self.last_rpc_response_content_type.clone(),
+            last_rpc_response_content_length: self.last_rpc_response_content_length.clone(),
+            last_rpc_response_content_encoding: self.last_rpc_response_content_encoding.clone(),
             last_rpc_response_ago_ms: self.last_rpc_response_at.map(|previous| duration_millis(observed_at.saturating_duration_since(previous))),
         }
     }
@@ -3205,6 +3226,28 @@ async fn ajax_passthrough(
             .take()
             .map(|window| observe_sabr_backoff(window, Instant::now()));
         if let Some(metadata) = sabr_request_metadata {
+            // Snapshot the latest WAA upstream response at the time this SABR
+            // request arrives. Only scalar metadata and the opaque RPC ID are
+            // retained; token/challenge bytes are never inspected or logged.
+            let waa_snapshot = {
+                let timing = session.youtube_attestation_timing.lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                timing.snapshot(Instant::now())
+            };
+            let waa_detail = match (
+                waa_snapshot.last_rpc_response_operation,
+                waa_snapshot.last_rpc_response_status,
+                waa_snapshot.last_rpc_response_ago_ms,
+            ) {
+                (Some(operation), Some(status), Some(age_ms)) => format!(
+                    " waa_op={operation} waa_id={} waa_status={status} waa_ct={} waa_cl={} waa_ce={} waa_age_ms={age_ms}",
+                    waa_snapshot.last_rpc_response_correlation_id.as_deref().unwrap_or("unmatched"),
+                    waa_snapshot.last_rpc_response_content_type.as_deref().unwrap_or("absent"),
+                    waa_snapshot.last_rpc_response_content_length.as_deref().unwrap_or("absent"),
+                    waa_snapshot.last_rpc_response_content_encoding.as_deref().unwrap_or("absent"),
+                ),
+                _ => " waa_response=unobserved".to_owned(),
+            };
             let backoff_detail = match backoff_observation {
                 Some(observation) => format!(
                     " prior_backoff_ms={} elapsed_since_policy_ms={} remaining_ms={} met={}",
@@ -3220,9 +3263,10 @@ async fn ajax_passthrough(
                 "youtube_sabr_request_metadata",
                 format!("{upstream_host}{upstream_path}"),
                 format!(
-                    "rid={request_id} body_bytes={} {}{}",
+                    "rid={request_id} body_bytes={} {}{}{}",
                     request_body.len(),
                     metadata.summary(),
+                    waa_detail,
                     backoff_detail,
                 ),
             ).await;
@@ -3530,24 +3574,36 @@ async fn ajax_passthrough(
         error_read_failed,
     );
     if let Some(operation) = attestation_operation {
-        {
-            let mut timing = session.youtube_attestation_timing.lock().unwrap_or_else(|error| error.into_inner());
-            timing.observe_proxy_response(operation, youtube_attestation_correlation_id(&request_headers), status.as_u16(), Instant::now());
-        }
         let response_content_type = upstream_headers.get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
-            .map(|value| clean_field(value.to_owned(), 80))
+            .map(|value| clean_field(value.to_owned(), 64))
             .unwrap_or_else(|| "absent".to_owned());
         let response_content_length = upstream_headers.get(header::CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 16))
+            .unwrap_or_else(|| "absent".to_owned());
+        let response_content_encoding = upstream_headers.get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
             .map(|value| clean_field(value.to_owned(), 24))
             .unwrap_or_else(|| "absent".to_owned());
+        {
+            let mut timing = session.youtube_attestation_timing.lock().unwrap_or_else(|error| error.into_inner());
+            timing.observe_proxy_response(
+                operation,
+                youtube_attestation_correlation_id(&request_headers),
+                status.as_u16(),
+                response_content_type.clone(),
+                response_content_length.clone(),
+                response_content_encoding.clone(),
+                Instant::now(),
+            );
+        }
         push_event(
             &session,
             "youtube_attestation_rpc",
             format!("{upstream_host}{upstream_path}"),
             format!(
-                "rid={request_id} rpc={attestation_rpc_id} operation={operation} phase=upstream_response_headers status={} elapsed_ms={upstream_elapsed_ms} ct={response_content_type} cl={response_content_length}",
+                "rid={request_id} rpc={attestation_rpc_id} operation={operation} phase=upstream_response_headers status={} elapsed_ms={upstream_elapsed_ms} ct={response_content_type} cl={response_content_length} ce={response_content_encoding}",
                 status.as_u16(),
             ),
         ).await;
@@ -5981,7 +6037,11 @@ fn event_detail_limit(kind: &str) -> usize {
     // This server-generated snapshot combines four independent lifecycle
     // observations. Keep the default event size bounded, but preserve the
     // response status and correlation suffix for this specific diagnostic.
-    if kind == "youtube_sabr_attestation_context" { 480 } else { 300 }
+    if matches!(kind,
+        "youtube_sabr_attestation_context"
+            | "youtube_sabr_request_metadata"
+            | "youtube_attestation_rpc"
+    ) { 480 } else { 300 }
 }
 
 fn clean_field(value: String, max: usize) -> String {
