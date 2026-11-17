@@ -2782,7 +2782,13 @@
           );
         }
       } catch (error) {
-        record("xhr_marker_error", meta.eventTarget || meta.url, String(error && error.message || error));
+        record(
+          "xhr_marker_error",
+          meta.eventTarget || meta.url,
+          meta.attestation
+            ? "error_name=" + String(error && error.name || "unknown").slice(0, 40)
+            : String(error && error.message || error)
+        );
       }
       record("xhr", meta.eventTarget || meta.url, meta.method + inputCorrelationDetail(inputContext));
       record(
