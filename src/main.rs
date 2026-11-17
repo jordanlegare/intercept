@@ -158,8 +158,6 @@ struct Session {
 }
 
 #[derive(Default)]
-
-#[derive(Default)]
 struct UpstreamClientCache {
     entries: HashMap<String, UpstreamClientEntry>,
     access_sequence: u64,
@@ -224,6 +222,7 @@ impl UpstreamClientCache {
     }
 }
 
+#[derive(Default)]
 struct SessionCookieJar {
     store: StdMutex<cookie_store::CookieStore>,
 }
