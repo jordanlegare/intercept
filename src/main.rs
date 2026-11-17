@@ -2114,6 +2114,7 @@ fn diagnostic_i32(value: Option<i32>) -> String {
     value.map(|number| number.to_string()).unwrap_or_else(|| "absent".to_owned())
 }
 
+#[cfg(test)]
 fn decode_stream_protection_status(
     input: &[u8],
 ) -> Option<StreamProtectionStatusDiagnostic> {
@@ -2125,6 +2126,7 @@ fn decode_stream_protection_status(
     }
 }
 
+#[cfg(test)]
 fn decode_next_request_policy(input: &[u8]) -> Option<NextRequestPolicyDiagnostic> {
     let mut decoder = ProtobufScalarDecoder::new(35);
     decoder.feed(input);
