@@ -872,13 +872,19 @@
         || lowerPath.includes("challenge")
         || lowerPath.includes("/js/bg/")
         || /(^|\/)bg(?:\.min)?\.js$/.test(lowerPath);
+      // YouTube's player runtime can host the BotGuard adapter without
+      // mentioning BotGuard in its URL. Track the player bundle lifecycle
+      // separately instead of silently treating it as an unrelated script.
+      const youtubePlayerRuntime = youtubeHost
+        && (lowerPath === "/s/player" || lowerPath.startsWith("/s/player/"));
       const googleScript = googleHost
         && (lowerPath.endsWith(".js") || lowerPath.includes(".js/"));
-      if (!namedAsset && !googleScript) return null;
-      if (!googleHost && !(youtubeHost && namedAsset)) return null;
+      if (!namedAsset && !googleScript && !youtubePlayerRuntime) return null;
+      if (!googleHost && !(youtubeHost && (namedAsset || youtubePlayerRuntime))) return null;
       return {
         target: hostname + pathname,
-        candidate: namedAsset ? "named_attestation_hint" : "google_hosted_script"
+        candidate: namedAsset ? "named_attestation_hint"
+          : youtubePlayerRuntime ? "youtube_player_runtime" : "google_hosted_script"
       };
     } catch (_) {
       return null;
@@ -3163,23 +3169,87 @@
     window.EventSource.prototype = NativeEventSource.prototype;
   }
 
+  function youtubeWorkerResourceInfo(source) {
+    let primaryHost = "";
+    try { primaryHost = new URL(upstreamOrigin).hostname.toLowerCase(); } catch (_) {}
+    if (primaryHost !== "youtube.com" && !primaryHost.endsWith(".youtube.com")) return null;
+    try {
+      const raw = source instanceof URL ? source.href : String(source || "");
+      const parsed = new URL(raw, document.baseURI);
+      if (parsed.protocol === "blob:") {
+        return {target: "blob:worker", candidate: "blob_worker"};
+      }
+      if (parsed.protocol === "data:") {
+        return {target: "data:worker", candidate: "data_worker"};
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return {target: "worker", candidate: "non_http_worker"};
+      }
+
+      let hostname = parsed.hostname.toLowerCase();
+      let pathname = parsed.pathname;
+      if (parsed.origin === location.origin) {
+        const routeMarker = sessionPrefix + "/_/https/";
+        const routeIndex = pathname.indexOf(routeMarker);
+        if (routeIndex >= 0) {
+          const target = pathname.slice(routeIndex + routeMarker.length);
+          const slash = target.indexOf("/");
+          if (slash > 0) {
+            hostname = target.slice(0, slash).toLowerCase();
+            pathname = target.slice(slash);
+          }
+        }
+      }
+      const asset = youtubeAttestationAssetInfo(raw);
+      return {
+        target: hostname + pathname,
+        candidate: asset ? asset.candidate : "worker_script"
+      };
+    } catch (_) {
+      return {target: "worker", candidate: "unresolved_worker"};
+    }
+  }
+
+  function workerMessageType(value) {
+    if (value === null) return "null";
+    if (value === undefined) return "undefined";
+    if (typeof value !== "object") return typeof value;
+    if (value instanceof ArrayBuffer) return "array_buffer";
+    if (ArrayBuffer.isView(value)) return "typed_array";
+    if (Array.isArray(value)) return "array";
+    return "object";
+  }
+
+  function observeYouTubeWorker(worker, info, transport) {
+    if (!info) return;
+    const target = info.target;
+    record("youtube_player_worker", target,
+      "phase=construct candidate=" + info.candidate + " transport=" + transport);
+    nativeAdd.call(worker, "error", event => {
+      const errorName = String(event && event.error && event.error.name || "WorkerError")
+        .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "WorkerError";
+      record("youtube_player_worker", target,
+        "phase=error error=" + errorName + " transport=" + transport);
+    });
+    nativeAdd.call(worker, "message", event => {
+      record("youtube_player_worker", target,
+        "phase=message message_type=" + workerMessageType(event && event.data)
+          + " transport=" + transport);
+    });
+    nativeAdd.call(worker, "messageerror", () => {
+      record("youtube_player_worker", target,
+        "phase=message_error transport=" + transport);
+    });
+  }
+
   if (window.Worker) {
     const NativeWorker = window.Worker;
     window.Worker = function(url, options) {
       const routed = routeToProxy(url);
       if (!routed) throw new DOMException("Intercept only proxies HTTP and HTTPS worker scripts.", "SecurityError");
-      const asset = youtubeAttestationAssetInfo(url);
+      const info = youtubeWorkerResourceInfo(url);
       const worker = new NativeWorker(routed, options);
-      if (asset) {
-        record("youtube_attestation_resource", asset.target,
-          "phase=worker_construct transport=dedicated");
-        nativeAdd.call(worker, "error", event => {
-          const errorName = String(event && event.error && event.error.name || "WorkerError")
-            .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40);
-          record("youtube_attestation_resource", asset.target,
-            "phase=worker_error error=" + (errorName || "WorkerError"));
-        });
-      }
+      observeYouTubeWorker(worker, info, options && options.type === "module" ? "module" : "classic");
       return worker;
     };
     window.Worker.prototype = NativeWorker.prototype;
@@ -3190,11 +3260,19 @@
     window.SharedWorker = function(url, options) {
       const routed = routeToProxy(url);
       if (!routed) throw new DOMException("Intercept only proxies HTTP and HTTPS shared-worker scripts.", "SecurityError");
-      const asset = youtubeAttestationAssetInfo(url);
+      const info = youtubeWorkerResourceInfo(url);
       const worker = new NativeSharedWorker(routed, options);
-      if (asset) {
-        record("youtube_attestation_resource", asset.target,
-          "phase=worker_construct transport=shared");
+      if (info) {
+        const target = info.target;
+        record("youtube_player_worker", target,
+          "phase=construct candidate=" + info.candidate + " transport=shared");
+        nativeAdd.call(worker.port, "message", event => {
+          record("youtube_player_worker", target,
+            "phase=message message_type=" + workerMessageType(event && event.data) + " transport=shared");
+        });
+        nativeAdd.call(worker.port, "messageerror", () => {
+          record("youtube_player_worker", target, "phase=message_error transport=shared");
+        });
       }
       return worker;
     };
@@ -3202,6 +3280,21 @@
   }
 
   if (navigator.serviceWorker && navigator.serviceWorker.register) {
+    let primaryHost = "";
+    try { primaryHost = new URL(upstreamOrigin).hostname.toLowerCase(); } catch (_) {}
+    if (primaryHost === "youtube.com" || primaryHost.endsWith(".youtube.com")) {
+      nativeAdd.call(navigator.serviceWorker, "controllerchange", () => {
+        record("youtube_player_worker", "service-worker",
+          "phase=controller_change controlled=" + Boolean(navigator.serviceWorker.controller));
+      });
+      nativeAdd.call(navigator.serviceWorker, "message", event => {
+        record("youtube_player_worker", "service-worker",
+          "phase=message message_type=" + workerMessageType(event && event.data));
+      });
+      nativeAdd.call(navigator.serviceWorker, "messageerror", () => {
+        record("youtube_player_worker", "service-worker", "phase=message_error");
+      });
+    }
     const nativeRegister = navigator.serviceWorker.register.bind(navigator.serviceWorker);
     navigator.serviceWorker.register = function(scriptURL, options) {
       const routed = routeToProxy(scriptURL);
