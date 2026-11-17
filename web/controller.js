@@ -723,13 +723,15 @@
         || (hostname.endsWith(".googleapis.com") && lowerPath.includes("waa"));
       const youtubeJnn = youtubeHost && lowerPath.startsWith("/api/jnn/v1/");
       const youtubeAttGet = youtubeHost && lowerPath === "/youtubei/v1/att/get";
-      if (!googleCandidate && !youtubeJnn && !youtubeAttGet) return null;
+      const youtubeAttLog = youtubeHost && lowerPath === "/youtubei/v1/att/log";
+      const youtubeAttResource = youtubeAttGet || youtubeAttLog;
+      if (!googleCandidate && !youtubeJnn && !youtubeAttResource) return null;
       const match = pathname.match(
         /^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/
       ) || pathname.match(/^\/api\/jnn\/v1\/(Create|GenerateIT)$/);
       return {
-        kind: youtubeAttGet ? "youtube_attestation_resource" : "youtube_attestation_rpc",
-        operation: youtubeAttGet ? "AttGet" : match ? match[1] : "Other",
+        kind: youtubeAttResource ? "youtube_attestation_resource" : "youtube_attestation_rpc",
+        operation: youtubeAttGet ? "AttGet" : youtubeAttLog ? "AttLog" : match ? match[1] : "Other",
         target: hostname + pathname
       };
     } catch (_) {
@@ -3226,9 +3228,10 @@
       + "const lower=path.toLowerCase(),youtube=host==='youtube.com'||host.endsWith('.youtube.com');"
       + "const google=host==='jnn-pa.googleapis.com'||(host.endsWith('.googleapis.com')&&lower.includes('waa'));"
       + "const jnn=youtube&&lower.startsWith('/api/jnn/v1/'),attGet=youtube&&lower==='/youtubei/v1/att/get';"
-      + "if(!google&&!jnn&&!attGet)return null;"
+      + "const attLog=youtube&&lower==='/youtubei/v1/att/log',attResource=attGet||attLog;"
+      + "if(!google&&!jnn&&!attResource)return null;"
       + "const match=path.match(/^\\/\\$rpc\\/google\\.internal\\.waa\\.v1\\.Waa\\/(Create|GenerateIT)$/)||path.match(/^\\/api\\/jnn\\/v1\\/(Create|GenerateIT)$/);"
-      + "return {target:host+path,operation:attGet?'AttGet':match?match[1]:'Other',kind:attGet?'youtube_attestation_resource':'youtube_attestation_rpc'};"
+      + "return {target:host+path,operation:attGet?'AttGet':attLog?'AttLog':match?match[1]:'Other',kind:attResource?'youtube_attestation_resource':'youtube_attestation_rpc'};"
       + "}catch(_e){return null}}"
       + "function report(info,detail){if(!info||!rawFetch)return;try{"
       + "rawFetch(new URL('/_intercept/events',self.location.origin).href,{method:'POST',"
