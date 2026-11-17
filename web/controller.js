@@ -63,6 +63,16 @@
     }
   }
 
+  function sanitizeEventTarget(target) {
+    const value = String(target || "");
+    const slashIndex = value.indexOf("/");
+    const firstSegment = slashIndex > 0 ? value.slice(0, slashIndex) : "";
+    const urlLike = value.startsWith("/")
+      || value.includes("://")
+      || (slashIndex > 0 && firstSegment.includes("."));
+    return urlLike ? value.split(/[?#]/, 1)[0] : value;
+  }
+
   function record(kind, target, detail) {
     if (INTERNAL_AUTHORITY_EVENTS.has(kind)) return;
     const eventKind = String(kind).slice(0, 80);
@@ -70,7 +80,7 @@
       : eventKind === "youtube_player_state" ? 640 : 300;
     eventBuffer.push({
       kind: eventKind,
-      target: String(target || "").slice(0, 240),
+      target: sanitizeEventTarget(target).slice(0, 240),
       detail: String(detail || "").slice(0, detailLimit)
     });
     trimEventBuffer();
