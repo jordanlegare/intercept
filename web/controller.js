@@ -709,9 +709,27 @@
     }
 
     try {
+      const client = context.client;
+      const headers = {};
+
+      // InnerTube's WEB client identity is supplied in both the context and
+      // matching HTTP headers. Preserve headers from YouTube's original
+      // request; these values are only fallbacks when one is absent.
+      if (client.clientName === "WEB") {
+        headers["X-YouTube-Client-Name"] = "1";
+      }
+      if (typeof client.clientVersion === "string" && client.clientVersion.trim()) {
+        headers["X-YouTube-Client-Version"] = client.clientVersion.trim();
+      }
+      if (typeof client.visitorData === "string" && client.visitorData.trim()) {
+        headers["X-Goog-Visitor-Id"] = client.visitorData.trim();
+      }
+      headers["Content-Type"] = "application/json";
+
       return {
         body: JSON.stringify({context, query: query.trim()}),
-        querySource
+        querySource,
+        headers
       };
     } catch (_) {
       return {body: null, reason: "INNERTUBE_CONTEXT is not serializable"};
@@ -831,6 +849,7 @@
         routedRequest = new Request(routed, init);
       }
       let bodyDetail = fetchBodyDiagnostic(input, init);
+      let youtubeSearchFallbackHeaders = null;
       const youtubeSearchCheck = youtubeSearchEndpointCheck(source);
       const bodyIsNull = routedRequest.body === null;
       if (routedRequest.method === "POST"
@@ -860,6 +879,7 @@
         const fallback = buildYouTubeSearchFallbackBody();
         if (fallback.body) {
           routedRequest = new Request(routedRequest, {body: fallback.body});
+          youtubeSearchFallbackHeaders = fallback.headers || {};
           bodyDetail = "body_arg=generated_innertube_search body_arg_bytes="
             + new TextEncoder().encode(fallback.body).byteLength;
           record(
@@ -873,6 +893,22 @@
         }
       }
       const headers = new Headers(routedRequest.headers);
+      const youtubeHeadersAdded = [];
+      if (youtubeSearchFallbackHeaders) {
+        for (const [name, value] of Object.entries(youtubeSearchFallbackHeaders)) {
+          if (!headers.has(name)) {
+            headers.set(name, value);
+            youtubeHeadersAdded.push(name.toLowerCase());
+          }
+        }
+        if (youtubeHeadersAdded.length) {
+          record(
+            "youtube_search_headers_synthesized",
+            fetchEventPath(source),
+            "Added missing InnerTube headers: " + youtubeHeadersAdded.join(", ")
+          );
+        }
+      }
       headers.set("X-Intercept-Proxy-Mode", "ajax");
       headers.set("X-Intercept-Body-Diagnostic", bodyDetail);
       headers.set("X-Intercept-Transport-Diagnostic", "window-fetch");
