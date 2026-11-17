@@ -152,16 +152,21 @@
       exportEventsButton.disabled = false;
       eventExportStatus.textContent = events.length + " retained events · snapshot " + latestEventsAt.toLocaleTimeString();
       eventSummary.textContent = "EVENT STREAM · " + events.length + " retained";
-      // Keep attestation RPC and runtime-resource evidence visible even when
-      // unrelated traffic has pushed it outside the short recent-activity window.
+      // Keep playback, SABR handoff, and attestation evidence visible even when
+      // unrelated traffic pushes it outside the short recent-activity window.
       const visible = new Map();
-      for (const item of events.slice(-30)) {
+      for (const item of events.slice(-35)) {
         visible.set(String(item.at_unix_ms) + "|" + item.kind + "|" + item.detail, item);
       }
-      for (const item of events.filter(item =>
-        item.kind === "youtube_attestation_rpc"
-        || item.kind === "youtube_attestation_resource"
-      ).slice(-60)) {
+      const diagnosticKinds = new Set([
+        "youtube_attestation_rpc",
+        "youtube_attestation_resource",
+        "youtube_player_state",
+        "youtube_sabr_request_gap",
+        "youtube_sabr_response_stream_complete",
+        "youtube_sabr_policy_diagnostic"
+      ]);
+      for (const item of events.filter(item => diagnosticKinds.has(item.kind)).slice(-100)) {
         visible.set(String(item.at_unix_ms) + "|" + item.kind + "|" + item.detail, item);
       }
       eventsNode.textContent = Array.from(visible.values())
