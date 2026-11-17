@@ -3792,9 +3792,11 @@ async fn proxy(
     let attestation_operation = youtube_attestation_rpc_operation(&upstream_url);
     let attestation_challenge = is_youtube_attestation_challenge_request(&upstream_url);
     let attestation_rpc_id = if attestation_operation.is_some() || attestation_challenge {
-        youtube_attestation_correlation_id(&parts.headers).unwrap_or("unmatched")
+        youtube_attestation_correlation_id(&parts.headers)
+            .map(str::to_owned)
+            .unwrap_or_else(|| "unmatched".to_owned())
     } else {
-        ""
+        String::new()
     };
     let ajax_request = is_ajax_request(&parts.headers)
         || attestation_operation.is_some()
