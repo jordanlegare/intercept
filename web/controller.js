@@ -919,7 +919,7 @@
       const sessionIndex = configValue("SESSION_INDEX");
       headers["X-Goog-AuthUser"] = (
         (typeof sessionIndex === "number" && Number.isFinite(sessionIndex))
-        || (typeof sessionIndex === "string" && /^\\d+$/.test(sessionIndex))
+        || (typeof sessionIndex === "string" && /^\d+$/.test(sessionIndex))
       ) ? String(sessionIndex) : "0";
       const delegatedSessionId = configValue("DELEGATED_SESSION_ID");
       if (typeof delegatedSessionId === "string" && delegatedSessionId.trim()) {
@@ -928,7 +928,7 @@
 
       const readCookie = name => {
         const prefix = name + "=";
-        for (const part of cookieMirror.split(/;\\s*/)) {
+        for (const part of cookieMirror.split(/;\s*/)) {
           if (part.startsWith(prefix)) return part.slice(prefix.length);
         }
         return "";
