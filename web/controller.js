@@ -821,16 +821,24 @@
 
     try {
       const client = context.client;
-      const payload = {context};
 
-      // Match the stable request envelope observed in a successful WEB search.
-      // Optional page-specific values are copied only when YouTube exposes them
-      // through ytcfg; do not fabricate click tracking or advertising signals.
-      payload.request = {
-        useSsl: true,
-        internalExperimentFlags: [],
-        consistencyTokenJars: []
-      };
+      // INNERTUBE_CONTEXT currently bundles client settings together with
+      // request-envelope fields. A successful WEB search sends only client
+      // under "context" and lifts request/user/clickTracking to the top level.
+      // Keep those fields in their observed locations rather than duplicating
+      // the whole config object inside context.
+      const payload = {context: {client}};
+      const contextRequest = context.request;
+      if (contextRequest && typeof contextRequest === "object"
+          && !Array.isArray(contextRequest)) {
+        payload.request = {...contextRequest};
+      } else {
+        payload.request = {
+          useSsl: true,
+          internalExperimentFlags: [],
+          consistencyTokenJars: []
+        };
+      }
 
       // INNERTUBE_CONTEXT already carries these values on current YouTube
       // pages. The successful WEB search envelope sends them again at the
