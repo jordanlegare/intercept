@@ -873,7 +873,10 @@
     // YouTube fires get_watch before its SPA navigation necessarily updates
     // location.href. Prefer the most recent clicked watch target when fresh.
     const pendingNavigation = recentYouTubeVideoNavigation;
-    if (pendingNavigation && performance.now() - pendingNavigation.at <= 12000) {
+    const pendingNavigationIsFresh = Boolean(
+      pendingNavigation && performance.now() - pendingNavigation.at <= 12000
+    );
+    if (pendingNavigationIsFresh) {
       addId(pendingNavigation.videoId, "recent_navigation_click");
     }
     recentYouTubeVideoNavigation = null;
@@ -932,16 +935,26 @@
         }
       }
 
-      // Preserve playlist context when it is explicitly present in the live URL.
-      try {
-        const pageUrl = new URL(location.href);
-        const playlistId = pageUrl.searchParams.get("list");
-        if (playlistId && playlistId.length <= 256) watchNextRequest.playlistId = playlistId;
-        const playlistIndex = pageUrl.searchParams.get("index");
-        if (playlistIndex && /^\d+$/.test(playlistIndex)) {
-          watchNextRequest.playlistIndex = Number(playlistIndex);
+      // Use the clicked destination's playlist state during SPA navigation;
+      // location.href can still describe the previous video at this point.
+      if (pendingNavigationIsFresh) {
+        if (pendingNavigation.playlistId && pendingNavigation.playlistId.length <= 256) {
+          watchNextRequest.playlistId = pendingNavigation.playlistId;
         }
-      } catch (_) {}
+        if (Number.isInteger(pendingNavigation.playlistIndex) && pendingNavigation.playlistIndex >= 0) {
+          watchNextRequest.playlistIndex = pendingNavigation.playlistIndex;
+        }
+      } else {
+        try {
+          const pageUrl = new URL(location.href);
+          const playlistId = pageUrl.searchParams.get("list");
+          if (playlistId && playlistId.length <= 256) watchNextRequest.playlistId = playlistId;
+          const playlistIndex = pageUrl.searchParams.get("index");
+          if (playlistIndex && /^\d+$/.test(playlistIndex)) {
+            watchNextRequest.playlistIndex = Number(playlistIndex);
+          }
+        } catch (_) {}
+      }
 
       const payload = {
         context,
@@ -1337,7 +1350,13 @@
               targetVideoId = targetMatch && targetMatch[1];
             }
             if (typeof targetVideoId === "string" && /^[A-Za-z0-9_-]{11}$/.test(targetVideoId)) {
-              recentYouTubeVideoNavigation = {videoId: targetVideoId, at: performance.now()};
+              const playlistIndex = targetUrl.searchParams.get("index");
+              recentYouTubeVideoNavigation = {
+                videoId: targetVideoId,
+                playlistId: targetUrl.searchParams.get("list") || null,
+                playlistIndex: playlistIndex && /^\d+$/.test(playlistIndex) ? Number(playlistIndex) : null,
+                at: performance.now()
+              };
             }
           } catch (_) {}
         }
