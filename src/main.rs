@@ -1822,15 +1822,12 @@ async fn ajax_passthrough(
     });
     let outbound_referer = request_headers.get(header::REFERER)
         .and_then(|value| rewrite_referer(value, session));
-    let outbound_fetch_site = if request_headers.contains_key("sec-fetch-site") {
-        Some(if is_youtube_inner_tube || upstream_url.origin() == session.base_url.origin() {
-            "same-origin"
-        } else {
-            "cross-site"
-        })
-    } else {
-        None
-    };
+    let outbound_fetch_site = outbound_fetch_site_header(
+        request_headers.contains_key("sec-fetch-site"),
+        is_youtube_inner_tube,
+        is_youtube_qoe,
+        upstream_url.origin() == session.base_url.origin(),
+    );
 
     let mut builder = client.request(method, upstream_url.clone());
     for (name, value) in request_headers.iter() {
@@ -4017,6 +4014,26 @@ fn youtube_qoe_request_diagnostics(
     )
 }
 
+fn outbound_fetch_site_header(
+    has_fetch_site: bool,
+    is_youtube_inner_tube: bool,
+    is_youtube_qoe: bool,
+    upstream_matches_session_origin: bool,
+) -> Option<&'static str> {
+    if !has_fetch_site {
+        return None;
+    }
+
+    // These requests originate from YouTube's own page context. The proxy's
+    // localhost session origin must not make a first-party upstream request
+    // appear cross-site to YouTube.
+    Some(if is_youtube_inner_tube || is_youtube_qoe || upstream_matches_session_origin {
+        "same-origin"
+    } else {
+        "cross-site"
+    })
+}
+
 fn youtube_qoe_outbound_header_diagnostics(
     headers: &HeaderMap,
     origin: Option<&HeaderValue>,
@@ -4319,6 +4336,39 @@ mod tests {
             cookie_jar: Arc::new(SessionCookieJar::default()),
             cookie_tokens: StdMutex::new(HashMap::new()),
         }
+    }
+
+    #[test]
+    fn youtube_qoe_preserves_first_party_fetch_site_classification() {
+        assert_eq!(
+            outbound_fetch_site_header(true, false, true, false),
+            Some("same-origin"),
+            "YouTube QoE must remain same-origin despite the localhost proxy origin"
+        );
+    }
+
+    #[test]
+    fn youtube_inner_tube_preserves_first_party_fetch_site_classification() {
+        assert_eq!(
+            outbound_fetch_site_header(true, true, false, false),
+            Some("same-origin")
+        );
+    }
+
+    #[test]
+    fn unrelated_cross_origin_requests_remain_cross_site() {
+        assert_eq!(
+            outbound_fetch_site_header(true, false, false, false),
+            Some("cross-site")
+        );
+    }
+
+    #[test]
+    fn missing_fetch_site_header_remains_absent() {
+        assert_eq!(
+            outbound_fetch_site_header(false, false, true, false),
+            None
+        );
     }
 
     #[test]
