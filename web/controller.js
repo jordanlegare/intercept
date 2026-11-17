@@ -11,6 +11,7 @@
   const nativeAdd = EventTarget.prototype.addEventListener;
   const nativeRemove = EventTarget.prototype.removeEventListener;
   const queue = [];
+  const MAX_EVENT_BUFFER = 2_000;
   const eventBuffer = [];
   let authorityFrame = null;
   let gateState = "waiting";
@@ -55,7 +56,7 @@
   }
 
   function trimEventBuffer() {
-    while (eventBuffer.length > 160) {
+    while (eventBuffer.length > MAX_EVENT_BUFFER) {
       const discardIndex = eventBuffer.findIndex(event => !isPriorityYouTubeDiagnosticEvent(event));
       eventBuffer.splice(discardIndex >= 0 ? discardIndex : 0, 1);
     }
