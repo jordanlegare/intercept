@@ -47,6 +47,7 @@
       || event.kind === "youtube_attestation_resource"
       || event.kind === "youtube_player_state"
       || event.kind === "youtube_player_worker"
+      || event.kind === "youtube_player_runtime"
       || event.kind === "youtube_sabr_request_gap"
       || event.kind === "youtube_sabr_response_stream_complete"
       || event.kind === "youtube_sabr_attestation_context"
@@ -924,6 +925,13 @@
         .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40);
       record("youtube_attestation_resource", info.target,
         "phase=script_runtime_error error=" + (errorName || "ScriptError"));
+    }, true);
+    nativeAdd.call(window, "unhandledrejection", event => {
+      const reason = event && event.reason;
+      const errorName = String(reason && reason.name || "UnhandledRejection")
+        .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "UnhandledRejection";
+      record("youtube_player_runtime", "window",
+        "phase=unhandled_rejection error=" + errorName);
     }, true);
     nativeAdd.call(document, "securitypolicyviolation", event => {
       const info = youtubeAttestationAssetInfo(event && event.blockedURI);
@@ -3380,6 +3388,15 @@
       nativeAdd.call(navigator.serviceWorker, "controllerchange", () => {
         record("youtube_player_worker", "service-worker",
           "phase=controller_change controlled=" + Boolean(navigator.serviceWorker.controller));
+      });
+      record("youtube_player_worker", "service-worker",
+        "phase=initial_state controlled=" + Boolean(navigator.serviceWorker.controller));
+      navigator.serviceWorker.ready.then(registration => {
+        const active = registration && registration.active;
+        record("youtube_player_worker", "service-worker",
+          "phase=ready active_state=" + (active && active.state || "none"));
+      }).catch(() => {
+        record("youtube_player_worker", "service-worker", "phase=ready_error");
       });
       nativeAdd.call(navigator.serviceWorker, "message", event => {
         record("youtube_player_worker", "service-worker",
