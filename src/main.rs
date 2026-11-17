@@ -60,7 +60,9 @@ const SESSION_PORT: &str = "5000";
 const DEFAULT_MAX_SESSIONS: usize = 8;
 const DEFAULT_SESSION_IDLE_SECONDS: u64 = 1800;
 const DEFAULT_MAX_INFLIGHT_PER_SESSION: usize = 64;
-const MAX_UPSTREAM_ORIGINS_PER_SESSION: usize = 24;
+// Bound retained client handles, not the number of distinct origins a session may visit.
+// In-flight requests keep their own Client clones and remain valid after cache eviction.
+const MAX_CACHED_UPSTREAM_ORIGINS_PER_SESSION: usize = 24;
 const MAX_CUSTOM_RULES: usize = 100;
 
 static HTML_STYLE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -137,7 +139,7 @@ struct AppState {
 struct Session {
     id: String,
     base_url: Url,
-    clients: Mutex<HashMap<String, reqwest::Client>>,
+    clients: Mutex<UpstreamClientCache>,
     cache: Mutex<ResourceCache>,
     gate: Mutex<GateState>,
     gate_tx: watch::Sender<GateState>,
@@ -153,6 +155,71 @@ struct Session {
     max_inflight: usize,
     cookie_jar: Arc<SessionCookieJar>,
     cookie_tokens: StdMutex<HashMap<String, String>>,
+}
+
+#[derive(Default)]
+struct UpstreamClientCache {
+    entries: HashMap<String, UpstreamClientEntry>,
+    access_sequence: u64,
+}
+
+struct UpstreamClientEntry {
+    client: reqwest::Client,
+    last_access: u64,
+}
+
+impl UpstreamClientCache {
+    fn get(&mut self, origin: &str) -> Option<reqwest::Client> {
+        let entry = self.entries.get_mut(origin)?;
+        self.access_sequence = self.access_sequence.wrapping_add(1);
+        entry.last_access = self.access_sequence;
+        Some(entry.client.clone())
+    }
+
+    fn insert_or_get(
+        &mut self,
+        origin: String,
+        client: reqwest::Client,
+        capacity: usize,
+    ) -> reqwest::Client {
+        if let Some(existing) = self.get(&origin) {
+            return existing;
+        }
+
+        if capacity == 0 {
+            self.entries.clear();
+            return client;
+        }
+
+        if self.entries.len() >= capacity {
+            let least_recently_used = self.entries.iter()
+                .min_by_key(|(_, entry)| entry.last_access)
+                .map(|(origin, _)| origin.clone());
+            if let Some(origin) = least_recently_used {
+                self.entries.remove(&origin);
+            }
+        }
+
+        self.access_sequence = self.access_sequence.wrapping_add(1);
+        self.entries.insert(origin, UpstreamClientEntry {
+            client: client.clone(),
+            last_access: self.access_sequence,
+        });
+        client
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    fn contains_origin(&self, origin: &str) -> bool {
+        self.entries.contains_key(origin)
+    }
 }
 
 #[derive(Default)]
@@ -1076,8 +1143,12 @@ async fn create_session(
     let client = build_pinned_client(&target, Arc::clone(&cookie_jar)).await?;
 
     let id = Uuid::new_v4().simple().to_string();
-    let mut clients = HashMap::new();
-    clients.insert(origin_key(&target), client);
+    let mut clients = UpstreamClientCache::default();
+    clients.insert_or_get(
+        origin_key(&target),
+        client,
+        MAX_CACHED_UPSTREAM_ORIGINS_PER_SESSION,
+    );
     let (gate_tx, _) = watch::channel(GateState::Waiting);
     let (cancel_tx, _) = watch::channel(false);
     let session = Arc::new(Session {
@@ -1262,25 +1333,24 @@ async fn build_pinned_client(target: &Url, cookie_jar: Arc<SessionCookieJar>) ->
 async fn client_for(session: &Session, target: &Url) -> Result<reqwest::Client, (StatusCode, String)> {
     let key = origin_key(target);
 
-    // Do not hold the session-wide map lock while DNS resolution and client
-    // construction await network/runtime work. Different origins can initialize
-    // their clients concurrently.
-    if let Some(client) = session.clients.lock().await.get(&key).cloned() {
+    // Update recency on a cache hit. Do not hold the cache lock while DNS
+    // resolution and client construction await network/runtime work.
+    if let Some(client) = session.clients.lock().await.get(&key) {
         return Ok(client);
     }
 
+    // Every cache miss still goes through DNS resolution and public-IP checks.
+    // Different origins can initialize concurrently without holding the cache lock.
     let client = build_pinned_client(target, Arc::clone(&session.cookie_jar)).await?;
     let mut clients = session.clients.lock().await;
 
-    // Reuse a client another concurrent request may have initialized.
-    if let Some(existing) = clients.get(&key) {
-        return Ok(existing.clone());
-    }
-    if clients.len() >= MAX_UPSTREAM_ORIGINS_PER_SESSION {
-        return Err((StatusCode::TOO_MANY_REQUESTS, "Session upstream-origin limit reached".into()));
-    }
-    clients.insert(key, client.clone());
-    Ok(client)
+    // Another request may have initialized this origin while DNS was resolving.
+    // Reuse that client, otherwise evict the least recently used retained handle.
+    Ok(clients.insert_or_get(
+        key,
+        client,
+        MAX_CACHED_UPSTREAM_ORIGINS_PER_SESSION,
+    ))
 }
 
 async fn start_timer(
@@ -4717,7 +4787,7 @@ mod tests {
         Session {
             id: "0123456789abcdef0123456789abcdef".to_owned(),
             base_url: Url::parse("https://example.com/start").unwrap(),
-            clients: Mutex::new(HashMap::new()),
+            clients: Mutex::new(UpstreamClientCache::default()),
             cache: Mutex::new(ResourceCache::default()),
             gate: Mutex::new(GateState::Waiting),
             gate_tx: watch::channel(GateState::Waiting).0,
@@ -4734,6 +4804,82 @@ mod tests {
             cookie_jar: Arc::new(SessionCookieJar::default()),
             cookie_tokens: StdMutex::new(HashMap::new()),
         }
+    }
+
+
+    #[test]
+    fn upstream_client_cache_evicts_least_recently_used_origin() {
+        let mut cache = UpstreamClientCache::default();
+
+        let retained_client = cache.insert_or_get(
+            "https://cdn-a.example".to_owned(),
+            reqwest::Client::new(),
+            2,
+        );
+        cache.insert_or_get(
+            "https://cdn-b.example".to_owned(),
+            reqwest::Client::new(),
+            2,
+        );
+
+        // Touch A after B so B is now the least recently used entry.
+        assert!(cache.get("https://cdn-a.example").is_some());
+        cache.insert_or_get(
+            "https://cdn-c.example".to_owned(),
+            reqwest::Client::new(),
+            2,
+        );
+
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains_origin("https://cdn-a.example"));
+        assert!(!cache.contains_origin("https://cdn-b.example"));
+        assert!(cache.contains_origin("https://cdn-c.example"));
+
+        // An in-flight request's clone remains usable after its cache entry is evicted.
+        assert!(retained_client.get("https://example.com").build().is_ok());
+    }
+
+    #[tokio::test]
+    async fn concurrent_insertions_reuse_one_cached_origin_entry() {
+        let cache = Arc::new(Mutex::new(UpstreamClientCache::default()));
+        let mut tasks = Vec::new();
+
+        for _ in 0..16 {
+            let cache = Arc::clone(&cache);
+            tasks.push(tokio::spawn(async move {
+                let mut cache = cache.lock().await;
+                cache.insert_or_get(
+                    "https://cdn.example".to_owned(),
+                    reqwest::Client::new(),
+                    2,
+                );
+            }));
+        }
+
+        for task in tasks {
+            task.await.expect("cache insertion task should complete");
+        }
+
+        assert_eq!(cache.lock().await.len(), 1);
+    }
+
+    #[test]
+    fn upstream_client_cache_respects_capacity_and_supports_zero_capacity() {
+        let mut cache = UpstreamClientCache::default();
+        cache.insert_or_get(
+            "https://cdn-a.example".to_owned(),
+            reqwest::Client::new(),
+            1,
+        );
+        cache.insert_or_get(
+            "https://cdn-b.example".to_owned(),
+            reqwest::Client::new(),
+            0,
+        );
+
+        assert_eq!(cache.len(), 0);
+        assert!(!cache.contains_origin("https://cdn-a.example"));
+        assert!(!cache.contains_origin("https://cdn-b.example"));
     }
 
     #[test]
@@ -5523,7 +5669,7 @@ mod tests {
         let session = Session {
             id: "session1234567890abcdef1234567890".to_owned(),
             base_url: Url::parse("https://example.com/start").unwrap(),
-            clients: Mutex::new(HashMap::new()),
+            clients: Mutex::new(UpstreamClientCache::default()),
             cache: Mutex::new(ResourceCache::default()),
             gate: Mutex::new(GateState::Waiting),
             gate_tx: watch::channel(GateState::Waiting).0,
