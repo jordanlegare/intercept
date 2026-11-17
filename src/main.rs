@@ -2558,7 +2558,6 @@ async fn ajax_passthrough(
                 chunk = upstream_stream.next() => match chunk {
                     Some(Ok(chunk)) => {
                         response_bytes = response_bytes.saturating_add(chunk.len() as u64);
-                        let _keep_request_slot = &request_permit;
                         Some((
                             Ok(chunk),
                             (upstream_stream, session, request_id, stream_target,
