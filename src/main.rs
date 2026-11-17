@@ -4854,6 +4854,11 @@ fn rewrite_worker_javascript(
       const primaryOrigin={primary_origin};
       const prefix="/p/"+encodeURIComponent(sessionId);
       const rawWorkerFetch=typeof self.fetch==="function"?self.fetch.bind(self):null;
+      let attestationSequence=0;
+      function nextAttestationId(){{
+        attestationSequence=(attestationSequence%999999)+1;
+        return Date.now().toString(36)+"-"+attestationSequence;
+      }}
       function attestationInfo(value){{
         try{{
           const url=new URL(value instanceof URL?value.href:String(value),self.location.href);
@@ -4982,6 +4987,7 @@ fn rewrite_worker_javascript(
           const method=String((init&&init.method)||(input instanceof Request&&input.method)||"GET").toUpperCase();
           const routed=route(source);
           const attestation=attestationInfo(source);
+          const attestationId=attestation?nextAttestationId():null;
           let request;
           if(input instanceof Request){{request=new Request(routed,input);if(init)request=new Request(request,init)}}
           else request=new Request(routed,init);
@@ -4992,13 +4998,14 @@ fn rewrite_worker_javascript(
           headers.set("X-Intercept-Proxy-Mode","ajax");
           headers.set("X-Intercept-Body-Diagnostic",bodyDetail);
           headers.set("X-Intercept-Transport-Diagnostic","worker-fetch");
+          if(attestationId)headers.set("X-Intercept-Attestation-Id",attestationId);
           reportDispatch(attestation?attestation.target:routed,method+" · "+bodyDetail+" · transport=worker-fetch");
           const pending=nativeFetch(new Request(request,{{headers}}));
           if(!attestation)return pending;
-          reportAttestation(attestation,"phase=worker_dispatch operation="+attestation.operation
+          reportAttestation(attestation,"rpc="+attestationId+" phase=worker_dispatch operation="+attestation.operation
             +" method="+request.method+" transport=worker-fetch");
           return pending.then(response=>{{
-            reportAttestation(attestation,"phase=worker_response operation="+attestation.operation
+            reportAttestation(attestation,"rpc="+attestationId+" phase=worker_response operation="+attestation.operation
               +" status="+response.status
               +" ct="+safeResponseHeader(response.headers,"content-type","mime")
               +" cl="+safeResponseHeader(response.headers,"content-length","length")
@@ -5006,7 +5013,7 @@ fn rewrite_worker_javascript(
             return response;
           }},error=>{{
             const name=String(error&&error.name||"unknown").replace(/[^A-Za-z0-9_-]/g,"").slice(0,40)||"unknown";
-            reportAttestation(attestation,"phase=worker_error operation="+attestation.operation+" error="+name);
+            reportAttestation(attestation,"rpc="+attestationId+" phase=worker_error operation="+attestation.operation+" error="+name);
             throw error;
           }});
         }};
@@ -5023,18 +5030,20 @@ fn rewrite_worker_javascript(
           }};
           proto.send=function(...args){{
             const meta=xhrMeta.get(this);
+            const attestationId=meta&&meta.attestation?nextAttestationId():null;
             const bodyDetail=bodyDiagnostic(args[0],args.length>0);
             try{{
               nativeSet.call(this,"X-Intercept-Proxy-Mode","ajax");
               nativeSet.call(this,"X-Intercept-Body-Diagnostic",bodyDetail);
               nativeSet.call(this,"X-Intercept-Transport-Diagnostic","worker-xhr");
+              if(attestationId)nativeSet.call(this,"X-Intercept-Attestation-Id",attestationId);
             }}catch(_e){{}}
             if(meta)reportDispatch(meta.attestation?meta.attestation.target:meta.url,meta.method+" · "+bodyDetail+" · transport=worker-xhr");
             if(meta&&meta.attestation){{
-              reportAttestation(meta.attestation,"phase=worker_dispatch operation="+meta.attestation.operation
+              reportAttestation(meta.attestation,"rpc="+attestationId+" phase=worker_dispatch operation="+meta.attestation.operation
                 +" method="+meta.method+" transport=worker-xhr");
               this.addEventListener("loadend",()=>{{
-                reportAttestation(meta.attestation,"phase=worker_response operation="+meta.attestation.operation
+                reportAttestation(meta.attestation,"rpc="+attestationId+" phase=worker_response operation="+meta.attestation.operation
                   +" status="+this.status
                   +" ct="+safeResponseHeader(this,"content-type","mime")
                   +" cl="+safeResponseHeader(this,"content-length","length")
@@ -5044,7 +5053,7 @@ fn rewrite_worker_javascript(
             try{{return nativeSend.apply(this,args)}}catch(error){{
               if(meta&&meta.attestation){{
                 const name=String(error&&error.name||"unknown").replace(/[^A-Za-z0-9_-]/g,"").slice(0,40)||"unknown";
-                reportAttestation(meta.attestation,"phase=worker_error operation="+meta.attestation.operation+" error="+name);
+                reportAttestation(meta.attestation,"rpc="+attestationId+" phase=worker_error operation="+meta.attestation.operation+" error="+name);
               }}
               throw error;
             }}
