@@ -6862,7 +6862,10 @@ mod tests {
 #[cfg(test)]
 mod ump_stream_diagnostics_tests {
     use super::{
-        decode_next_request_policy, decode_stream_protection_status, UmpStreamDiagnostics,
+        decode_next_request_policy, decode_sabr_request_metadata,
+        decode_stream_protection_status, observe_sabr_backoff,
+        Duration, Instant, SabrBackoffWindow, SabrRequestParseState,
+        UmpStreamDiagnostics,
     };
 
     #[test]
