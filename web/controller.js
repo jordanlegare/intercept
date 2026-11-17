@@ -681,6 +681,102 @@
       return undefined;
     };
 
+    // Locate candidate runtime sources for fields present in captured
+    // successful InnerTube requests. This deliberately records paths and
+    // value types only; never expose request, visitor, tracking, or ad values.
+    const runtimeFieldSources = (() => {
+      const fields = {
+        lockedSafetyMode: "lockedsafetymode",
+        clickTrackingParams: "clicktrackingparams",
+        adSignalsInfo: "adsignalsinfo",
+        webSearchboxStatsUrl: "websearchboxstatsurl",
+        inlineSettingStatus: "inlinesettingstatus"
+      };
+      const found = Object.fromEntries(Object.keys(fields).map(key => [key, []]));
+      const roots = [];
+      const addRoot = (name, value) => {
+        if (value && typeof value === "object") roots.push([name, value]);
+      };
+
+      addRoot("ytcfg.data_", config && config.data_);
+      try {
+        if (config && typeof config.getAll === "function") {
+          addRoot("ytcfg.getAll()", config.getAll());
+        }
+      } catch (_) {}
+      addRoot("ytInitialData", window.ytInitialData);
+      try {
+        addRoot("ytplayer.config.args", window.ytplayer && window.ytplayer.config
+          && window.ytplayer.config.args);
+      } catch (_) {}
+      try {
+        const searchbox = document.querySelector("ytd-searchbox");
+        addRoot("ytd-searchbox.data", searchbox && searchbox.data);
+      } catch (_) {}
+      try {
+        const app = document.querySelector("ytd-app");
+        addRoot("ytd-app.data", app && app.data);
+      } catch (_) {}
+
+      const describe = value => {
+        if (value === null) return "null";
+        if (Array.isArray(value)) return "array(" + value.length + ")";
+        if (typeof value === "string") return "string(" + value.length + ")";
+        return typeof value;
+      };
+      const normalize = value => String(value).replace(/[^a-z0-9]/gi, "").toLowerCase();
+
+      for (const [rootName, rootValue] of roots) {
+        const seen = new WeakSet();
+        let visited = 0;
+        const walk = (value, path, depth) => {
+          if (!value || typeof value !== "object" || depth > 8
+              || visited >= 1600 || seen.has(value)) return;
+          seen.add(value);
+          visited++;
+          let keys;
+          try { keys = Object.keys(value).slice(0, 120); }
+          catch (_) { return; }
+          for (const key of keys) {
+            let child;
+            try { child = value[key]; } catch (_) { continue; }
+            const normalized = normalize(key);
+            for (const [field, alias] of Object.entries(fields)) {
+              if (normalized === alias && found[field].length < 3) {
+                found[field].push(
+                  (rootName + "." + path + (path ? "." : "") + key)
+                    .slice(0, 170) + ":" + describe(child)
+                );
+              }
+            }
+            if (child && typeof child === "object") {
+              const childPath = path ? path + "." + key : key;
+              walk(child, childPath, depth + 1);
+            }
+          }
+        };
+        walk(rootValue, "", 0);
+      }
+
+      return Object.fromEntries(Object.entries(found).map(([field, paths]) => [
+        field,
+        paths.length ? paths.join(" | ") : "not_found"
+      ]));
+    })();
+
+    const runtimeValueType = value => {
+      if (value === null) return "null";
+      if (Array.isArray(value)) return "array(" + value.length + ")";
+      if (typeof value === "string") return "string(" + value.length + ")";
+      return typeof value;
+    };
+    const runtimeSourceFor = (field, configKey, value) => {
+      if (value !== undefined && value !== null) {
+        return "ytcfg:" + configKey + ":" + runtimeValueType(value);
+      }
+      return runtimeFieldSources[field];
+    };
+
     let query = "";
     let querySource = "";
     if (recentYouTubeSuggestion
@@ -764,6 +860,14 @@
         payload.inlineSettingStatus = inlineSettingStatus;
       }
 
+      const runtimeSources = {
+        lockedSafetyMode: runtimeSourceFor("lockedSafetyMode", "LOCKED_SAFETY_MODE", lockedSafetyMode),
+        clickTrackingParams: runtimeSourceFor("clickTrackingParams", "CLICK_TRACKING_PARAMS", clickTrackingParams),
+        adSignalsInfo: runtimeSourceFor("adSignalsInfo", "AD_SIGNALS_INFO", adSignalsInfo),
+        webSearchboxStatsUrl: runtimeSourceFor("webSearchboxStatsUrl", "WEB_SEARCHBOX_STATS_URL", webSearchboxStatsUrl),
+        inlineSettingStatus: runtimeSourceFor("inlineSettingStatus", "INLINE_SETTING_STATUS", inlineSettingStatus)
+      };
+
       const headers = {"Content-Type": "application/json"};
       const loggedIn = configValue("LOGGED_IN");
       if (typeof loggedIn === "boolean") {
@@ -793,7 +897,8 @@
         headers,
         payloadKeys: keys.join(","),
         clientName,
-        clientVersion
+        clientVersion,
+        runtimeFieldSources: runtimeSources
       };
     } catch (_) {
       return {body: null, reason: "INNERTUBE_CONTEXT is not serializable"};
@@ -970,6 +1075,9 @@
               + " · version=" + (fallback.clientVersion || "unknown")
               + " · query_present=true"
           );
+          for (const [field, source] of Object.entries(fallback.runtimeFieldSources || {})) {
+            record("youtube_search_runtime_source", field, source);
+          }
           record(
             "youtube_search_fallback_encoding",
             routed,
