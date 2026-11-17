@@ -703,6 +703,9 @@
   }
 
   let youtubeAttestationRpcSequence = 0;
+  let youtubePlayerTimerSequence = 0;
+  let activeYouTubePlayerTimer = null;
+  const recentYouTubePlayerTimerFires = [];
   let latestYouTubePlayerState = null;
   const playbackContextId = (() => {
     try {
@@ -776,6 +779,7 @@
       method,
       transport,
       callsite: capturePlayerCallsite ? sanitizedYouTubeFetchCallsite(4) : null,
+      timerContext: capturePlayerCallsite ? youtubePlayerTimerContext() : null,
       playerState: playerState ? {
         ageMs: Math.max(0, Math.round(performance.now() - playerState.at)),
         detail: playerState.detail
@@ -833,6 +837,7 @@
         + (call.playerState
           ? " player_state_age_ms=" + call.playerState.ageMs + " player_state=" + call.playerState.detail
           : (call.info.operation === "GenerateIT" ? " player_state=unobserved" : ""))
+        + (call.timerContext ? " timer_context=" + call.timerContext : " timer_context=unobserved")
     );
   }
 
@@ -1459,6 +1464,99 @@
       return "unavailable";
     }
   }
+
+  function youtubePlayerTimerContext() {
+    const now = performance.now();
+    const recent = recentYouTubePlayerTimerFires
+      .filter(entry => now - entry.firedAt <= 15000)
+      .slice(-3);
+    if (activeYouTubePlayerTimer
+        && (!recent.length || recent[recent.length - 1].timer !== activeYouTubePlayerTimer)) {
+      recent.push({timer: activeYouTubePlayerTimer, firedAt: activeYouTubePlayerTimer.lastFiredAt});
+    }
+    const selected = recent.slice(-3);
+    if (!selected.length) return null;
+    return selected.map(entry => {
+      const timer = entry.timer;
+      const firedAgo = Number.isFinite(entry.firedAt)
+        ? Math.max(0, Math.round(now - entry.firedAt))
+        : "unknown";
+      const scheduledAgo = Math.max(0, Math.round(now - timer.scheduledAt));
+      return timer.kind + "#" + timer.id
+        + ":delay_ms=" + timer.delayMs
+        + ":fires=" + timer.fireCount
+        + ":fired_ago_ms=" + firedAgo
+        + ":scheduled_ago_ms=" + scheduledAgo
+        + ":scheduled_by=" + timer.callsite;
+    }).join("|").slice(0, 360);
+  }
+
+  function instrumentYouTubePlayerTimer(kind, nativeTimer) {
+    if (typeof nativeTimer !== "function") return nativeTimer;
+    return function(handler, delay, ...args) {
+      if (typeof handler !== "function") {
+        return Reflect.apply(nativeTimer, this, [handler, delay, ...args]);
+      }
+
+      const callsite = sanitizedYouTubeFetchCallsite(2);
+      if (!/kevlar_base_module|kevlar_main_mod/i.test(callsite)) {
+        return Reflect.apply(nativeTimer, this, [handler, delay, ...args]);
+      }
+
+      youtubePlayerTimerSequence = (youtubePlayerTimerSequence % 999999) + 1;
+      const numericDelay = Number(delay);
+      const timer = {
+        id: youtubePlayerTimerSequence,
+        kind,
+        delayMs: Number.isFinite(numericDelay)
+          ? Math.max(0, Math.min(2147483647, Math.round(numericDelay)))
+          : 0,
+        scheduledAt: performance.now(),
+        callsite,
+        fireCount: 0,
+        lastFiredAt: null
+      };
+
+      const observedHandler = function(...callbackArgs) {
+        const firedAt = performance.now();
+        timer.fireCount++;
+        timer.lastFiredAt = firedAt;
+        recentYouTubePlayerTimerFires.push({timer, firedAt});
+        while (recentYouTubePlayerTimerFires.length > 12) {
+          recentYouTubePlayerTimerFires.shift();
+        }
+        while (recentYouTubePlayerTimerFires.length
+            && firedAt - recentYouTubePlayerTimerFires[0].firedAt > 15000) {
+          recentYouTubePlayerTimerFires.shift();
+        }
+
+        const previousTimer = activeYouTubePlayerTimer;
+        activeYouTubePlayerTimer = timer;
+        try {
+          return handler.apply(this, callbackArgs);
+        } finally {
+          activeYouTubePlayerTimer = previousTimer;
+        }
+      };
+      return Reflect.apply(nativeTimer, this, [observedHandler, delay, ...args]);
+    };
+  }
+
+  (function observeYouTubePlayerTimers() {
+    try {
+      const nativeSetTimeout = window.setTimeout;
+      const nativeSetInterval = window.setInterval;
+      window.setTimeout = instrumentYouTubePlayerTimer("timeout", nativeSetTimeout);
+      window.setInterval = instrumentYouTubePlayerTimer("interval", nativeSetInterval);
+      record("youtube_player_runtime", "kevlar timers",
+        "phase=timer_observer_installed scope=kevlar_base_module");
+    } catch (error) {
+      const errorName = String(error && error.name || "unknown")
+        .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "unknown";
+      record("youtube_player_runtime", "kevlar timers",
+        "phase=timer_observer_install_failed error=" + errorName);
+    }
+  })();
 
   let youtubeSabrRequestBodyMeasurementStarted = false;
 
