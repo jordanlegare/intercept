@@ -938,7 +938,7 @@
       headers["X-Goog-AuthUser"] = (
         (typeof sessionIndex === "number" && Number.isInteger(sessionIndex)
           && sessionIndex >= 0)
-        || (typeof sessionIndex === "string" && /^\\d+$/.test(sessionIndex))
+        || (typeof sessionIndex === "string" && /^\d+$/.test(sessionIndex))
       ) ? String(sessionIndex) : "0";
 
       const authDiagnostic = "authorization=deferred_to_proxy"
