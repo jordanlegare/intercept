@@ -842,9 +842,13 @@
         || hostname === "googleapis.com" || hostname.endsWith(".googleapis.com");
       if (!googleHost) return null;
       const lowerPath = pathname.toLowerCase();
-      const namedAsset = /(?:^|[\\/._-])(?:botguard|bot_guard|attestation|integrity|challenge)(?:[\\/._-]|$)/.test(lowerPath)
-        || /\\/js\\/bg(?:\\/|$)/.test(lowerPath)
-        || /(?:^|\\/)bg(?:\\.min)?\\.js(?:$|\\?)/.test(lowerPath);
+      const namedAsset = lowerPath.includes("botguard")
+        || lowerPath.includes("bot_guard")
+        || lowerPath.includes("attestation")
+        || lowerPath.includes("integrity")
+        || lowerPath.includes("challenge")
+        || lowerPath.includes("/js/bg/")
+        || /(^|\/)bg(?:\.min)?\.js$/.test(lowerPath);
       if (!namedAsset) return null;
       return {target: hostname + pathname};
     } catch (_) {
