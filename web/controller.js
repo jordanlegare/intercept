@@ -835,15 +835,16 @@
       // INNERTUBE_CONTEXT already carries these values on current YouTube
       // pages. The successful WEB search envelope sends them again at the
       // top level, so prefer the live nested objects rather than looking only
-      // for unrelated top-level ytcfg keys.
+      // for unrelated top-level ytcfg keys. Keep the config fallbacks in this
+      // function scope because the runtime-source diagnostic below uses them.
+      const lockedSafetyMode = configValue("LOCKED_SAFETY_MODE");
+      const clickTrackingParams = configValue("CLICK_TRACKING_PARAMS");
+
       const contextUser = context.user;
       if (contextUser && typeof contextUser === "object" && !Array.isArray(contextUser)) {
         payload.user = {...contextUser};
-      } else {
-        const lockedSafetyMode = configValue("LOCKED_SAFETY_MODE");
-        if (typeof lockedSafetyMode === "boolean") {
-          payload.user = {lockedSafetyMode};
-        }
+      } else if (typeof lockedSafetyMode === "boolean") {
+        payload.user = {lockedSafetyMode};
       }
 
       const contextClickTracking = context.clickTracking;
@@ -851,11 +852,8 @@
           && typeof contextClickTracking.clickTrackingParams === "string"
           && contextClickTracking.clickTrackingParams) {
         payload.clickTracking = {...contextClickTracking};
-      } else {
-        const clickTrackingParams = configValue("CLICK_TRACKING_PARAMS");
-        if (typeof clickTrackingParams === "string" && clickTrackingParams) {
-          payload.clickTracking = {clickTrackingParams};
-        }
+      } else if (typeof clickTrackingParams === "string" && clickTrackingParams) {
+        payload.clickTracking = {clickTrackingParams};
       }
 
       const adSignalsInfo = configValue("AD_SIGNALS_INFO");
