@@ -76,7 +76,7 @@
   function record(kind, target, detail) {
     if (INTERNAL_AUTHORITY_EVENTS.has(kind)) return;
     const eventKind = String(kind).slice(0, 80);
-    const detailLimit = eventKind === "youtube_player_watchdog" ? 900
+    const detailLimit = eventKind === "youtube_player_watchdog" || eventKind === "youtube_attestation_rpc" ? 900
       : eventKind === "youtube_player_state" ? 640 : 300;
     eventBuffer.push({
       kind: eventKind,
@@ -703,6 +703,7 @@
   }
 
   let youtubeAttestationRpcSequence = 0;
+  let latestYouTubePlayerState = null;
   const playbackContextId = (() => {
     try {
       if (window.crypto && typeof window.crypto.randomUUID === "function") {
@@ -766,12 +767,19 @@
 
   function beginYouTubeAttestationRpc(info, method, transport) {
     youtubeAttestationRpcSequence = (youtubeAttestationRpcSequence % 999999) + 1;
+    const capturePlayerCallsite = info.operation === "GenerateIT";
+    const playerState = capturePlayerCallsite ? latestYouTubePlayerState : null;
     return {
       id: Date.now().toString(36) + "-" + youtubeAttestationRpcSequence
         + "-" + Math.random().toString(36).slice(2, 8),
       info,
       method,
       transport,
+      callsite: capturePlayerCallsite ? sanitizedYouTubeFetchCallsite(4) : null,
+      playerState: playerState ? {
+        ageMs: Math.max(0, Math.round(performance.now() - playerState.at)),
+        detail: playerState.detail
+      } : null,
       startedAt: null,
       headersReported: false,
       terminal: false
@@ -821,6 +829,10 @@
         + " operation=" + call.info.operation
         + " phase=dispatch method=" + call.method
         + " transport=" + call.transport
+        + (call.callsite ? " callsite=" + call.callsite : "")
+        + (call.playerState
+          ? " player_state_age_ms=" + call.playerState.ageMs + " player_state=" + call.playerState.detail
+          : (call.info.operation === "GenerateIT" ? " player_state=unobserved" : ""))
     );
   }
 
@@ -1137,6 +1149,25 @@
         + " media_error_code=" + (Number.isFinite(errorCode) && errorCode > 0 ? errorCode : "none");
     }
 
+    function attestationPlayerSnapshot(video, eventName) {
+      const bufferedAhead = bufferedAheadSeconds(video);
+      const errorCode = video.error && Number(video.error.code);
+      return "event=" + eventName
+        + " current_time=" + metric(video.currentTime)
+        + " ready_state=" + (Number(video.readyState) || 0)
+        + " network_state=" + (Number(video.networkState) || 0)
+        + " paused=" + Boolean(video.paused)
+        + " ended=" + Boolean(video.ended)
+        + " seeking=" + Boolean(video.seeking)
+        + " playback_rate=" + metric(video.playbackRate, 2)
+        + " current_src=" + Boolean(video.currentSrc)
+        + " src_attr=" + video.hasAttribute("src")
+        + " src_object=" + (video.srcObject !== null)
+        + " buffered_ahead_s=" + (bufferedAhead === null ? "unknown" : metric(bufferedAhead))
+        + " media_error_code=" + (Number.isFinite(errorCode) && errorCode > 0 ? errorCode : "none")
+        + " visibility=" + (document.visibilityState || "unknown");
+    }
+
     function getWatchState(video, now) {
       let state = watchStates.get(video);
       if (!state) {
@@ -1357,6 +1388,7 @@
               state.playbackStarted = false;
             }
           }
+          latestYouTubePlayerState = {at: eventAt, detail: attestationPlayerSnapshot(video, eventName)};
           if (sampledEvents.has(eventName)) {
             let samples = lastSampleAt.get(video);
             if (!samples) {
@@ -1370,7 +1402,8 @@
           record("youtube_player_state", "video", snapshot(video, eventName));
         });
       }
-      record("youtube_player_state", "video", snapshot(video, "observed"));
+      latestYouTubePlayerState = {at: now, detail: attestationPlayerSnapshot(video, "observed")};
+      record("youtube_player_state", "video", latestYouTubePlayerState.detail);
     }
 
     function observeTree(root) {
@@ -1397,7 +1430,7 @@
 
   observeYouTubePlayerState();
 
-  function sanitizedYouTubeFetchCallsite() {
+  function sanitizedYouTubeFetchCallsite(maxFrames = 2) {
     try {
       const frames = String(new Error().stack || "").split("\n").slice(3);
       const safeFrames = [];
@@ -1419,7 +1452,7 @@
         const scriptLocation = parsed.hostname + "/" + file
           + (position ? ":" + position[1] + ":" + position[2] : "");
         safeFrames.push((functionName ? functionName + "@" : "") + scriptLocation);
-        if (safeFrames.length >= 2) break;
+        if (safeFrames.length >= Math.max(1, Math.min(6, Number(maxFrames) || 2))) break;
       }
       return safeFrames.length ? safeFrames.join(">") : "unavailable";
     } catch (_) {
