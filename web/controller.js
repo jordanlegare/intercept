@@ -805,25 +805,45 @@
       return undefined;
     };
     const candidateIds = [];
-    const addId = value => {
+    let videoIdSource = "unavailable";
+    const addId = (value, source) => {
       if (typeof value === "string" && /^[A-Za-z0-9_-]{11}$/.test(value)
-          && !candidateIds.includes(value)) candidateIds.push(value);
+          && !candidateIds.includes(value)) {
+        candidateIds.push(value);
+        if (videoIdSource === "unavailable") videoIdSource = source;
+      }
     };
+
+    // During YouTube SPA navigation, /player can fire before location.href,
+    // ytInitialPlayerResponse, and the video element have updated. Prefer the
+    // recently clicked destination, just as the get_watch/next fallbacks do.
+    // Do not consume this state here: get_watch may still need it in parallel.
+    const pendingNavigation = recentYouTubeVideoNavigation;
+    const pendingNavigationIsFresh = Boolean(
+      pendingNavigation && performance.now() - pendingNavigation.at <= 12000
+    );
+    if (pendingNavigationIsFresh) {
+      addId(pendingNavigation.videoId, "recent_navigation_click");
+    }
+
     try {
       const url = new URL(location.href);
-      addId(url.searchParams.get("v"));
+      addId(url.searchParams.get("v"), "current_url");
       const match = url.pathname.match(/^\/(?:shorts|live|embed)\/([A-Za-z0-9_-]{11})(?:\/|$)/);
-      if (match) addId(match[1]);
+      if (match) addId(match[1], "current_url");
     } catch (_) {}
-    try { addId(playerResponse && playerResponse.videoDetails && playerResponse.videoDetails.videoId); } catch (_) {}
-    try { addId(playerArgs && playerArgs.video_id); } catch (_) {}
+    try {
+      addId(playerResponse && playerResponse.videoDetails && playerResponse.videoDetails.videoId,
+        "ytInitialPlayerResponse");
+    } catch (_) {}
+    try { addId(playerArgs && playerArgs.video_id, "ytplayer.config.args"); } catch (_) {}
     try {
       const video = document.querySelector("video");
       const source = video && (video.currentSrc || video.src);
       if (source) {
         const url = new URL(source, location.href);
-        addId(url.searchParams.get("video_id"));
-        addId(url.searchParams.get("v"));
+        addId(url.searchParams.get("video_id"), "video_source");
+        addId(url.searchParams.get("v"), "video_source");
       }
     } catch (_) {}
 
@@ -895,7 +915,7 @@
       return {
         body: JSON.stringify(payload),
         headers,
-        videoIdSource: candidateIds.length ? "live_page_runtime" : "unavailable",
+        videoIdSource,
         payloadKeys: Object.keys(payload).join(","),
         clientName: typeof client.clientName === "string" ? client.clientName.slice(0, 24) : "unknown",
         clientVersion: typeof client.clientVersion === "string" ? client.clientVersion.slice(0, 48) : "unknown",
@@ -1812,6 +1832,7 @@
       const youtubeSearchCheck = youtubeSearchEndpointCheck(source);
       const youtubePlayerCheck = youtubePlayerEndpointCheck(source);
       let youtubePlayerFallbackHeaders = null;
+      let youtubePlayerFallbackUnavailable = null;
       const youtubeGetWatchCheck = youtubeGetWatchEndpointCheck(source);
       let youtubeGetWatchFallbackHeaders = null;
       const youtubeNextCheck = youtubeNextEndpointCheck(source);
@@ -1915,8 +1936,21 @@
             "body_encoding=identity · content_type=application/json"
               + " · inherited_content_encoding=" + (inheritedContentEncoding ? "removed" : "absent"));
         } else {
-          record("youtube_player_body_unavailable", fetchEventPath(source), fallback.reason);
+          youtubePlayerFallbackUnavailable = fallback.reason || "fallback_unavailable";
+          record("youtube_player_body_unavailable", fetchEventPath(source), youtubePlayerFallbackUnavailable);
         }
+      }
+      // Never send a bodyless InnerTube player POST upstream. In particular,
+      // the original request may still carry Content-Encoding: gzip even
+      // though Fetch supplied no compressed bytes. Return a local failure and
+      // let diagnostics explain why playback could not be initialized.
+      if (youtubePlayerFallbackUnavailable) {
+        record("youtube_player_request_blocked", fetchEventPath(source),
+          "reason=" + youtubePlayerFallbackUnavailable + " · upstream_dispatch=false");
+        return new Response(null, {
+          status: 503,
+          statusText: "Player request unavailable"
+        });
       }
       if (routedRequest.method === "POST"
           && bodyDetail === "body_arg=none"
