@@ -152,19 +152,21 @@
       exportEventsButton.disabled = false;
       eventExportStatus.textContent = events.length + " retained events · snapshot " + latestEventsAt.toLocaleTimeString();
       eventSummary.textContent = "EVENT STREAM · " + events.length + " retained";
-      // Keep WAA evidence visible even when unrelated traffic has pushed it
-      // outside the short recent-activity window. The export still contains the
-      // full retained event history (up to 500 entries).
+      // Keep attestation RPC and runtime-resource evidence visible even when
+      // unrelated traffic has pushed it outside the short recent-activity window.
       const visible = new Map();
       for (const item of events.slice(-30)) {
         visible.set(String(item.at_unix_ms) + "|" + item.kind + "|" + item.detail, item);
       }
-      for (const item of events.filter(item => item.kind === "youtube_attestation_rpc").slice(-30)) {
+      for (const item of events.filter(item =>
+        item.kind === "youtube_attestation_rpc"
+        || item.kind === "youtube_attestation_resource"
+      ).slice(-60)) {
         visible.set(String(item.at_unix_ms) + "|" + item.kind + "|" + item.detail, item);
       }
       eventsNode.textContent = Array.from(visible.values())
         .sort((left, right) => Number(right.at_unix_ms) - Number(left.at_unix_ms))
-        .slice(0, 60)
+        .slice(0, 90)
         .map(item => {
           const time = new Date(Number(item.at_unix_ms)).toLocaleTimeString();
           return "[" + time + "] " + item.kind + " · " + item.detail + " · " + item.target;
