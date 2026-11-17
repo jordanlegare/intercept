@@ -4693,7 +4693,7 @@ fn sanitize_event_target(value: String, max: usize) -> String {
         || value.split_once('/')
             .is_some_and(|(host, _)| host.contains('.'));
     let sanitized = if is_url_like {
-        value.split(|character| character == '?' || character == '#')
+        value.split(['?', '#'])
             .next()
             .unwrap_or_default()
             .to_owned()
