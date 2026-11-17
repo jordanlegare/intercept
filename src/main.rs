@@ -157,7 +157,7 @@ struct Session {
     cookie_tokens: StdMutex<HashMap<String, String>>,
     sabr_backoff: StdMutex<Option<SabrBackoffWindow>>,
     sabr_request_timing: StdMutex<SabrRequestTiming>,
-    youtube_attestation_timing: StdMutex<YouTubeAttestationTiming>,
+    youtube_attestation_timing: StdMutex<HashMap<String, YouTubeAttestationTiming>>,
 }
 
 #[derive(Default)]
@@ -1175,7 +1175,7 @@ async fn create_session(
         cookie_tokens: StdMutex::new(HashMap::new()),
         sabr_backoff: StdMutex::new(None),
         sabr_request_timing: StdMutex::new(SabrRequestTiming::default()),
-        youtube_attestation_timing: StdMutex::new(YouTubeAttestationTiming::default()),
+        youtube_attestation_timing: StdMutex::new(HashMap::new()),
     });
 
     // Preserve the submitted destination path, query, and browser-side fragment
@@ -2681,6 +2681,39 @@ fn youtube_attestation_resource_operation(url: &Url) -> Option<&'static str> {
     }
 }
 
+fn youtube_playback_context_id(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get("x-intercept-playback-context-id")?.to_str().ok()?;
+    if value.len() != 36
+        || !value.bytes().enumerate().all(|(index, byte)| {
+            if [8, 13, 18, 23].contains(&index) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+    {
+        return None;
+    }
+    Some(value)
+}
+
+fn youtube_attestation_context_key(headers: &HeaderMap) -> String {
+    youtube_playback_context_id(headers).unwrap_or("unscoped").to_owned()
+}
+
+fn youtube_attestation_context_mut<'a>(
+    contexts: &'a mut HashMap<String, YouTubeAttestationTiming>,
+    context_id: &str,
+) -> &'a mut YouTubeAttestationTiming {
+    const MAX_PLAYBACK_CONTEXTS: usize = 64;
+    if !contexts.contains_key(context_id) && contexts.len() >= MAX_PLAYBACK_CONTEXTS {
+        if let Some(oldest_key) = contexts.keys().next().cloned() {
+            contexts.remove(&oldest_key);
+        }
+    }
+    contexts.entry(context_id.to_owned()).or_default()
+}
+
 fn youtube_attestation_correlation_id(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get("x-intercept-attestation-id")?.to_str().ok()?;
     if value.is_empty()
@@ -3254,10 +3287,12 @@ async fn ajax_passthrough(
             // Snapshot the latest WAA upstream response at the time this SABR
             // request arrives. Only scalar metadata and the opaque RPC ID are
             // retained; token/challenge bytes are never inspected or logged.
+            let playback_context_id = youtube_attestation_context_key(&request_headers);
             let waa_snapshot = {
-                let timing = session.youtube_attestation_timing.lock()
+                let mut contexts = session.youtube_attestation_timing.lock()
                     .unwrap_or_else(|error| error.into_inner());
-                timing.snapshot(Instant::now())
+                youtube_attestation_context_mut(&mut contexts, &playback_context_id)
+                    .snapshot(Instant::now())
             };
             let waa_detail = match (
                 waa_snapshot.last_rpc_response_operation,
@@ -3288,7 +3323,7 @@ async fn ajax_passthrough(
                 "youtube_sabr_request_metadata",
                 format!("{upstream_host}{upstream_path}"),
                 format!(
-                    "rid={request_id} body_bytes={} {}{}{}",
+                    "rid={request_id} playback_context={playback_context_id} body_bytes={} {}{}{}",
                     request_body.len(),
                     metadata.summary(),
                     waa_detail,
@@ -3612,8 +3647,9 @@ async fn ajax_passthrough(
             .map(|value| clean_field(value.to_owned(), 24))
             .unwrap_or_else(|| "absent".to_owned());
         {
-            let mut timing = session.youtube_attestation_timing.lock().unwrap_or_else(|error| error.into_inner());
-            timing.observe_proxy_response(
+            let playback_context_id = youtube_attestation_context_key(&request_headers);
+            let mut contexts = session.youtube_attestation_timing.lock().unwrap_or_else(|error| error.into_inner());
+            youtube_attestation_context_mut(&mut contexts, &playback_context_id).observe_proxy_response(
                 operation,
                 youtube_attestation_correlation_id(&request_headers),
                 status.as_u16(),
@@ -3755,11 +3791,13 @@ async fn ajax_passthrough(
     let prefix_stream = futures_util::stream::iter(
         error_prefix.into_iter().map(Ok::<_, io::Error>)
     );
+    let playback_context_id = youtube_attestation_context_key(&request_headers);
     let remainder_stream = futures_util::stream::unfold(
         (
             upstream.bytes_stream(),
             session.clone(),
             request_id.clone(),
+            playback_context_id,
             stream_target.clone(),
             request_permit,
             session.cancel_tx.subscribe(),
@@ -3768,7 +3806,7 @@ async fn ajax_passthrough(
             is_youtube_sabr_request(&upstream_url),
             UmpStreamDiagnostics::default(),
         ),
-        |(mut upstream_stream, session, request_id, stream_target, request_permit,
+        |(mut upstream_stream, session, request_id, playback_context_id, stream_target, request_permit,
           mut cancellation, mut response_bytes, finished, is_sabr, mut ump_diagnostics)| async move {
             if finished {
                 return None;
@@ -3801,7 +3839,7 @@ async fn ajax_passthrough(
                         }
                         Some((
                             Ok(chunk),
-                            (upstream_stream, session, request_id, stream_target,
+                            (upstream_stream, session, request_id, playback_context_id, stream_target,
                              request_permit, cancellation, response_bytes, false, is_sabr, ump_diagnostics),
                         ))
                     }
@@ -3831,7 +3869,7 @@ async fn ajax_passthrough(
                         }
                         Some((
                             Err(io::Error::other(safe_error)),
-                            (upstream_stream, session, request_id, stream_target,
+                            (upstream_stream, session, request_id, playback_context_id, stream_target,
                              request_permit, cancellation, response_bytes, true, is_sabr, ump_diagnostics),
                         ))
                     }
@@ -3841,16 +3879,17 @@ async fn ajax_passthrough(
                                 .and_then(|status| status.status) == Some(3)
                             {
                                 let attestation = {
-                                    let timing = session.youtube_attestation_timing.lock()
+                                    let mut contexts = session.youtube_attestation_timing.lock()
                                         .unwrap_or_else(|error| error.into_inner());
-                                    timing.snapshot(Instant::now())
+                                    youtube_attestation_context_mut(&mut contexts, &playback_context_id)
+                                        .snapshot(Instant::now())
                                 };
                                 push_event(
                                     &session,
                                     "youtube_sabr_attestation_context",
                                     stream_target.clone(),
                                     format!(
-                                        "rid={request_id} status=3 proxy_waa_requests={} last_operation={} last_rpc_id={} last_proxy_waa_ago_ms={} att_get_n={} att_get_id={} att_get_ms={} att_log_n={} att_log_id={} att_log_ms={} last_rpc_response_operation={} last_rpc_response_id={} last_rpc_response_status={} last_rpc_response_ago_ms={}",
+                                        "rid={request_id} playback_context={playback_context_id} status=3 proxy_waa_requests={} last_operation={} last_rpc_id={} last_proxy_waa_ago_ms={} att_get_n={} att_get_id={} att_get_ms={} att_log_n={} att_log_id={} att_log_ms={} last_rpc_response_operation={} last_rpc_response_id={} last_rpc_response_status={} last_rpc_response_ago_ms={}",
                                         attestation.proxy_request_count,
                                         attestation.last_operation.unwrap_or("none"),
                                         attestation.last_correlation_id.as_deref().unwrap_or("unmatched"),
@@ -4028,9 +4067,10 @@ async fn proxy(
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "worker" | "sharedworker" | "serviceworker"));
     if let Some(operation) = attestation_operation {
         {
-            let mut timing = session.youtube_attestation_timing.lock()
+            let playback_context_id = youtube_attestation_context_key(&parts.headers);
+            let mut contexts = session.youtube_attestation_timing.lock()
                 .unwrap_or_else(|error| error.into_inner());
-            timing.observe_proxy_request(
+            youtube_attestation_context_mut(&mut contexts, &playback_context_id).observe_proxy_request(
                 operation,
                 youtube_attestation_correlation_id(&parts.headers),
                 Instant::now(),
@@ -4060,9 +4100,10 @@ async fn proxy(
         ).await;
     } else if let Some(operation) = attestation_resource_operation {
         {
-            let mut timing = session.youtube_attestation_timing.lock()
+            let playback_context_id = youtube_attestation_context_key(&parts.headers);
+            let mut contexts = session.youtube_attestation_timing.lock()
                 .unwrap_or_else(|error| error.into_inner());
-            timing.observe_proxy_resource_request(
+            youtube_attestation_context_mut(&mut contexts, &playback_context_id).observe_proxy_resource_request(
                 operation,
                 youtube_attestation_correlation_id(&parts.headers),
                 Instant::now(),
@@ -6045,6 +6086,7 @@ fn should_skip_request_header(name: &HeaderName) -> bool {
             | "x-intercept-input-id" | "x-intercept-input-target"
             | "x-intercept-body-diagnostic" | "x-intercept-transport-diagnostic"
             | "x-intercept-youtube-datasync-id" | "x-intercept-attestation-id"
+            | "x-intercept-playback-context-id"
     )
 }
 
@@ -6208,7 +6250,7 @@ mod tests {
             cookie_tokens: StdMutex::new(HashMap::new()),
             sabr_backoff: StdMutex::new(None),
             sabr_request_timing: StdMutex::new(SabrRequestTiming::default()),
-            youtube_attestation_timing: StdMutex::new(YouTubeAttestationTiming::default()),
+            youtube_attestation_timing: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -7183,7 +7225,7 @@ mod tests {
             cookie_tokens: StdMutex::new(HashMap::new()),
             sabr_backoff: StdMutex::new(None),
             sabr_request_timing: StdMutex::new(SabrRequestTiming::default()),
-            youtube_attestation_timing: StdMutex::new(YouTubeAttestationTiming::default()),
+            youtube_attestation_timing: StdMutex::new(HashMap::new()),
         };
         let referer = HeaderValue::from_str(
             "http://session1234567890abcdef1234567890.localhost:5000/p/session1234567890abcdef1234567890/profile"
@@ -7217,7 +7259,7 @@ mod tests {
             cookie_tokens: StdMutex::new(HashMap::new()),
             sabr_backoff: StdMutex::new(None),
             sabr_request_timing: StdMutex::new(SabrRequestTiming::default()),
-            youtube_attestation_timing: StdMutex::new(YouTubeAttestationTiming::default()),
+            youtube_attestation_timing: StdMutex::new(HashMap::new()),
         };
         let mut url = Url::parse(
             "https://www.youtube.com/api/stats/watchtime?fmt=398&euri=http%3A%2F%2Fsession1234567890abcdef1234567890.localhost%3A5000%2F"

@@ -703,6 +703,17 @@
   }
 
   let youtubeAttestationRpcSequence = 0;
+  const playbackContextId = (() => {
+    try {
+      if (window.crypto && typeof window.crypto.randomUUID === "function") {
+        return window.crypto.randomUUID();
+      }
+    } catch (_) {}
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, character => {
+      const random = Math.random() * 16 | 0;
+      return (character === "x" ? random : (random & 3 | 8)).toString(16);
+    });
+  })();
 
   function youtubeAttestationRpcInfo(source) {
     try {
@@ -3251,6 +3262,7 @@
       headers.set("X-Intercept-Proxy-Mode", "ajax");
       headers.set("X-Intercept-Body-Diagnostic", bodyDetail);
       headers.set("X-Intercept-Transport-Diagnostic", "window-fetch");
+      headers.set("X-Intercept-Playback-Context-Id", playbackContextId);
       const inputContext = addInputCorrelation(headers);
       const attestationCall = attestationInfo
         ? beginYouTubeAttestationRpc(attestationInfo, routedRequest.method, "fetch")
@@ -3379,6 +3391,7 @@
         nativeXhrSetRequestHeader.call(this, "X-Intercept-Proxy-Mode", "ajax");
         nativeXhrSetRequestHeader.call(this, "X-Intercept-Body-Diagnostic", bodyDetail);
         nativeXhrSetRequestHeader.call(this, "X-Intercept-Transport-Diagnostic", "window-xhr");
+        nativeXhrSetRequestHeader.call(this, "X-Intercept-Playback-Context-Id", playbackContextId);
         if (attestationCall) {
           nativeXhrSetRequestHeader.call(this, "X-Intercept-Attestation-Id", attestationCall.id);
         }
