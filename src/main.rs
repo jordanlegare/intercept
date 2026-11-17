@@ -2045,6 +2045,10 @@ struct YouTubeAttestationTiming {
     att_log_request_count: u64,
     last_att_log_correlation_id: Option<String>,
     last_att_log_request_at: Option<Instant>,
+    last_rpc_response_operation: Option<&'static str>,
+    last_rpc_response_correlation_id: Option<String>,
+    last_rpc_response_status: Option<u16>,
+    last_rpc_response_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2059,6 +2063,10 @@ struct YouTubeAttestationTimingSnapshot {
     att_log_request_count: u64,
     last_att_log_correlation_id: Option<String>,
     last_att_log_request_ago_ms: Option<u64>,
+    last_rpc_response_operation: Option<&'static str>,
+    last_rpc_response_correlation_id: Option<String>,
+    last_rpc_response_status: Option<u16>,
+    last_rpc_response_ago_ms: Option<u64>,
 }
 
 impl YouTubeAttestationTiming {
@@ -2095,6 +2103,13 @@ impl YouTubeAttestationTiming {
         }
     }
 
+    fn observe_proxy_response(&mut self, operation: &'static str, correlation_id: Option<&str>, status: u16, observed_at: Instant) {
+        self.last_rpc_response_operation = Some(operation);
+        self.last_rpc_response_correlation_id = correlation_id.map(str::to_owned);
+        self.last_rpc_response_status = Some(status);
+        self.last_rpc_response_at = Some(observed_at);
+    }
+
     fn snapshot(&self, observed_at: Instant) -> YouTubeAttestationTimingSnapshot {
         YouTubeAttestationTimingSnapshot {
             proxy_request_count: self.proxy_request_count,
@@ -2113,6 +2128,10 @@ impl YouTubeAttestationTiming {
             last_att_log_request_ago_ms: self.last_att_log_request_at.map(|previous| {
                 duration_millis(observed_at.saturating_duration_since(previous))
             }),
+            last_rpc_response_operation: self.last_rpc_response_operation,
+            last_rpc_response_correlation_id: self.last_rpc_response_correlation_id.clone(),
+            last_rpc_response_status: self.last_rpc_response_status,
+            last_rpc_response_ago_ms: self.last_rpc_response_at.map(|previous| duration_millis(observed_at.saturating_duration_since(previous))),
         }
     }
 }
@@ -3511,6 +3530,10 @@ async fn ajax_passthrough(
         error_read_failed,
     );
     if let Some(operation) = attestation_operation {
+        {
+            let mut timing = session.youtube_attestation_timing.lock().unwrap_or_else(|error| error.into_inner());
+            timing.observe_proxy_response(operation, youtube_attestation_correlation_id(&request_headers), status.as_u16(), Instant::now());
+        }
         let response_content_type = upstream_headers.get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(|value| clean_field(value.to_owned(), 80))
@@ -3744,7 +3767,7 @@ async fn ajax_passthrough(
                                     "youtube_sabr_attestation_context",
                                     stream_target.clone(),
                                     format!(
-                                        "rid={request_id} status=3 proxy_waa_requests={} last_operation={} last_rpc_id={} last_proxy_waa_ago_ms={} att_get_n={} att_get_id={} att_get_ms={} att_log_n={} att_log_id={} att_log_ms={}",
+                                        "rid={request_id} status=3 proxy_waa_requests={} last_operation={} last_rpc_id={} last_proxy_waa_ago_ms={} att_get_n={} att_get_id={} att_get_ms={} att_log_n={} att_log_id={} att_log_ms={} last_rpc_response_operation={} last_rpc_response_id={} last_rpc_response_status={} last_rpc_response_ago_ms={}",
                                         attestation.proxy_request_count,
                                         attestation.last_operation.unwrap_or("none"),
                                         attestation.last_correlation_id.as_deref().unwrap_or("unmatched"),
@@ -3761,6 +3784,10 @@ async fn ajax_passthrough(
                                         attestation.last_att_log_request_ago_ms
                                             .map(|value| value.to_string())
                                             .unwrap_or_else(|| "never".to_owned()),
+                                        attestation.last_rpc_response_operation.unwrap_or("none"),
+                                        attestation.last_rpc_response_correlation_id.as_deref().unwrap_or("unmatched"),
+                                        attestation.last_rpc_response_status.map(|value| value.to_string()).unwrap_or_else(|| "never".to_owned()),
+                                        attestation.last_rpc_response_ago_ms.map(|value| value.to_string()).unwrap_or_else(|| "never".to_owned()),
                                     ),
                                 ).await;
                             }
