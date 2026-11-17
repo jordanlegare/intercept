@@ -1742,6 +1742,13 @@ async fn ajax_passthrough(
     let is_youtube_qoe = upstream_path == "/api/stats/qoe"
         && (initial_host.eq_ignore_ascii_case("youtube.com")
             || initial_host.to_ascii_lowercase().ends_with(".youtube.com"));
+    // YouTube includes session_token in the QoE URL query. Mirror that value
+    // into the text POST body as a form-encoded field without logging it.
+    let (request_body, qoe_session_token_body_status) = if is_youtube_qoe {
+        append_qoe_session_token_to_body(&request_body, &upstream_url)
+    } else {
+        (request_body, "not_qoe")
+    };
     let is_youtube_log_event = upstream_path == "/youtubei/v1/log_event"
         && (initial_host.eq_ignore_ascii_case("youtube.com")
             || initial_host.to_ascii_lowercase().ends_with(".youtube.com"));
@@ -1909,6 +1916,12 @@ async fn ajax_passthrough(
                 &request_headers,
                 &request_body,
             )),
+        ).await;
+        push_event(
+            session,
+            "youtube_qoe_session_token_body",
+            format!("{upstream_host}{upstream_path}"),
+            format!("rid={request_id} status={qoe_session_token_body_status}"),
         ).await;
         push_event(
             session,
@@ -4039,6 +4052,43 @@ fn youtube_search_json_shape_diagnostic(body: &[u8]) -> String {
     summary
 }
 
+fn append_qoe_session_token_to_body(
+    body: &bytes::Bytes,
+    upstream_url: &Url,
+) -> (bytes::Bytes, &'static str) {
+    let Some((_, session_token)) = upstream_url
+        .query_pairs()
+        .find(|(name, value)| name == "session_token" && !value.is_empty())
+    else {
+        return (body.clone(), "url_token_absent");
+    };
+
+    let Ok(body_text) = std::str::from_utf8(body) else {
+        return (body.clone(), "body_not_utf8");
+    };
+    let already_present = body_text
+        .split(['&', '?', '\\n', '\\r'])
+        .filter_map(|field| field.split_once('='))
+        .any(|(name, _)| name == "session_token");
+    if already_present {
+        return (body.clone(), "already_in_body");
+    }
+
+    let encoded_field = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("session_token", &session_token)
+        .finish();
+    let separator = if body.is_empty() || body_text.ends_with('&') {
+        ""
+    } else {
+        "&"
+    };
+    let mut augmented = Vec::with_capacity(body.len() + separator.len() + encoded_field.len());
+    augmented.extend_from_slice(body);
+    augmented.extend_from_slice(separator.as_bytes());
+    augmented.extend_from_slice(encoded_field.as_bytes());
+    (bytes::Bytes::from(augmented), "appended")
+}
+
 fn youtube_qoe_request_diagnostics(
     method: &Method,
     headers: &HeaderMap,
@@ -4414,6 +4464,48 @@ mod tests {
             cookie_jar: Arc::new(SessionCookieJar::default()),
             cookie_tokens: StdMutex::new(HashMap::new()),
         }
+    }
+
+    #[test]
+    fn qoe_session_token_is_copied_from_url_into_text_body() {
+        let url = Url::parse(
+            "https://www.youtube.com/api/stats/qoe?fmt=397&session_token=abc%2B123%3D&el=detailpage"
+        ).unwrap();
+        let body = bytes::Bytes::from_static(b"existing=qoe-data");
+        let (updated, status) = append_qoe_session_token_to_body(&body, &url);
+        assert_eq!(status, "appended");
+        assert_eq!(
+            std::str::from_utf8(&updated).unwrap(),
+            "existing=qoe-data&session_token=abc%2B123%3D"
+        );
+        assert_eq!(body.as_ref(), b"existing=qoe-data");
+    }
+
+    #[test]
+    fn qoe_session_token_is_not_duplicated_or_fabricated() {
+        let url = Url::parse(
+            "https://www.youtube.com/api/stats/qoe?session_token=secret"
+        ).unwrap();
+        let existing = bytes::Bytes::from_static(b"session_token=already-there&event=x");
+        let (same, status) = append_qoe_session_token_to_body(&existing, &url);
+        assert_eq!(status, "already_in_body");
+        assert_eq!(same, existing);
+
+        let no_token_url = Url::parse("https://www.youtube.com/api/stats/qoe?fmt=397").unwrap();
+        let (unchanged, status) = append_qoe_session_token_to_body(&existing, &no_token_url);
+        assert_eq!(status, "url_token_absent");
+        assert_eq!(unchanged, existing);
+    }
+
+    #[test]
+    fn qoe_session_token_is_not_appended_to_non_utf8_body() {
+        let url = Url::parse(
+            "https://www.youtube.com/api/stats/qoe?session_token=secret"
+        ).unwrap();
+        let body = bytes::Bytes::from_static(&[0xff, 0x00]);
+        let (same, status) = append_qoe_session_token_to_body(&body, &url);
+        assert_eq!(status, "body_not_utf8");
+        assert_eq!(same, body);
     }
 
     #[test]
