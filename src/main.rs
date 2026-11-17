@@ -2355,6 +2355,7 @@ struct UmpStreamDiagnostics {
     part_payload_bytes: std::collections::BTreeMap<u32, u64>,
     total_parts: usize,
     total_payload_bytes: u64,
+    total_framing_bytes: u64,
     malformed: bool,
 }
 
@@ -2393,6 +2394,8 @@ impl UmpStreamDiagnostics {
                 break;
             };
             self.buffer.drain(..type_len + length_len);
+            self.total_framing_bytes = self.total_framing_bytes
+                .saturating_add((type_len + length_len) as u64);
             let payload_len = payload_len as usize;
             *self.part_counts.entry(part_type).or_default() += 1;
             *self.part_payload_bytes.entry(part_type).or_default() += payload_len as u64;
@@ -2470,12 +2473,15 @@ impl UmpStreamDiagnostics {
             format!("{name}:{count}/{bytes}B")
         }).collect::<Vec<_>>().join(",");
         let parts = if parts.is_empty() { "none".to_owned() } else { parts };
+        let part_types_truncated = parts.len() > 360;
+        let parts = truncate_utf8_bytes(&parts, 360);
         let frame_complete =
             !self.malformed && self.buffer.is_empty() && self.payload_remaining == 0;
         let part_count_sum = self.part_counts.values().copied().sum::<usize>();
         let part_payload_sum = self.part_payload_bytes.values().copied().sum::<u64>();
         let part_count_mismatch = part_count_sum != self.total_parts;
         let payload_sum_mismatch = part_payload_sum != self.total_payload_bytes;
+        let ump_accounted_bytes = self.total_payload_bytes.saturating_add(self.total_framing_bytes);
         let media_payload_bytes = self.part_payload_bytes.get(&21).copied().unwrap_or_default();
 
         let mut decoded_metadata = Vec::new();
@@ -2513,11 +2519,12 @@ impl UmpStreamDiagnostics {
         };
 
         format!(
-            "ump_parts={} total_parts={} part_count_sum={} part_count_mismatch={} total_payload_bytes={} part_payload_sum={} payload_sum_mismatch={} media_payload_bytes={} frame_complete={} partial_header_bytes={} payload_remaining={} malformed={}{}",
-            parts, self.total_parts, part_count_sum, part_count_mismatch,
-            self.total_payload_bytes, part_payload_sum, payload_sum_mismatch, media_payload_bytes,
+            "total_parts={} part_count_sum={} part_count_mismatch={} total_payload_bytes={} part_payload_sum={} payload_sum_mismatch={} ump_framing_bytes={} ump_accounted_bytes={} media_payload_bytes={} frame_complete={} partial_header_bytes={} payload_remaining={} malformed={} ump_parts={} part_types_truncated={}{}",
+            self.total_parts, part_count_sum, part_count_mismatch,
+            self.total_payload_bytes, part_payload_sum, payload_sum_mismatch,
+            self.total_framing_bytes, ump_accounted_bytes, media_payload_bytes,
             frame_complete, self.buffer.len(), self.payload_remaining, self.malformed,
-            decoded_metadata,
+            parts, part_types_truncated, decoded_metadata,
         )
     }
 
@@ -6048,13 +6055,14 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
 fn event_detail_limit(kind: &str) -> usize {
     // Keep larger correlated diagnostics intact while retaining the
     // conservative default for ordinary events.
-    if matches!(kind,
+    match kind {
+        "youtube_sabr_response_stream_complete" => 1024,
+        "youtube_player_state" => 640,
         "youtube_sabr_attestation_context"
-            | "youtube_sabr_request_metadata"
-            | "youtube_sabr_response_stream_complete"
-            | "youtube_player_state"
-            | "youtube_attestation_rpc"
-    ) { 480 } else { 300 }
+        | "youtube_sabr_request_metadata"
+        | "youtube_attestation_rpc" => 480,
+        _ => 300,
+    }
 }
 
 fn clean_field(value: String, max: usize) -> String {
@@ -7800,6 +7808,8 @@ mod ump_stream_diagnostics_tests {
         assert!(summary.contains("MEDIA:1/3B"));
         assert!(summary.contains("MEDIA_END:1/1B"));
         assert!(summary.contains("media_payload_bytes=3"));
+        assert!(summary.contains("ump_framing_bytes=4"));
+        assert!(summary.contains("ump_accounted_bytes=8"));
         assert!(summary.contains("frame_complete=true"));
         assert!(summary.contains("malformed=false"));
     }

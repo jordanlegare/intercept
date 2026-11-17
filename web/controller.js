@@ -65,7 +65,7 @@
   function record(kind, target, detail) {
     if (INTERNAL_AUTHORITY_EVENTS.has(kind)) return;
     const eventKind = String(kind).slice(0, 80);
-    const detailLimit = eventKind === "youtube_player_state" ? 480 : 300;
+    const detailLimit = eventKind === "youtube_player_state" ? 640 : 300;
     eventBuffer.push({
       kind: eventKind,
       target: String(target || "").slice(0, 240),
@@ -1039,6 +1039,11 @@
       const currentTime = Number(video.currentTime);
       const duration = Number(video.duration);
       const errorCode = video.error && Number(video.error.code);
+      const elementConnected = Boolean(video.isConnected);
+      const sourceAttributePresent = video.hasAttribute("src");
+      const currentSourcePresent = Boolean(video.currentSrc);
+      const sourceObjectPresent = video.srcObject !== null;
+      const childSourceCount = video.querySelectorAll("source").length;
       let bufferedCount = 0;
       let currentBufferedEnd = "none";
       let currentBufferedAhead = "none";
@@ -1089,6 +1094,11 @@
         + " seeking=" + Boolean(video.seeking)
         + " playback_rate=" + metric(video.playbackRate, 2)
         + " video_size=" + (Number(video.videoWidth) || 0) + "x" + (Number(video.videoHeight) || 0)
+        + " connected=" + elementConnected
+        + " src_attr=" + sourceAttributePresent
+        + " current_src=" + currentSourcePresent
+        + " src_object=" + sourceObjectPresent
+        + " child_sources=" + childSourceCount
         + " buffered_ranges=" + bufferedCount
         + " current_buffer_end=" + currentBufferedEnd
         + " buffered_ahead_s=" + currentBufferedAhead
