@@ -4028,7 +4028,7 @@ fn youtube_qoe_outbound_header_diagnostics(
         value
             .and_then(|value| value.to_str().ok())
             .and_then(|value| Url::parse(value).ok())
-            .and_then(|url| url.host_str().map(str::to_owned))
+            .and_then(|url| url.host_str().map(|host| clean_field(host.to_owned(), 64)))
             .unwrap_or_else(|| "absent".to_owned())
     };
     let header_text = |name: &str, limit: usize| {
@@ -4607,6 +4607,7 @@ mod tests {
         assert!(!detail.contains("private-user-agent"));
         assert!(!detail.contains("private-video"));
         assert!(!detail.contains("private-cookie"));
+        assert!(format!("rid={} {}", "a".repeat(32), detail).len() <= 300);
     }
 
     #[test]
