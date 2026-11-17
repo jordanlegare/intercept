@@ -1754,6 +1754,30 @@ async fn ajax_passthrough(
     if request_body_len > 0 || has_body_framing {
         builder = builder.header(header::CONTENT_LENGTH, request_body_len);
     }
+    let is_youtube_search = upstream_path == "/youtubei/v1/search"
+        && (upstream_host.eq_ignore_ascii_case("youtube.com")
+            || upstream_host.to_ascii_lowercase().ends_with(".youtube.com"));
+    if is_youtube_search {
+        let content_encoding_out = request_headers.get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 32))
+            .unwrap_or_else(|| "absent".to_owned());
+        let content_type_out = request_headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 80))
+            .unwrap_or_else(|| "absent".to_owned());
+        let body_encoding_out = request_body_encoding_diagnostic(&request_headers, &request_body);
+        push_event(
+            session,
+            "ajax_upstream_dispatch",
+            format!("{upstream_host}{upstream_path}"),
+            format!(
+                "rid={request_id} method={request_method} body_bytes={} body_encoding={body_encoding_out} content_encoding={content_encoding_out} content_type={content_type_out}",
+                request_body.len()
+            ),
+        ).await;
+    }
+
     let upstream = tokio::select! {
         _ = wait_for_session_termination(session) => {
             return plain(StatusCode::GONE, "Session terminated");
@@ -3397,6 +3421,24 @@ fn rewrite_csp(policy: &str, session_id: &str) -> String {
     rewritten.join("; ")
 }
 
+fn request_body_encoding_diagnostic(headers: &HeaderMap, body: &[u8]) -> &'static str {
+    let content_encoding = headers.get(header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let declares_gzip = content_encoding.split(',')
+        .any(|encoding| encoding.trim().eq_ignore_ascii_case("gzip"));
+    let gzip_magic = body.starts_with(&[0x1f, 0x8b, 0x08]);
+
+    match (declares_gzip, gzip_magic) {
+        (true, true) => "gzip",
+        (true, false) => "content_encoding_mismatch",
+        (false, true) => "gzip_without_content_encoding",
+        (false, false) if content_encoding.is_empty()
+            || content_encoding.eq_ignore_ascii_case("identity") => "identity",
+        (false, false) => "other_content_encoding",
+    }
+}
+
 fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -> String {
     let header_text = |name: &str, limit: usize| {
         headers.get(name)
@@ -3435,6 +3477,9 @@ fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -
     let declared_length = header_text("content-length", 24)
         .map(|value| format!(" · content_length_in={value}"))
         .unwrap_or_default();
+    let content_encoding = header_text("content-encoding", 48)
+        .unwrap_or_else(|| "absent".to_owned());
+    let body_encoding = request_body_encoding_diagnostic(headers, body);
     let origin = host_only("origin")
         .map(|host| format!(" · origin_host_in={host}"))
         .unwrap_or_else(|| " · origin_host_in=absent".to_owned());
@@ -3444,13 +3489,17 @@ fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -
     let cookie_header_in = headers.get(header::COOKIE)
         .map(|value| format!("present({}B)", value.as_bytes().len()))
         .unwrap_or_else(|| "absent".to_owned());
-    let json_state = match header_text("content-type", 160)
-        .map(|value| value.to_ascii_lowercase())
-        .filter(|value| value.contains("application/json") || value.contains("+json"))
-    {
-        Some(_) if serde_json::from_slice::<serde_json::Value>(body).is_ok() => "valid",
-        Some(_) => "invalid",
-        None => "not_checked",
+    let json_state = if body.starts_with(&[0x1f, 0x8b, 0x08]) {
+        "gzip_compressed"
+    } else {
+        match header_text("content-type", 160)
+            .map(|value| value.to_ascii_lowercase())
+            .filter(|value| value.contains("application/json") || value.contains("+json"))
+        {
+            Some(_) if serde_json::from_slice::<serde_json::Value>(body).is_ok() => "valid",
+            Some(_) => "invalid",
+            None => "not_checked",
+        }
     };
     let client_headers = [
         ("yt_client_name", "x-youtube-client-name"),
@@ -3467,7 +3516,7 @@ fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -
     // clues when a browser request reaches Rust without a matching
     // browser-side ajax_dispatch event.
     format!(
-        "method={method} · body_bytes={} · dispatch_marker={dispatch_marker}{browser_body}{transport} · sec_fetch_dest={fetch_dest} · sec_fetch_mode={fetch_mode} · sec_fetch_site={fetch_site} · x_requested_with={requested_with} · content_length_out={}{}{}{}{} · cookie_header_in={cookie_header_in} · json={json_state}{client_headers}",
+        "method={method} · body_bytes={} · dispatch_marker={dispatch_marker}{browser_body}{transport} · sec_fetch_dest={fetch_dest} · sec_fetch_mode={fetch_mode} · sec_fetch_site={fetch_site} · x_requested_with={requested_with} · content_length_out={}{}{}{}{} · content_encoding_in={content_encoding} · body_encoding={body_encoding} · cookie_header_in={cookie_header_in} · json={json_state}{client_headers}",
         body.len(),
         body.len(),
         content_type,
@@ -3683,6 +3732,42 @@ mod tests {
         assert!(marked.contains("dispatch_marker=present"));
         assert!(marked.contains("body_bytes=12"));
         assert!(marked.contains("transport=worker-fetch"));
+        assert!(marked.contains("content_encoding_in=absent"));
+        assert!(marked.contains("body_encoding=identity"));
+        assert!(marked.contains("json=valid"));
+    }
+
+    #[test]
+    fn ajax_request_diagnostics_detects_gzip_body_framing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        let gzip_body = [0x1f, 0x8b, 0x08, 0x00];
+        let detail = ajax_request_diagnostics(&Method::POST, &headers, &gzip_body);
+        assert!(detail.contains("content_encoding_in=gzip"));
+        assert!(detail.contains("body_encoding=gzip"));
+        assert!(detail.contains("json=gzip_compressed"));
+    }
+
+    #[test]
+    fn ajax_request_diagnostics_detects_gzip_header_body_mismatch() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        let detail = ajax_request_diagnostics(&Method::POST, &headers, br#"{"query":"test"}"#);
+        assert!(detail.contains("content_encoding_in=gzip"));
+        assert!(detail.contains("body_encoding=content_encoding_mismatch"));
+        assert!(detail.contains("json=valid"));
+    }
+
+    #[test]
+    fn ajax_request_diagnostics_detects_gzip_without_header() {
+        let headers = HeaderMap::new();
+        let gzip_body = [0x1f, 0x8b, 0x08, 0x00];
+        assert_eq!(
+            request_body_encoding_diagnostic(&headers, &gzip_body),
+            "gzip_without_content_encoding"
+        );
     }
 
     #[test]
