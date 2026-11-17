@@ -602,6 +602,24 @@
     }
   }
 
+  function isYouTubeQoeEndpoint(source) {
+    try {
+      const upstream = new URL(upstreamOrigin);
+      const candidate = new URL(
+        source instanceof Request ? source.url : String(source),
+        document.baseURI
+      );
+      const upstreamHost = upstream.hostname.toLowerCase();
+      const candidateHost = candidate.hostname.toLowerCase();
+      const youtubeHost = host => host === "youtube.com" || host.endsWith(".youtube.com");
+      const hostMatches = youtubeHost(upstreamHost)
+        && (youtubeHost(candidateHost) || candidate.origin === location.origin);
+      return hostMatches && candidate.pathname.endsWith("/api/stats/qoe");
+    } catch (_) {
+      return false;
+    }
+  }
+
   function fetchBodyDiagnostic(input, init) {
     if (init && Object.prototype.hasOwnProperty.call(init, "body") &&
         init.body !== undefined) {
@@ -2181,12 +2199,27 @@
         record("beacon_blocked", String(url), "URL could not be routed");
         return false;
       }
+      const isYouTubeQoe = isYouTubeQoeEndpoint(url);
+      const eventTarget = isYouTubeQoe ? "/api/stats/qoe" : routed;
+      const bodyDetail = requestBodyDiagnostic(data, arguments.length > 1);
+      if (isYouTubeQoe) {
+        // sendBeacon cannot expose the upstream response or accept arbitrary
+        // headers. Record only the supplied BodyInit type and byte count here;
+        // Rust records the actual request headers received by the proxy.
+        record("youtube_qoe_beacon_dispatch", eventTarget,
+          bodyDetail + " · transport=sendBeacon · body_content=not_logged");
+      }
       record(
         "ajax_dispatch",
-        routed,
-        "POST · " + requestBodyDiagnostic(data, arguments.length > 1) + " · transport=sendBeacon"
+        eventTarget,
+        "POST · " + bodyDetail + " · transport=sendBeacon"
       );
-      return nativeSendBeacon(routed, data);
+      const accepted = nativeSendBeacon(routed, data);
+      if (isYouTubeQoe) {
+        record("youtube_qoe_beacon_queued", eventTarget,
+          "browser_accepted=" + accepted + " · upstream_status=not_exposed_by_sendBeacon");
+      }
+      return accepted;
     };
   }
 
