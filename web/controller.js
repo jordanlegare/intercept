@@ -2206,8 +2206,8 @@
         routedRequest = new Request(routed, input);
         if (init) routedRequest = new Request(routedRequest, init);
         if (recoveredRequestBody !== null) {
-          // Apply the original bytes after init so non-body init overrides
-          // remain intact while an explicit init.body still takes precedence.
+          // Apply the recovered bytes after init so non-body init overrides
+          // remain intact. An explicit non-undefined init.body skips recovery.
           routedRequest = new Request(routedRequest, {body: recoveredRequestBody});
         }
       } else {
