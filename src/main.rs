@@ -6041,12 +6041,13 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
 }
 
 fn event_detail_limit(kind: &str) -> usize {
-    // This server-generated snapshot combines four independent lifecycle
-    // observations. Keep the default event size bounded, but preserve the
-    // response status and correlation suffix for this specific diagnostic.
+    // Keep larger correlated diagnostics intact while retaining the
+    // conservative default for ordinary events.
     if matches!(kind,
         "youtube_sabr_attestation_context"
             | "youtube_sabr_request_metadata"
+            | "youtube_sabr_response_stream_complete"
+            | "youtube_player_state"
             | "youtube_attestation_rpc"
     ) { 480 } else { 300 }
 }
@@ -7708,6 +7709,32 @@ mod ump_stream_diagnostics_tests {
 
         let ordinary = clean_field("x".repeat(400), event_detail_limit("ajax_response"));
         assert_eq!(ordinary.len(), 300);
+    }
+
+    #[test]
+    fn sabr_completion_event_preserves_full_ump_payload_totals() {
+        let mut diagnostics = UmpStreamDiagnostics::default();
+        diagnostics.total_parts = 11;
+        diagnostics.total_payload_bytes = 260_109;
+        diagnostics.part_counts = std::collections::BTreeMap::from([
+            (20, 2), (21, 2), (22, 2), (35, 1), (47, 1), (52, 1), (53, 1),
+        ]);
+        diagnostics.part_payload_bytes = std::collections::BTreeMap::from([
+            (20, 154), (21, 259_839), (22, 2), (35, 82),
+            (47, 12), (52, 8), (53, 12),
+        ]);
+        let detail = format!(
+            "rid={} outcome=complete response_bytes=260137 · {}",
+            "a".repeat(32),
+            diagnostics.summary(),
+        );
+        let stored = clean_field(
+            detail,
+            event_detail_limit("youtube_sabr_response_stream_complete"),
+        );
+        assert!(stored.contains("total_payload_bytes=260109"), "{stored}");
+        assert!(stored.contains("media_payload_bytes=259839"), "{stored}");
+        assert!(stored.contains("malformed=false"), "{stored}");
     }
 
     #[test]
