@@ -693,12 +693,17 @@
         }
       }
 
-      if (hostname !== "jnn-pa.googleapis.com") return null;
+      const lowerPath = pathname.toLowerCase();
+      const candidateHost = hostname === "jnn-pa.googleapis.com"
+        || (hostname.endsWith(".googleapis.com") && lowerPath.includes("waa"));
+      if (!candidateHost) return null;
       const match = pathname.match(
         /^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/
       );
-      if (!match) return null;
-      return {operation: match[1], target: hostname + pathname};
+      return {
+        operation: match ? match[1] : "Other",
+        target: hostname + pathname
+      };
     } catch (_) {
       return null;
     }
@@ -799,6 +804,44 @@
         + " transport=" + call.transport
     );
   }
+
+  function observeYouTubeAttestationResources() {
+    if (typeof PerformanceObserver !== "function") return;
+    const observed = new Set();
+    try {
+      const observer = new PerformanceObserver(list => {
+        for (const entry of list.getEntries()) {
+          const info = youtubeAttestationRpcInfo(entry.name);
+          if (!info) continue;
+          const key = info.target + "|" + Math.round(entry.startTime * 10)
+            + "|" + String(entry.initiatorType || "other");
+          if (observed.has(key)) continue;
+          observed.add(key);
+          if (observed.size > 512) observed.delete(observed.values().next().value);
+          const number = value => Number.isFinite(Number(value))
+            ? String(Math.max(0, Math.round(Number(value))))
+            : "unknown";
+          const initiator = String(entry.initiatorType || "other")
+            .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 24) || "other";
+          record(
+            "youtube_attestation_rpc",
+            info.target,
+            "phase=resource_timing_observed operation=" + info.operation
+              + " initiator=" + initiator
+              + " start_ms=" + number(entry.startTime)
+              + " duration_ms=" + number(entry.duration)
+              + " transfer_bytes=" + number(entry.transferSize)
+              + " encoded_bytes=" + number(entry.encodedBodySize)
+          );
+        }
+      });
+      observer.observe({type: "resource", buffered: true});
+    } catch (_) {
+      // Resource Timing is supplemental; failure must not affect interception.
+    }
+  }
+
+  observeYouTubeAttestationResources();
 
   function sanitizedYouTubeFetchCallsite() {
     try {
