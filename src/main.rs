@@ -3472,8 +3472,10 @@ fn youtube_search_json_shape_diagnostic(body: &[u8]) -> String {
         object.contains_key("webSearchboxStatsUrl"),
         object.contains_key("inlineSettingStatus"),
     );
+    // Put field-presence flags first so they survive the bounded event detail
+    // even when YouTube's client context contains a long list of keys.
     let mut summary = format!(
-        "top={top_keys};ctx={context_keys};client={client_keys};{optional_fields}"
+        "{optional_fields};top={top_keys};ctx={context_keys};client={client_keys}"
     );
     if summary.len() > 260 {
         let mut boundary = 260;
