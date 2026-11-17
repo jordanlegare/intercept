@@ -650,7 +650,7 @@
   }
 
 
-  function buildYouTubeSearchFallbackBody() {
+  async function buildYouTubeSearchFallbackBody() {
     let context = null;
     let config = null;
     try {
@@ -905,6 +905,79 @@
         headers["X-Goog-Visitor-Id"] = client.visitorData.trim();
       }
 
+      // Recreate the browser's live InnerTube authentication envelope for
+      // this fallback only. Cookie values and the resulting digest stay in
+      // memory and are never written to the event stream.
+      const youtubeOrigin = (() => {
+        try { return new URL(upstreamOrigin).origin; }
+        catch (_) { return ""; }
+      })();
+      if (youtubeOrigin) {
+        headers["X-Origin"] = youtubeOrigin;
+      }
+
+      const sessionIndex = configValue("SESSION_INDEX");
+      headers["X-Goog-AuthUser"] = (
+        (typeof sessionIndex === "number" && Number.isFinite(sessionIndex))
+        || (typeof sessionIndex === "string" && /^\d+$/.test(sessionIndex))
+      ) ? String(sessionIndex) : "0";
+      const delegatedSessionId = configValue("DELEGATED_SESSION_ID");
+      if (typeof delegatedSessionId === "string" && delegatedSessionId.trim()) {
+        headers["X-Goog-PageId"] = delegatedSessionId.trim();
+      }
+
+      const readCookie = name => {
+        const prefix = name + "=";
+        for (const part of cookieMirror.split(/;\s*/)) {
+          if (part.startsWith(prefix)) return part.slice(prefix.length);
+        }
+        return "";
+      };
+      let authorizationStatus = "crypto_unavailable";
+      const authorizationSchemes = [];
+      if (youtubeOrigin && window.crypto && window.crypto.subtle
+          && typeof window.crypto.subtle.digest === "function") {
+        const timestamp = String(Math.floor(Date.now() / 1000));
+        const dataSyncId = configValue("DATASYNC_ID");
+        const userSessionId = typeof dataSyncId === "string"
+          ? dataSyncId.split("||")[1] || ""
+          : "";
+        const sessionHashPrefix = userSessionId ? userSessionId + " " : "";
+        const sidCookies = [
+          ["SAPISIDHASH", readCookie("SAPISID") || readCookie("__Secure-3PAPISID")],
+          ["SAPISID1PHASH", readCookie("__Secure-1PAPISID")],
+          ["SAPISID3PHASH", readCookie("__Secure-3PAPISID")]
+        ];
+        try {
+          const generated = [];
+          for (const [scheme, sid] of sidCookies) {
+            if (!sid) continue;
+            const input = sessionHashPrefix + timestamp + " " + sid + " " + youtubeOrigin;
+            const digest = await window.crypto.subtle.digest(
+              "SHA-1",
+              new TextEncoder().encode(input)
+            );
+            const hash = Array.from(new Uint8Array(digest), byte =>
+              byte.toString(16).padStart(2, "0")
+            ).join("");
+            generated.push(scheme + " " + timestamp + "_" + hash
+              + (userSessionId ? "_u" + userSessionId : ""));
+            authorizationSchemes.push(scheme);
+          }
+          if (generated.length) {
+            headers.Authorization = generated.join(" ");
+            authorizationStatus = "generated";
+          } else {
+            authorizationStatus = "cookie_unavailable";
+          }
+        } catch (_) {
+          authorizationStatus = "digest_failed";
+        }
+      }
+      const authDiagnostic = "authorization=" + authorizationStatus
+        + " · schemes=" + (authorizationSchemes.join(",") || "none")
+        + " · origin_host=" + (youtubeOrigin ? new URL(youtubeOrigin).host : "absent");
+
       const keys = Object.keys(payload);
       const clientName = typeof client.clientName === "string"
         ? client.clientName.slice(0, 24)
@@ -917,6 +990,7 @@
         body: JSON.stringify(payload),
         querySource,
         headers,
+        authDiagnostic,
         payloadKeys: keys.join(","),
         clientName,
         clientVersion,
@@ -1026,7 +1100,7 @@
   }, true);
 
   const nativeFetch = window.fetch.bind(window);
-  window.fetch = function(input, init) {
+  window.fetch = async function(input, init) {
     const source = input instanceof Request ? input.url : input;
     const method = String((init && init.method) || (input instanceof Request && input.method) || "GET").toUpperCase();
     const routed = routeToProxy(source);
@@ -1070,7 +1144,7 @@
       if (routedRequest.method === "POST"
           && bodyDetail === "body_arg=none"
           && youtubeSearchCheck.endpointMatch) {
-        const fallback = buildYouTubeSearchFallbackBody();
+        const fallback = await buildYouTubeSearchFallbackBody();
         if (fallback.body) {
           const replacementRequest = new Request(routedRequest, {body: fallback.body});
           const replacementHeaders = new Headers(replacementRequest.headers);
@@ -1083,6 +1157,7 @@
           replacementHeaders.set("content-type", "application/json");
           routedRequest = new Request(replacementRequest, {headers: replacementHeaders});
           youtubeSearchFallbackHeaders = fallback.headers || {};
+          record("youtube_search_auth_synthesis", fetchEventPath(source), fallback.authDiagnostic || "authorization=not_reported");
           bodyDetail = "body_arg=generated_innertube_search body_arg_bytes="
             + new TextEncoder().encode(fallback.body).byteLength;
           record(
