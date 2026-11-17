@@ -2701,10 +2701,10 @@ fn youtube_attestation_context_key(headers: &HeaderMap) -> String {
     youtube_playback_context_id(headers).unwrap_or("unscoped").to_owned()
 }
 
-fn youtube_attestation_context_mut(
-    contexts: &mut HashMap<String, YouTubeAttestationTiming>,
+fn youtube_attestation_context_mut<'a>(
+    contexts: &'a mut HashMap<String, YouTubeAttestationTiming>,
     context_id: &str,
-) -> &mut YouTubeAttestationTiming {
+) -> &'a mut YouTubeAttestationTiming {
     const MAX_PLAYBACK_CONTEXTS: usize = 64;
     if !contexts.contains_key(context_id) && contexts.len() >= MAX_PLAYBACK_CONTEXTS {
         if let Some(oldest_key) = contexts.keys().next().cloned() {
