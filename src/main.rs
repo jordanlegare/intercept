@@ -4973,7 +4973,7 @@ mod tests {
 
         assert!(detail.contains("method=POST"));
         assert!(detail.contains("body_bytes=13"));
-        assert!(detail.contains("content_length_out=13"));
+        assert!(detail.contains("content_length_expected_out=13"));
         assert!(detail.contains("content_type=application/json"));
         assert!(detail.contains("content_length_in=13"));
         assert!(detail.contains("origin_host_in=www.youtube.com"));
