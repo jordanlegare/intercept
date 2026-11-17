@@ -2533,20 +2533,30 @@ fn youtube_attestation_rpc_operation(url: &Url) -> Option<&'static str> {
     let host = url.host_str()?.to_ascii_lowercase();
     let path = url.path();
     let path_lower = path.to_ascii_lowercase();
-    let candidate_host = host == "jnn-pa.googleapis.com"
+    let google_waa_host = host == "jnn-pa.googleapis.com"
         || (host.ends_with(".googleapis.com") && path_lower.contains("waa"));
-    if !candidate_host {
+    let youtube_host = host == "youtube.com" || host.ends_with(".youtube.com");
+    // The web client can use YouTube's same-origin BotGuard service endpoints
+    // rather than the jnn-pa.googleapis.com WAA RPC host.
+    let youtube_waa_service = youtube_host && path_lower.starts_with("/api/jnn/v1/");
+    if !google_waa_host && !youtube_waa_service {
         return None;
     }
 
-    // Preserve the recognized RPC names, but keep an "Other" bucket for any
-    // request to the WAA host or a related Google API path. This deliberately
-    // avoids assuming Google's endpoint path will remain stable.
     match path {
-        "/$rpc/google.internal.waa.v1.Waa/Create" => Some("Create"),
-        "/$rpc/google.internal.waa.v1.Waa/GenerateIT" => Some("GenerateIT"),
+        "/$rpc/google.internal.waa.v1.Waa/Create" | "/api/jnn/v1/Create" => Some("Create"),
+        "/$rpc/google.internal.waa.v1.Waa/GenerateIT" | "/api/jnn/v1/GenerateIT" => Some("GenerateIT"),
         _ => Some("Other"),
     }
+}
+
+fn is_youtube_attestation_challenge_request(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    (host == "youtube.com" || host.ends_with(".youtube.com"))
+        && url.path().eq_ignore_ascii_case("/youtubei/v1/att/get")
 }
 
 fn youtube_attestation_transport(headers: &HeaderMap) -> &'static str {
@@ -3727,7 +3737,10 @@ async fn proxy(
     // omits Fetch Metadata or the controller's AJAX marker. Keep them on the
     // streaming passthrough path and diagnose them at the proxy boundary.
     let attestation_operation = youtube_attestation_rpc_operation(&upstream_url);
-    let ajax_request = is_ajax_request(&parts.headers) || attestation_operation.is_some();
+    let attestation_challenge = is_youtube_attestation_challenge_request(&upstream_url);
+    let ajax_request = is_ajax_request(&parts.headers)
+        || attestation_operation.is_some()
+        || attestation_challenge;
     let input_trace = input_event_trace(&parts.headers);
     let worker_script = parts.headers.get("sec-fetch-dest")
         .and_then(|value| value.to_str().ok())
@@ -3756,6 +3769,17 @@ async fn proxy(
             format!("{}{}", upstream_url.host_str().unwrap_or_default(), upstream_url.path()),
             format!(
                 "rid={request_id} phase=proxy_received operation={operation} method={} declared_body_bytes={declared_length} ct={content_type} ce={content_encoding} transport={}",
+                parts.method,
+                youtube_attestation_transport(&parts.headers),
+            ),
+        ).await;
+    } else if attestation_challenge {
+        push_event(
+            &session,
+            "youtube_attestation_resource",
+            format!("{}{}", upstream_url.host_str().unwrap_or_default(), upstream_url.path()),
+            format!(
+                "rid={request_id} phase=proxy_received operation=AttGet method={} transport={}",
                 parts.method,
                 youtube_attestation_transport(&parts.headers),
             ),
@@ -3805,6 +3829,23 @@ async fn proxy(
                 "rid={request_id} phase=proxy_ingress operation={operation} method={} body_bytes={} ct={content_type} ce={content_encoding} transport={}",
                 parts.method,
                 body.len(),
+                youtube_attestation_transport(&parts.headers),
+            ),
+        ).await;
+    } else if attestation_challenge {
+        let content_type = parts.headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 64))
+            .unwrap_or_else(|| "absent".to_owned());
+        push_event(
+            &session,
+            "youtube_attestation_resource",
+            format!("{}{}", upstream_url.host_str().unwrap_or_default(), upstream_url.path()),
+            format!(
+                "rid={request_id} phase=proxy_ingress operation=AttGet method={} body_bytes={} ct={} transport={}",
+                parts.method,
+                body.len(),
+                content_type,
                 youtube_attestation_transport(&parts.headers),
             ),
         ).await;
@@ -4781,21 +4822,29 @@ fn rewrite_worker_javascript(
               if(slash<=0)return null;
               hostname=target.slice(0,slash).toLowerCase();
               pathname=target.slice(slash);
+            }}else if(pathname===prefix||pathname.startsWith(prefix+"/")){{
+              hostname=new URL(primaryOrigin).hostname.toLowerCase();
+              pathname=pathname.slice(prefix.length)||"/";
             }}
           }}
           const lowerPath=pathname.toLowerCase();
-          const candidate=hostname==="jnn-pa.googleapis.com"
+          const googleCandidate=hostname==="jnn-pa.googleapis.com"
             ||(hostname.endsWith(".googleapis.com")&&lowerPath.includes("waa"));
-          if(!candidate)return null;
-          const match=pathname.match(/^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/);
-          return {{target:hostname+pathname,operation:match?match[1]:"Other"}};
+          const youtubeHost=hostname==="youtube.com"||hostname.endsWith(".youtube.com");
+          const youtubeJnn=youtubeHost&&lowerPath.startsWith("/api/jnn/v1/");
+          const youtubeAttGet=youtubeHost&&lowerPath==="/youtubei/v1/att/get";
+          if(!googleCandidate&&!youtubeJnn&&!youtubeAttGet)return null;
+          const match=pathname.match(/^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/)
+            ||pathname.match(/^\/api\/jnn\/v1\/(Create|GenerateIT)$/);
+          return {{target:hostname+pathname,operation:youtubeAttGet?"AttGet":match?match[1]:"Other",
+            kind:youtubeAttGet?"youtube_attestation_resource":"youtube_attestation_rpc"}};
         }}catch(_e){{return null}}
       }}
       function reportAttestation(info,detail){{
         if(!info||!rawWorkerFetch)return;
         try{{
           const endpoint=new URL("/_intercept/events",self.location.origin).href;
-          const payload=[{{kind:"youtube_attestation_rpc",target:info.target,detail:String(detail||"").slice(0,300)}}];
+          const payload=[{{kind:info.kind||"youtube_attestation_rpc",target:info.target,detail:String(detail||"").slice(0,300)}}];
           rawWorkerFetch(endpoint,{{
             method:"POST",
             headers:{{"content-type":"application/json"}},
@@ -5814,7 +5863,9 @@ mod tests {
         assert!(output.contains("youtube_attestation_rpc"));
         assert!(output.contains("attestation?attestation.target:routed"));
         assert!(output.contains("attestation?meta.attestation.target:meta.url"));
-        assert!(output.contains(r#"const match=pathname.match(/^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/);"#));
+        assert!(output.contains(r#"const match=pathname.match(/^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/)"#));
+        assert!(output.contains(r#"pathname.match(/^\/api\/jnn\/v1\/(Create|GenerateIT)$/)"#));
+        assert!(output.contains("youtube_attestation_resource"));
     }
 
     #[test]
@@ -5853,6 +5904,30 @@ mod tests {
         assert_eq!(youtube_attestation_rpc_operation(&generate), Some("GenerateIT"));
         assert_eq!(youtube_attestation_rpc_operation(&wrong_host), None);
         assert_eq!(youtube_attestation_rpc_operation(&wrong_path), Some("Other"));
+    }
+
+    #[test]
+    fn recognizes_youtube_same_origin_waa_service_endpoints() {
+        let create = Url::parse("https://www.youtube.com/api/jnn/v1/Create").unwrap();
+        let generate = Url::parse("https://www.youtube.com/api/jnn/v1/GenerateIT").unwrap();
+        let other = Url::parse("https://www.youtube.com/api/jnn/v1/Refresh").unwrap();
+        let unrelated = Url::parse("https://example.com/api/jnn/v1/Create").unwrap();
+
+        assert_eq!(youtube_attestation_rpc_operation(&create), Some("Create"));
+        assert_eq!(youtube_attestation_rpc_operation(&generate), Some("GenerateIT"));
+        assert_eq!(youtube_attestation_rpc_operation(&other), Some("Other"));
+        assert_eq!(youtube_attestation_rpc_operation(&unrelated), None);
+    }
+
+    #[test]
+    fn recognizes_youtube_innertube_attestation_challenge_endpoint() {
+        let challenge = Url::parse("https://www.youtube.com/youtubei/v1/att/get?prettyPrint=false").unwrap();
+        let wrong_host = Url::parse("https://example.com/youtubei/v1/att/get").unwrap();
+        let wrong_path = Url::parse("https://www.youtube.com/youtubei/v1/player").unwrap();
+
+        assert!(is_youtube_attestation_challenge_request(&challenge));
+        assert!(!is_youtube_attestation_challenge_request(&wrong_host));
+        assert!(!is_youtube_attestation_challenge_request(&wrong_path));
     }
 
     #[test]

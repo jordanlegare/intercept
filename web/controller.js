@@ -710,18 +710,25 @@
           if (slash <= 0) return null;
           hostname = target.slice(0, slash).toLowerCase();
           pathname = target.slice(slash);
+        } else if (pathname === sessionPrefix || pathname.startsWith(sessionPrefix + "/")) {
+          hostname = new URL(upstreamOrigin).hostname.toLowerCase();
+          pathname = pathname.slice(sessionPrefix.length) || "/";
         }
       }
 
       const lowerPath = pathname.toLowerCase();
-      const candidateHost = hostname === "jnn-pa.googleapis.com"
+      const youtubeHost = hostname === "youtube.com" || hostname.endsWith(".youtube.com");
+      const googleCandidate = hostname === "jnn-pa.googleapis.com"
         || (hostname.endsWith(".googleapis.com") && lowerPath.includes("waa"));
-      if (!candidateHost) return null;
+      const youtubeJnn = youtubeHost && lowerPath.startsWith("/api/jnn/v1/");
+      const youtubeAttGet = youtubeHost && lowerPath === "/youtubei/v1/att/get";
+      if (!googleCandidate && !youtubeJnn && !youtubeAttGet) return null;
       const match = pathname.match(
         /^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/
-      );
+      ) || pathname.match(/^\/api\/jnn\/v1\/(Create|GenerateIT)$/);
       return {
-        operation: match ? match[1] : "Other",
+        kind: youtubeAttGet ? "youtube_attestation_resource" : "youtube_attestation_rpc",
+        operation: youtubeAttGet ? "AttGet" : match ? match[1] : "Other",
         target: hostname + pathname
       };
     } catch (_) {
@@ -779,7 +786,7 @@
     if (!call) return;
     call.startedAt = performance.now();
     record(
-      "youtube_attestation_rpc",
+      call.info.kind || "youtube_attestation_rpc",
       call.info.target,
       "rpc=" + call.id
         + " operation=" + call.info.operation
@@ -795,7 +802,7 @@
       ? "not_dispatched"
       : String(Math.max(0, Math.round(performance.now() - call.startedAt)));
     record(
-      "youtube_attestation_rpc",
+      call.info.kind || "youtube_attestation_rpc",
       call.info.target,
       "rpc=" + call.id
         + " operation=" + call.info.operation
@@ -814,7 +821,7 @@
     const statusCode = Number(status) || 0;
     const outcome = statusCode > 0 ? "http" : "no_http_response";
     record(
-      "youtube_attestation_rpc",
+      call.info.kind || "youtube_attestation_rpc",
       call.info.target,
       "rpc=" + call.id
         + " operation=" + call.info.operation
@@ -836,7 +843,7 @@
     const errorName = String(error && error.name || (phase === "loadend" ? "no_terminal_event" : "none"))
       .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "unknown";
     record(
-      "youtube_attestation_rpc",
+      call.info.kind || "youtube_attestation_rpc",
       call.info.target,
       "rpc=" + call.id
         + " operation=" + call.info.operation
@@ -861,6 +868,9 @@
           if (slash <= 0) return null;
           hostname = target.slice(0, slash).toLowerCase();
           pathname = target.slice(slash);
+        } else if (pathname === sessionPrefix || pathname.startsWith(sessionPrefix + "/")) {
+          hostname = new URL(upstreamOrigin).hostname.toLowerCase();
+          pathname = pathname.slice(sessionPrefix.length) || "/";
         }
       }
       const googleHost = hostname === "google.com" || hostname.endsWith(".google.com")
@@ -960,7 +970,7 @@
             observed.add(key);
             if (observed.size > 512) observed.delete(observed.values().next().value);
             record(
-              "youtube_attestation_rpc",
+              info.kind || "youtube_attestation_rpc",
               info.target,
               "phase=resource_timing_observed operation=" + info.operation
                 + " initiator=" + initiator
@@ -3204,13 +3214,18 @@
       + "const url=new URL(value instanceof Request?value.url:value instanceof URL?value.href:String(value),self.location.origin+'/');"
       + "let host=url.hostname.toLowerCase(),path=url.pathname;"
       + "if(url.origin===self.location.origin){const marker=prefix+'/_/https/';const at=path.indexOf(marker);"
-      + "if(at>=0){const target=path.slice(at+marker.length),slash=target.indexOf('/');if(slash>0){host=target.slice(0,slash).toLowerCase();path=target.slice(slash);}}}"
-      + "if(host==='jnn-pa.googleapis.com'||(host.endsWith('.googleapis.com')&&path.toLowerCase().includes('waa')))"
-      + "return {target:host+path,operation:(path.match(/^\\/\\$rpc\\/google\\.internal\\.waa\\.v1\\.Waa\\/(Create|GenerateIT)$/)||[])[1]||'Other'};"
+      + "if(at>=0){const target=path.slice(at+marker.length),slash=target.indexOf('/');if(slash>0){host=target.slice(0,slash).toLowerCase();path=target.slice(slash);}}"
+      + "else if(path===prefix||path.startsWith(prefix+'/')){host=new URL(primaryOrigin).hostname.toLowerCase();path=path.slice(prefix.length)||'/';}}"
+      + "const lower=path.toLowerCase(),youtube=host==='youtube.com'||host.endsWith('.youtube.com');"
+      + "const google=host==='jnn-pa.googleapis.com'||(host.endsWith('.googleapis.com')&&lower.includes('waa'));"
+      + "const jnn=youtube&&lower.startsWith('/api/jnn/v1/'),attGet=youtube&&lower==='/youtubei/v1/att/get';"
+      + "if(!google&&!jnn&&!attGet)return null;"
+      + "const match=path.match(/^\\/\\$rpc\\/google\\.internal\\.waa\\.v1\\.Waa\\/(Create|GenerateIT)$/)||path.match(/^\\/api\\/jnn\\/v1\\/(Create|GenerateIT)$/);"
+      + "return {target:host+path,operation:attGet?'AttGet':match?match[1]:'Other',kind:attGet?'youtube_attestation_resource':'youtube_attestation_rpc'};"
       + "}catch(_e){return null}}"
       + "function report(info,detail){if(!info||!rawFetch)return;try{"
       + "rawFetch(new URL('/_intercept/events',self.location.origin).href,{method:'POST',"
-      + "headers:{'content-type':'application/json'},body:JSON.stringify([{kind:'youtube_attestation_rpc',"
+      + "headers:{'content-type':'application/json'},body:JSON.stringify([{kind:info.kind||'youtube_attestation_rpc',"
       + "target:info.target,detail:String(detail||'').slice(0,300)}]),keepalive:true}).catch(()=>{});"
       + "}catch(_e){}}"
       + "if(rawFetch){self.fetch=function(input,init){"
@@ -3300,6 +3315,9 @@
             hostname = target.slice(0, slash).toLowerCase();
             pathname = target.slice(slash);
           }
+        } else if (pathname === sessionPrefix || pathname.startsWith(sessionPrefix + "/")) {
+          hostname = new URL(upstreamOrigin).hostname.toLowerCase();
+          pathname = pathname.slice(sessionPrefix.length) || "/";
         }
       }
       const asset = youtubeAttestationAssetInfo(raw);
