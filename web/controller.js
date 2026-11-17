@@ -765,6 +765,10 @@
       }
 
       const headers = {"Content-Type": "application/json"};
+      const loggedIn = configValue("LOGGED_IN");
+      if (typeof loggedIn === "boolean") {
+        headers["X-YouTube-Bootstrap-Logged-In"] = String(loggedIn);
+      }
       if (client.clientName === "WEB") {
         headers["X-YouTube-Client-Name"] = "1";
       }
