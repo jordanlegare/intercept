@@ -695,7 +695,7 @@
 
       if (hostname !== "jnn-pa.googleapis.com") return null;
       const match = pathname.match(
-        /^\/$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/
+        /^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/
       );
       if (!match) return null;
       return {operation: match[1], target: hostname + pathname};
@@ -729,7 +729,7 @@
     const value = youtubeAttestationHeader(headers, "content-type");
     if (!value) return "absent";
     const mime = String(value).split(";", 1)[0].trim().toLowerCase();
-    return /^[a-z0-9!#  function sanitizedYouTubeFetchCallsite() {^_.+-]+\/[a-z0-9!#  function sanitizedYouTubeFetchCallsite() {^_.+-]+$/.test(mime) ? mime : "other";
+    return /^[a-z0-9.+_-]+\/[a-z0-9.+_-]+$/.test(mime) ? mime : "other";
   }
 
   function youtubeAttestationContentLength(headers) {
@@ -797,7 +797,7 @@
     );
   }
 
-
+  function sanitizedYouTubeFetchCallsite() {
     try {
       const frames = String(new Error().stack || "").split("\n").slice(3);
       const safeFrames = [];
