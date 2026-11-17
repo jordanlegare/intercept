@@ -2164,57 +2164,16 @@
     try {
       // Mark the request explicitly instead of relying on browser-specific
       // Fetch Metadata support. Preserve Request/init overrides and bodies.
-      let bodyDetail = fetchBodyDiagnostic(input, init);
-      const originalBodyDetail = bodyDetail;
-      let recoveredRequestBody = null;
-      if (input instanceof Request
-          && input.body === undefined
-          && bodyDetail === "body_arg=none"
-          && method !== "GET"
-          && method !== "HEAD") {
-        // Some browsers expose Request.body as undefined even when the
-        // underlying request has a readable body. RequestInit conversion
-        // then loses that body in new Request(routed, input). Recover bytes
-        // from a clone before reconstruction, without consuming the caller's
-        // Request. A caller-supplied init.body remains authoritative.
-        try {
-          const bodyBuffer = await input.clone().arrayBuffer();
-          if (bodyBuffer.byteLength > 0) {
-            recoveredRequestBody = bodyBuffer;
-            bodyDetail = "body_arg=request_recovered body_arg_bytes=" + bodyBuffer.byteLength;
-            record(
-              "fetch_request_body_recovered",
-              fetchEventPath(source),
-              "method=" + method + " body_bytes=" + bodyBuffer.byteLength
-                + " source=Request.body_undefined"
-            );
-          }
-        } catch (error) {
-          const errorName = String(error && error.name || "unknown")
-            .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "unknown";
-          record(
-            "fetch_request_body_recovery_failed",
-            fetchEventPath(source),
-            "method=" + method + " error_name=" + errorName
-          );
-          throw new TypeError("Intercept could not preserve this Request body.");
-        }
-      }
-
       let routedRequest;
       if (input instanceof Request) {
         routedRequest = new Request(routed, input);
         if (init) routedRequest = new Request(routedRequest, init);
-        if (recoveredRequestBody !== null) {
-          // Apply the recovered bytes after init so non-body init overrides
-          // remain intact. An explicit non-undefined init.body skips recovery.
-          routedRequest = new Request(routedRequest, {body: recoveredRequestBody});
-        }
       } else {
         routedRequest = new Request(routed, init);
       }
+      let bodyDetail = fetchBodyDiagnostic(input, init);
       if (routedRequest.method === "POST"
-          && originalBodyDetail === "body_arg=none"
+          && bodyDetail === "body_arg=none"
           && youtubeSabrEndpointCheck(source)) {
         const requestInput = input instanceof Request;
         const initPresent = init !== undefined && init !== null;
@@ -2230,8 +2189,7 @@
             + " input=" + (requestInput ? "Request" : input instanceof URL ? "URL" : typeof input)
             + " init_present=" + initPresent
             + " init_body_present=" + initBodyPresent
-            + " body_diag=" + originalBodyDetail
-            + " recovered_body_bytes=" + (recoveredRequestBody ? recoveredRequestBody.byteLength : 0)
+            + " body_diag=" + bodyDetail
             + " input_body_null=" + (inputBodyNull === null ? "n/a" : inputBodyNull)
             + " input_body_used=" + (inputBodyUsed === null ? "n/a" : inputBodyUsed)
             + " routed_body_null=" + (routedRequest.body === null)
