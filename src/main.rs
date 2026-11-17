@@ -3417,6 +3417,7 @@ async fn ajax_passthrough(
         ).await;
     }
 
+    let mut sabr_attestation_request = None;
     if is_sabr_request {
         let content_length = if has_body_framing || request_body_len > 0 {
             request_body_len.to_string()
@@ -3451,7 +3452,6 @@ async fn ajax_passthrough(
             .unwrap_or_else(|error| error.into_inner())
             .take()
             .map(|window| observe_sabr_backoff(window, Instant::now()));
-        let mut sabr_attestation_request = None;
         if let Some(metadata) = sabr_request_metadata {
             // Snapshot the latest WAA upstream response at the time this SABR
             // request arrives. Only scalar metadata and the opaque RPC ID are
@@ -6419,9 +6419,9 @@ fn event_detail_limit(kind: &str) -> usize {
         "youtube_sabr_response_stream_complete" => 1024,
         "youtube_player_watchdog" => 900,
         "youtube_player_state" => 640,
+        "youtube_attestation_freshness" => 900,
         "youtube_sabr_attestation_context"
         | "youtube_sabr_request_metadata"
-        | "youtube_attestation_freshness"
         | "youtube_attestation_rpc"
         | "youtube_attestation_resource_header_profile" => 480,
         _ => 300,
@@ -8155,6 +8155,7 @@ mod ump_stream_diagnostics_tests {
         mark_sabr_response_complete, observe_sabr_request_gap,
         Duration, Instant, SabrBackoffWindow, SabrRequestParseState, SabrRequestTiming,
         YouTubeAttestationTiming, YouTubeAttestationResponseMetadata,
+        YouTubeSabrAttestationRequestSnapshot, youtube_attestation_age_band,
         UmpStreamDiagnostics, event_detail_limit, clean_field,
     };
 
