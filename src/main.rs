@@ -3635,13 +3635,55 @@ async fn proxy(
     let worker_script = parts.headers.get("sec-fetch-dest")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "worker" | "sharedworker" | "serviceworker"));
+    if let Some(operation) = attestation_operation {
+        let declared_length = parts.headers.get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 24))
+            .unwrap_or_else(|| "absent".to_owned());
+        let content_type = parts.headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 64))
+            .unwrap_or_else(|| "absent".to_owned());
+        let content_encoding = parts.headers.get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 24))
+            .unwrap_or_else(|| "absent".to_owned());
+        push_event(
+            &session,
+            "youtube_attestation_rpc",
+            format!("{}{}", upstream_url.host_str().unwrap_or_default(), upstream_url.path()),
+            format!(
+                "rid={request_id} phase=proxy_received operation={operation} method={} declared_body_bytes={declared_length} ct={content_type} ce={content_encoding} transport={}",
+                parts.method,
+                youtube_attestation_transport(&parts.headers),
+            ),
+        ).await;
+    }
     let body = tokio::select! {
         _ = wait_for_session_termination(&session) => {
+            if let Some(operation) = attestation_operation {
+                push_event(
+                    &session,
+                    "youtube_attestation_rpc",
+                    format!("{}{}", upstream_url.host_str().unwrap_or_default(), upstream_url.path()),
+                    format!("rid={request_id} phase=proxy_body_cancelled operation={operation}"),
+                ).await;
+            }
             return plain(StatusCode::GONE, "Session terminated");
         }
         result = to_bytes(body, MAX_REQUEST_BODY) => match result {
             Ok(body) => body,
-            Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "Request body exceeds the 8 MiB limit"),
+            Err(_) => {
+                if let Some(operation) = attestation_operation {
+                    push_event(
+                        &session,
+                        "youtube_attestation_rpc",
+                        format!("{}{}", upstream_url.host_str().unwrap_or_default(), upstream_url.path()),
+                        format!("rid={request_id} phase=proxy_body_error operation={operation} stage=read_or_size_limit"),
+                    ).await;
+                }
+                return plain(StatusCode::PAYLOAD_TOO_LARGE, "Request body exceeds the 8 MiB limit");
+            }
         }
     };
     if let Some(operation) = attestation_operation {
