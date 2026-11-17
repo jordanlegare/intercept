@@ -7718,16 +7718,18 @@ mod ump_stream_diagnostics_tests {
 
     #[test]
     fn sabr_completion_event_preserves_full_ump_payload_totals() {
-        let mut diagnostics = UmpStreamDiagnostics::default();
-        diagnostics.total_parts = 11;
-        diagnostics.total_payload_bytes = 260_109;
-        diagnostics.part_counts = std::collections::BTreeMap::from([
-            (20, 2), (21, 2), (22, 2), (35, 1), (47, 1), (52, 1), (53, 1),
-        ]);
-        diagnostics.part_payload_bytes = std::collections::BTreeMap::from([
-            (20, 154), (21, 259_839), (22, 2), (35, 82),
-            (47, 12), (52, 8), (53, 12),
-        ]);
+        let diagnostics = UmpStreamDiagnostics {
+            total_parts: 11,
+            total_payload_bytes: 260_109,
+            part_counts: std::collections::BTreeMap::from([
+                (20, 2), (21, 2), (22, 2), (35, 1), (47, 1), (52, 1), (53, 1),
+            ]),
+            part_payload_bytes: std::collections::BTreeMap::from([
+                (20, 154), (21, 259_839), (22, 2), (35, 82),
+                (47, 12), (52, 8), (53, 12),
+            ]),
+            ..UmpStreamDiagnostics::default()
+        };
         let detail = format!(
             "rid={} outcome=complete response_bytes=260137 · {}",
             "a".repeat(32),
