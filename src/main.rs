@@ -1754,22 +1754,29 @@ async fn ajax_passthrough(
     if request_body_len > 0 || has_body_framing {
         builder = builder.header(header::CONTENT_LENGTH, request_body_len);
     }
-    let content_encoding_out = request_headers.get(header::CONTENT_ENCODING)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("absent");
-    let content_type_out = request_headers.get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("absent");
-    let body_encoding_out = request_body_encoding_diagnostic(&request_headers, &request_body);
-    push_event(
-        session,
-        "ajax_upstream_dispatch",
-        format!("{upstream_host}{upstream_path}"),
-        format!(
-            "rid={request_id} method={request_method} body_bytes={} body_encoding={body_encoding_out} content_encoding={content_encoding_out} content_type={content_type_out}",
-            request_body.len()
-        ),
-    ).await;
+    let is_youtube_search = upstream_path == "/youtubei/v1/search"
+        && (upstream_host.eq_ignore_ascii_case("youtube.com")
+            || upstream_host.to_ascii_lowercase().ends_with(".youtube.com"));
+    if is_youtube_search {
+        let content_encoding_out = request_headers.get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 32))
+            .unwrap_or_else(|| "absent".to_owned());
+        let content_type_out = request_headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 80))
+            .unwrap_or_else(|| "absent".to_owned());
+        let body_encoding_out = request_body_encoding_diagnostic(&request_headers, &request_body);
+        push_event(
+            session,
+            "ajax_upstream_dispatch",
+            format!("{upstream_host}{upstream_path}"),
+            format!(
+                "rid={request_id} method={request_method} body_bytes={} body_encoding={body_encoding_out} content_encoding={content_encoding_out} content_type={content_type_out}",
+                request_body.len()
+            ),
+        ).await;
+    }
 
     let upstream = tokio::select! {
         _ = wait_for_session_termination(session) => {
