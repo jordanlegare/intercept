@@ -2978,6 +2978,10 @@
       headers.set("X-Intercept-Body-Diagnostic", bodyDetail);
       headers.set("X-Intercept-Transport-Diagnostic", "window-fetch");
       const inputContext = addInputCorrelation(headers);
+      const attestationCall = attestationInfo
+        ? beginYouTubeAttestationRpc(attestationInfo, routedRequest.method, "fetch")
+        : null;
+      if (attestationCall) headers.set("X-Intercept-Attestation-Id", attestationCall.id);
       const markedRequest = new Request(routedRequest, {headers});
       record(
         "ajax_dispatch",
@@ -2985,9 +2989,6 @@
         method + " · " + bodyDetail + inputCorrelationDetail(inputContext)
       );
       const fetchEventTarget = fetchEventPath(source);
-      const attestationCall = attestationInfo
-        ? beginYouTubeAttestationRpc(attestationInfo, markedRequest.method, "fetch")
-        : null;
       return cookieWriteQueue.then(() => {
         // ajax_dispatch is recorded before cookie synchronization finishes.
         // This marker proves the request has reached the actual native Fetch call.
@@ -3104,6 +3105,9 @@
         nativeXhrSetRequestHeader.call(this, "X-Intercept-Proxy-Mode", "ajax");
         nativeXhrSetRequestHeader.call(this, "X-Intercept-Body-Diagnostic", bodyDetail);
         nativeXhrSetRequestHeader.call(this, "X-Intercept-Transport-Diagnostic", "window-xhr");
+        if (attestationCall) {
+          nativeXhrSetRequestHeader.call(this, "X-Intercept-Attestation-Id", attestationCall.id);
+        }
         if (inputContext) {
           nativeXhrSetRequestHeader.call(this, "X-Intercept-Input-Id", inputContext.id);
           nativeXhrSetRequestHeader.call(
