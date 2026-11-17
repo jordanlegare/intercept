@@ -2523,6 +2523,9 @@ async fn ajax_passthrough(
     );
 
     let stream_target = format!("{upstream_host}{upstream_path}");
+    let prefix_bytes = error_prefix.iter()
+        .map(|chunk| chunk.len() as u64)
+        .sum::<u64>();
     let prefix_stream = futures_util::stream::iter(
         error_prefix.into_iter().map(Ok::<_, io::Error>)
     );
@@ -2534,7 +2537,7 @@ async fn ajax_passthrough(
             stream_target.clone(),
             request_permit,
             session.cancel_tx.subscribe(),
-            0u64,
+            prefix_bytes,
             false,
             is_youtube_sabr_request(&upstream_url),
         ),
