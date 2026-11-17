@@ -11,6 +11,7 @@
   const nativeAdd = EventTarget.prototype.addEventListener;
   const nativeRemove = EventTarget.prototype.removeEventListener;
   const queue = [];
+  const MAX_EVENT_BUFFER = 2_000;
   const eventBuffer = [];
   let authorityFrame = null;
   let gateState = "waiting";
@@ -55,7 +56,7 @@
   }
 
   function trimEventBuffer() {
-    while (eventBuffer.length > 160) {
+    while (eventBuffer.length > MAX_EVENT_BUFFER) {
       const discardIndex = eventBuffer.findIndex(event => !isPriorityYouTubeDiagnosticEvent(event));
       eventBuffer.splice(discardIndex >= 0 ? discardIndex : 0, 1);
     }
@@ -739,7 +740,8 @@
   function beginYouTubeAttestationRpc(info, method, transport) {
     youtubeAttestationRpcSequence = (youtubeAttestationRpcSequence % 999999) + 1;
     return {
-      id: Date.now().toString(36) + "-" + youtubeAttestationRpcSequence,
+      id: Date.now().toString(36) + "-" + youtubeAttestationRpcSequence
+        + "-" + Math.random().toString(36).slice(2, 8),
       info,
       method,
       transport,
@@ -2978,6 +2980,10 @@
       headers.set("X-Intercept-Body-Diagnostic", bodyDetail);
       headers.set("X-Intercept-Transport-Diagnostic", "window-fetch");
       const inputContext = addInputCorrelation(headers);
+      const attestationCall = attestationInfo
+        ? beginYouTubeAttestationRpc(attestationInfo, routedRequest.method, "fetch")
+        : null;
+      if (attestationCall) headers.set("X-Intercept-Attestation-Id", attestationCall.id);
       const markedRequest = new Request(routedRequest, {headers});
       record(
         "ajax_dispatch",
@@ -2985,9 +2991,6 @@
         method + " · " + bodyDetail + inputCorrelationDetail(inputContext)
       );
       const fetchEventTarget = fetchEventPath(source);
-      const attestationCall = attestationInfo
-        ? beginYouTubeAttestationRpc(attestationInfo, markedRequest.method, "fetch")
-        : null;
       return cookieWriteQueue.then(() => {
         // ajax_dispatch is recorded before cookie synchronization finishes.
         // This marker proves the request has reached the actual native Fetch call.
@@ -3104,6 +3107,9 @@
         nativeXhrSetRequestHeader.call(this, "X-Intercept-Proxy-Mode", "ajax");
         nativeXhrSetRequestHeader.call(this, "X-Intercept-Body-Diagnostic", bodyDetail);
         nativeXhrSetRequestHeader.call(this, "X-Intercept-Transport-Diagnostic", "window-xhr");
+        if (attestationCall) {
+          nativeXhrSetRequestHeader.call(this, "X-Intercept-Attestation-Id", attestationCall.id);
+        }
         if (inputContext) {
           nativeXhrSetRequestHeader.call(this, "X-Intercept-Input-Id", inputContext.id);
           nativeXhrSetRequestHeader.call(
@@ -3201,6 +3207,7 @@
       + "if(typeof WorkerGlobalScope==='undefined'||!(self instanceof WorkerGlobalScope))return;"
       + "const prefix=" + prefixLiteral + ",primaryOrigin=" + primaryOriginLiteral + ";"
       + "const rawFetch=typeof self.fetch==='function'?self.fetch.bind(self):null;"
+      + "let attestationSequence=0;function nextAttestationId(){attestationSequence=(attestationSequence%999999)+1;return Date.now().toString(36)+'-'+attestationSequence+'-'+Math.random().toString(36).slice(2,8);}"
       + "function route(value){"
       + "const raw=value instanceof Request?value.url:value instanceof URL?value.href:String(value);"
       + "const url=new URL(raw,self.location.origin+'/');"
@@ -3230,23 +3237,27 @@
       + "}catch(_e){}}"
       + "if(rawFetch){self.fetch=function(input,init){"
       + "const source=input instanceof Request?input.url:input;"
-      + "const routed=route(source);let request=input instanceof Request?new Request(routed,input):new Request(routed,init);"
+      + "const routed=route(source),info=attestationInfo(source),attestationId=info?nextAttestationId():null;"
+      + "let request=input instanceof Request?new Request(routed,input):new Request(routed,init);"
       + "if(input instanceof Request&&init)request=new Request(request,init);"
       + "const headers=new Headers(request.headers);headers.set('X-Intercept-Proxy-Mode','ajax');"
       + "headers.set('X-Intercept-Transport-Diagnostic','worker-fetch');"
-      + "const marked=new Request(request,{headers});const info=attestationInfo(source);"
-      + "if(info)report(info,'phase=blob_worker_dispatch operation='+info.operation+' method='+marked.method+' transport=worker-fetch');"
-      + "return rawFetch(marked).then(response=>{if(info)report(info,'phase=blob_worker_response operation='+info.operation+' status='+response.status);return response;});"
+      + "if(attestationId)headers.set('X-Intercept-Attestation-Id',attestationId);"
+      + "const marked=new Request(request,{headers});"
+      + "if(info)report(info,'rpc='+attestationId+' phase=blob_worker_dispatch operation='+info.operation+' method='+marked.method+' transport=worker-fetch');"
+      + "return rawFetch(marked).then(response=>{if(info)report(info,'rpc='+attestationId+' phase=blob_worker_response operation='+info.operation+' status='+response.status);return response;});"
       + "};}"
       + "if(self.XMLHttpRequest){const X=self.XMLHttpRequest,open=X.prototype.open,send=X.prototype.send,meta=new WeakMap();"
       + "X.prototype.open=function(method,url,...rest){const info=attestationInfo(url),routed=route(url);"
       + "meta.set(this,{info,method:String(method).toUpperCase()});return open.call(this,method,routed,...rest);};"
       + "X.prototype.send=function(...args){const call=meta.get(this);if(!call)return send.apply(this,args);"
+      + "const attestationId=call.info?nextAttestationId():null;"
       + "try{this.setRequestHeader('X-Intercept-Proxy-Mode','ajax');"
-      + "this.setRequestHeader('X-Intercept-Transport-Diagnostic','worker-xhr');}catch(_e){}"
-      + "if(call.info)report(call.info,'phase=blob_worker_dispatch operation='+call.info.operation+' method='+call.method+' transport=worker-xhr');"
-      + "this.addEventListener('load',()=>{if(call.info)report(call.info,'phase=blob_worker_response operation='+call.info.operation+' status='+this.status);},{once:true});"
-      + "this.addEventListener('error',()=>{if(call.info)report(call.info,'phase=blob_worker_error operation='+call.info.operation+' error=network');},{once:true});"
+      + "this.setRequestHeader('X-Intercept-Transport-Diagnostic','worker-xhr');"
+      + "if(attestationId)this.setRequestHeader('X-Intercept-Attestation-Id',attestationId);}catch(_e){}"
+      + "if(call.info)report(call.info,'rpc='+attestationId+' phase=blob_worker_dispatch operation='+call.info.operation+' method='+call.method+' transport=worker-xhr');"
+      + "this.addEventListener('load',()=>{if(call.info)report(call.info,'rpc='+attestationId+' phase=blob_worker_response operation='+call.info.operation+' status='+this.status);},{once:true});"
+      + "this.addEventListener('error',()=>{if(call.info)report(call.info,'rpc='+attestationId+' phase=blob_worker_error operation='+call.info.operation+' error=network');},{once:true});"
       + "return send.apply(this,args);};}"
       + "if(typeof self.importScripts==='function'){const nativeImport=self.importScripts.bind(self);self.importScripts=function(...urls){"
       + "return nativeImport(...urls.map(route));};}"
