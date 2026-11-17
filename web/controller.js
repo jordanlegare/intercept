@@ -650,6 +650,162 @@
   }
 
 
+
+  function youtubePlayerEndpointCheck(source) {
+    try {
+      const upstream = new URL(upstreamOrigin);
+      const candidate = new URL(
+        source instanceof Request ? source.url : String(source),
+        document.baseURI
+      );
+      const host = upstream.hostname.toLowerCase();
+      const upstreamHostMatch = host === "youtube.com" || host.endsWith(".youtube.com");
+      const candidatePathMatch = candidate.pathname === "/youtubei/v1/player";
+      return {
+        endpointMatch: upstreamHostMatch && candidatePathMatch,
+        upstreamHostMatch,
+        candidatePathMatch
+      };
+    } catch (_) {
+      return {endpointMatch: false, upstreamHostMatch: false, candidatePathMatch: false};
+    }
+  }
+
+  async function buildYouTubePlayerFallbackBody() {
+    let config = null;
+    let context = null;
+    let playerResponse = null;
+    let playerArgs = null;
+    try {
+      config = window.ytcfg;
+      if (config && typeof config.get === "function") {
+        context = config.get("INNERTUBE_CONTEXT");
+      }
+      if (!context && config && config.data_) context = config.data_.INNERTUBE_CONTEXT;
+    } catch (_) {}
+    try {
+      playerResponse = window.ytInitialPlayerResponse || null;
+      playerArgs = window.ytplayer && window.ytplayer.config
+        && window.ytplayer.config.args || null;
+    } catch (_) {}
+
+    if (!context || typeof context !== "object" || !context.client) {
+      return {body: null, reason: "INNERTUBE_CONTEXT unavailable"};
+    }
+
+    const configValue = key => {
+      try {
+        if (config && typeof config.get === "function") {
+          const value = config.get(key);
+          if (value !== undefined && value !== null) return value;
+        }
+        if (config && config.data_
+            && Object.prototype.hasOwnProperty.call(config.data_, key)) return config.data_[key];
+      } catch (_) {}
+      return undefined;
+    };
+    const candidateIds = [];
+    const addId = value => {
+      if (typeof value === "string" && /^[A-Za-z0-9_-]{11}$/.test(value)
+          && !candidateIds.includes(value)) candidateIds.push(value);
+    };
+    try {
+      const url = new URL(location.href);
+      addId(url.searchParams.get("v"));
+      const match = url.pathname.match(/^\/(?:shorts|live|embed)\/([A-Za-z0-9_-]{11})(?:\/|$)/);
+      if (match) addId(match[1]);
+    } catch (_) {}
+    try { addId(playerResponse && playerResponse.videoDetails && playerResponse.videoDetails.videoId); } catch (_) {}
+    try { addId(playerArgs && playerArgs.video_id); } catch (_) {}
+    try {
+      const video = document.querySelector("video");
+      const source = video && (video.currentSrc || video.src);
+      if (source) {
+        const url = new URL(source, location.href);
+        addId(url.searchParams.get("video_id"));
+        addId(url.searchParams.get("v"));
+      }
+    } catch (_) {}
+
+    const videoId = candidateIds[0];
+    if (!videoId) return {body: null, reason: "video_id unavailable"};
+
+    try {
+      const client = context.client;
+      const payload = {
+        context: {client},
+        videoId,
+        contentCheckOk: true,
+        racyCheckOk: true
+      };
+      // These values are optional in the player request. Copy them only when
+      // the current page exposes a well-formed live value.
+      const contextRequest = context.request;
+      if (contextRequest && typeof contextRequest === "object" && !Array.isArray(contextRequest)) {
+        payload.request = {...contextRequest};
+      }
+      const playbackContext = configValue("PLAYER_PLAYBACK_CONTEXT");
+      if (playbackContext && typeof playbackContext === "object" && !Array.isArray(playbackContext)) {
+        payload.playbackContext = playbackContext;
+      } else {
+        const signatureTimestamp = playerArgs && playerArgs.sts;
+        if ((typeof signatureTimestamp === "number" && Number.isFinite(signatureTimestamp))
+            || (typeof signatureTimestamp === "string" && /^\d+$/.test(signatureTimestamp))) {
+          payload.playbackContext = {
+            contentPlaybackContext: {signatureTimestamp: Number(signatureTimestamp)}
+          };
+        }
+      }
+
+      const headers = {"Content-Type": "application/json"};
+      const loggedIn = configValue("LOGGED_IN");
+      if (typeof loggedIn === "boolean") headers["X-YouTube-Bootstrap-Logged-In"] = String(loggedIn);
+      if (client.clientName === "WEB") headers["X-YouTube-Client-Name"] = "1";
+      if (typeof client.clientVersion === "string" && client.clientVersion.trim()) {
+        headers["X-YouTube-Client-Version"] = client.clientVersion.trim();
+      }
+      if (typeof client.visitorData === "string" && client.visitorData.trim()) {
+        headers["X-Goog-Visitor-Id"] = client.visitorData.trim();
+      }
+      const dataSyncId = configValue("DATASYNC_ID");
+      if (typeof dataSyncId === "string" && dataSyncId.length > 0 && dataSyncId.length <= 512) {
+        headers["X-Intercept-YouTube-DataSync-Id"] = dataSyncId;
+      }
+      let youtubeOrigin = "https://www.youtube.com";
+      const configuredApiHost = configValue("INNERTUBE_HOST");
+      if (typeof configuredApiHost === "string" && configuredApiHost.trim()) {
+        try {
+          const candidate = new URL(configuredApiHost.includes("://")
+            ? configuredApiHost : "https://" + configuredApiHost);
+          const host = candidate.hostname.toLowerCase();
+          if (candidate.protocol === "https:"
+              && (host === "youtube.com" || host.endsWith(".youtube.com"))
+              && !candidate.username && !candidate.password && !candidate.search && !candidate.hash) {
+            youtubeOrigin = candidate.origin;
+          }
+        } catch (_) {}
+      }
+      headers["X-Origin"] = youtubeOrigin;
+      const sessionIndex = configValue("SESSION_INDEX");
+      headers["X-Goog-AuthUser"] = (
+        (typeof sessionIndex === "number" && Number.isInteger(sessionIndex) && sessionIndex >= 0)
+        || (typeof sessionIndex === "string" && /^\d+$/.test(sessionIndex))
+      ) ? String(sessionIndex) : "0";
+
+      return {
+        body: JSON.stringify(payload),
+        headers,
+        videoIdSource: candidateIds.length ? "live_page_runtime" : "unavailable",
+        payloadKeys: Object.keys(payload).join(","),
+        clientName: typeof client.clientName === "string" ? client.clientName.slice(0, 24) : "unknown",
+        clientVersion: typeof client.clientVersion === "string" ? client.clientVersion.slice(0, 48) : "unknown",
+        playbackContextPresent: Boolean(payload.playbackContext)
+      };
+    } catch (error) {
+      return {body: null, reason: "fallback_error=" + String(error && error.name || "unknown").slice(0, 40)};
+    }
+  }
+
   async function buildYouTubeSearchFallbackBody() {
     let context = null;
     let config = null;
@@ -1088,6 +1244,8 @@
       let bodyDetail = fetchBodyDiagnostic(input, init);
       let youtubeSearchFallbackHeaders = null;
       const youtubeSearchCheck = youtubeSearchEndpointCheck(source);
+      const youtubePlayerCheck = youtubePlayerEndpointCheck(source);
+      let youtubePlayerFallbackHeaders = null;
       const bodyIsNull = routedRequest.body === null;
       if (routedRequest.method === "POST"
           && youtubeSearchCheck.upstreamHostMatch
@@ -1157,6 +1315,37 @@
           record("youtube_search_body_unavailable", routed, fallback.reason);
         }
       }
+
+      if (routedRequest.method === "POST"
+          && bodyDetail === "body_arg=none"
+          && youtubePlayerCheck.endpointMatch) {
+        const fallback = await buildYouTubePlayerFallbackBody();
+        if (fallback.body) {
+          const replacementRequest = new Request(routedRequest, {body: fallback.body});
+          const replacementHeaders = new Headers(replacementRequest.headers);
+          const inheritedContentEncoding = replacementHeaders.has("content-encoding");
+          replacementHeaders.delete("content-encoding");
+          replacementHeaders.delete("content-length");
+          replacementHeaders.set("content-type", "application/json");
+          routedRequest = new Request(replacementRequest, {headers: replacementHeaders});
+          youtubePlayerFallbackHeaders = fallback.headers || {};
+          bodyDetail = "body_arg=generated_innertube_player body_arg_bytes="
+            + new TextEncoder().encode(fallback.body).byteLength;
+          record("youtube_player_body_generated", fetchEventPath(source),
+            "Generated InnerTube player JSON · video_id_source=" + fallback.videoIdSource
+              + " · payload_keys=" + fallback.payloadKeys
+              + " · playback_context=" + (fallback.playbackContextPresent ? "present" : "absent")
+              + " · body_bytes=" + new TextEncoder().encode(fallback.body).byteLength);
+          record("youtube_player_payload_shape", fetchEventPath(source),
+            "keys=" + fallback.payloadKeys + " · client=" + fallback.clientName
+              + " · version=" + fallback.clientVersion + " · video_id_present=true");
+          record("youtube_player_fallback_encoding", fetchEventPath(source),
+            "body_encoding=identity · content_type=application/json"
+              + " · inherited_content_encoding=" + (inheritedContentEncoding ? "removed" : "absent"));
+        } else {
+          record("youtube_player_body_unavailable", fetchEventPath(source), fallback.reason);
+        }
+      }
       const headers = new Headers(routedRequest.headers);
       const youtubeHeadersAdded = [];
       if (youtubeSearchFallbackHeaders) {
@@ -1174,6 +1363,20 @@
           );
         }
       }
+
+      if (youtubePlayerFallbackHeaders) {
+        const added = [];
+        for (const [name, value] of Object.entries(youtubePlayerFallbackHeaders)) {
+          if (!headers.has(name)) {
+            headers.set(name, value);
+            added.push(name.toLowerCase());
+          }
+        }
+        if (added.length) {
+          record("youtube_player_headers_synthesized", fetchEventPath(source),
+            "Added missing InnerTube headers: " + added.join(", "));
+        }
+      }
       headers.set("X-Intercept-Proxy-Mode", "ajax");
       headers.set("X-Intercept-Body-Diagnostic", bodyDetail);
       headers.set("X-Intercept-Transport-Diagnostic", "window-fetch");
@@ -1188,6 +1391,11 @@
       return cookieWriteQueue.then(() => {
         // ajax_dispatch is recorded before cookie synchronization finishes.
         // This marker proves the request has reached the actual native Fetch call.
+
+        if (fetchEventTarget === "/youtubei/v1/player") {
+          record("youtube_player_fetch_started", fetchEventTarget,
+            method + " · " + bodyDetail);
+        }
         if (fetchEventTarget === "/youtubei/v1/search") {
           record(
             "fetch_started",
