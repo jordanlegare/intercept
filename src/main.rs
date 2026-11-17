@@ -4004,7 +4004,7 @@ fn youtube_qoe_request_diagnostics(
     let user_agent = if headers.contains_key(header::USER_AGENT) { "present" } else { "absent" };
 
     format!(
-        "method={method} body_bytes={} body_text={body_text} json={json_state} content_type={content_type} content_length_in={content_length_in} content_length_out={} content_encoding={content_encoding} body_encoding={} origin_host={} referer_host={} fetch_dest={fetch_dest} fetch_mode={fetch_mode} fetch_site={fetch_site} cookie={cookie} authorization={authorization} ua={user_agent}",
+        "method={method} bytes={} text={body_text} json={json_state} ct={content_type} len_in={content_length_in} len_out={} ce={content_encoding} encoding={} origin={} ref={} fetch={fetch_dest}/{fetch_mode}/{fetch_site} cookie={cookie} auth={authorization} ua={user_agent}",
         body.len(),
         body.len(),
         request_body_encoding_diagnostic(headers, body),
@@ -4521,7 +4521,7 @@ mod tests {
     fn youtube_qoe_diagnostics_report_body_framing_without_logging_payload() {
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain;charset=UTF-8"));
-        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("19"));
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("18"));
         headers.insert(header::ORIGIN, HeaderValue::from_static("https://www.youtube.com"));
         headers.insert(header::REFERER, HeaderValue::from_static("https://www.youtube.com/watch"));
         headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
@@ -4532,13 +4532,13 @@ mod tests {
         let detail = youtube_qoe_request_diagnostics(&Method::POST, &headers, body);
 
         assert!(detail.contains("method=POST"));
-        assert!(detail.contains("body_bytes=20"));
-        assert!(detail.contains("body_text=utf8_text"));
-        assert!(detail.contains("content_type=text/plain;charset=UTF-8"));
-        assert!(detail.contains("content_length_in=19"));
-        assert!(detail.contains("content_length_out=20"));
-        assert!(detail.contains("origin_host=www.youtube.com"));
-        assert!(detail.contains("referer_host=www.youtube.com"));
+        assert!(detail.contains("bytes=19"));
+        assert!(detail.contains("text=utf8_text"));
+        assert!(detail.contains("ct=text/plain;charset=UTF-8"));
+        assert!(detail.contains("len_in=18"));
+        assert!(detail.contains("len_out=19"));
+        assert!(detail.contains("origin=www.youtube.com"));
+        assert!(detail.contains("ref=www.youtube.com"));
         assert!(detail.contains("cookie=present("));
         assert!(detail.contains("ua=present"));
         assert!(!detail.contains("private-qoe-payload"));
