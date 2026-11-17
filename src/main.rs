@@ -2460,14 +2460,22 @@ fn is_youtube_sabr_request(url: &Url) -> bool {
 }
 
 fn youtube_attestation_rpc_operation(url: &Url) -> Option<&'static str> {
-    if !url.host_str().is_some_and(|host| host.eq_ignore_ascii_case("jnn-pa.googleapis.com")) {
+    let host = url.host_str()?.to_ascii_lowercase();
+    let path = url.path();
+    let path_lower = path.to_ascii_lowercase();
+    let candidate_host = host == "jnn-pa.googleapis.com"
+        || (host.ends_with(".googleapis.com") && path_lower.contains("waa"));
+    if !candidate_host {
         return None;
     }
 
-    match url.path() {
+    // Preserve the recognized RPC names, but keep an "Other" bucket for any
+    // request to the WAA host or a related Google API path. This deliberately
+    // avoids assuming Google's endpoint path will remain stable.
+    match path {
         "/$rpc/google.internal.waa.v1.Waa/Create" => Some("Create"),
         "/$rpc/google.internal.waa.v1.Waa/GenerateIT" => Some("GenerateIT"),
-        _ => None,
+        _ => Some("Other"),
     }
 }
 
@@ -5524,6 +5532,23 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn detects_unexpected_waa_paths_on_the_attestation_host() {
+        let changed_rpc = Url::parse(
+            "https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/GenerateIntegrityToken?alt=proto"
+        ).unwrap();
+        let related_google_api = Url::parse(
+            "https://other.googleapis.com/$rpc/google.internal.waa.v2.Waa/GenerateIT"
+        ).unwrap();
+        let unrelated_google_api = Url::parse(
+            "https://other.googleapis.com/$rpc/google.internal.identity.v1.Identity/Get"
+        ).unwrap();
+
+        assert_eq!(youtube_attestation_rpc_operation(&changed_rpc), Some("Other"));
+        assert_eq!(youtube_attestation_rpc_operation(&related_google_api), Some("Other"));
+        assert_eq!(youtube_attestation_rpc_operation(&unrelated_google_api), None);
+    }
 
     #[test]
     fn recognizes_youtube_waa_create_and_generate_it_rpc_paths() {
