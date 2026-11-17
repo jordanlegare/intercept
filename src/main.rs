@@ -2135,6 +2135,26 @@ fn decode_next_request_policy(input: &[u8]) -> Option<NextRequestPolicyDiagnosti
 }
 
 
+fn decode_ump_varint(input: &[u8]) -> Option<(u32, usize)> {
+    let first = *input.first()?;
+    let size = (first.leading_ones().min(4) + 1) as usize;
+    if input.len() < size {
+        return None;
+    }
+    let mut value = 0u32;
+    let mut shift = 0;
+    if size != 5 {
+        shift = 8 - size as u32;
+        let mask = ((1u16 << shift) - 1) as u8;
+        value |= (first & mask) as u32;
+    }
+    for byte in input.iter().take(size).skip(1) {
+        value |= (*byte as u32) << shift;
+        shift += 8;
+    }
+    Some((value, size))
+}
+
 fn ump_part_name(part_type: u32) -> String {
     let name = match part_type {
         10 => "ONESIE_HEADER", 11 => "ONESIE_DATA", 12 => "ONESIE_ENCRYPTED_MEDIA",
