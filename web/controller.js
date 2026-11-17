@@ -41,6 +41,18 @@
     "controller_loaded"
   ]);
 
+  function isYouTubeAttestationEvent(event) {
+    return event && (event.kind === "youtube_attestation_rpc"
+      || event.kind === "youtube_attestation_resource");
+  }
+
+  function trimEventBuffer() {
+    while (eventBuffer.length > 120) {
+      const discardIndex = eventBuffer.findIndex(event => !isYouTubeAttestationEvent(event));
+      eventBuffer.splice(discardIndex >= 0 ? discardIndex : 0, 1);
+    }
+  }
+
   function record(kind, target, detail) {
     if (INTERNAL_AUTHORITY_EVENTS.has(kind)) return;
     eventBuffer.push({
@@ -48,7 +60,7 @@
       target: String(target || "").slice(0, 240),
       detail: String(detail || "").slice(0, 300)
     });
-    if (eventBuffer.length > 120) eventBuffer.shift();
+    trimEventBuffer();
   }
 
 
@@ -290,7 +302,7 @@
       if (!response.ok) throw new Error("event upload status " + response.status);
     } catch (_) {
       eventBuffer.unshift(...batch);
-      if (eventBuffer.length > 120) eventBuffer.length = 120;
+      trimEventBuffer();
     } finally {
       eventFlushInFlight = false;
     }
@@ -716,7 +728,8 @@
       info,
       method,
       transport,
-      startedAt: null
+      startedAt: null,
+      terminal: false
     };
   }
 
@@ -767,7 +780,8 @@
   }
 
   function recordYouTubeAttestationRpcResponse(call, status, headers) {
-    if (!call) return;
+    if (!call || call.terminal) return;
+    call.terminal = true;
     const elapsed = call.startedAt === null
       ? "not_dispatched"
       : String(Math.max(0, Math.round(performance.now() - call.startedAt)));
@@ -787,47 +801,137 @@
     );
   }
 
-  function recordYouTubeAttestationRpcFailure(call, error) {
-    if (!call) return;
+  function recordYouTubeAttestationRpcFailure(call, error, phase) {
+    if (!call || call.terminal) return;
+    call.terminal = true;
     const elapsed = call.startedAt === null
       ? "not_dispatched"
       : String(Math.max(0, Math.round(performance.now() - call.startedAt)));
-    const errorName = String(error && error.name || "unknown")
+    const errorName = String(error && error.name || (phase === "loadend" ? "no_terminal_event" : "none"))
       .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "unknown";
     record(
       "youtube_attestation_rpc",
       call.info.target,
       "rpc=" + call.id
         + " operation=" + call.info.operation
-        + " phase=error elapsed_ms=" + elapsed
+        + " phase=" + (phase || "error")
+        + " elapsed_ms=" + elapsed
         + " error=" + errorName
         + " transport=" + call.transport
     );
   }
 
+  function youtubeAttestationAssetInfo(source) {
+    try {
+      const candidate = new URL(String(source || ""), document.baseURI);
+      let hostname = candidate.hostname.toLowerCase();
+      let pathname = candidate.pathname;
+      if (candidate.origin === location.origin) {
+        const routeMarker = sessionPrefix + "/_/https/";
+        const routeIndex = pathname.indexOf(routeMarker);
+        if (routeIndex >= 0) {
+          const target = pathname.slice(routeIndex + routeMarker.length);
+          const slash = target.indexOf("/");
+          if (slash <= 0) return null;
+          hostname = target.slice(0, slash).toLowerCase();
+          pathname = target.slice(slash);
+        }
+      }
+      const googleHost = hostname === "google.com" || hostname.endsWith(".google.com")
+        || hostname === "gstatic.com" || hostname.endsWith(".gstatic.com")
+        || hostname === "googleapis.com" || hostname.endsWith(".googleapis.com");
+      if (!googleHost) return null;
+      const lowerPath = pathname.toLowerCase();
+      const namedAsset = /(?:^|[\\/._-])(?:botguard|bot_guard|attestation|integrity|challenge)(?:[\\/._-]|$)/.test(lowerPath)
+        || /\\/js\\/bg(?:\\/|$)/.test(lowerPath)
+        || /(?:^|\\/)bg(?:\\.min)?\\.js(?:$|\\?)/.test(lowerPath);
+      if (!namedAsset) return null;
+      return {target: hostname + pathname};
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function recordYouTubeAttestationScriptEvent(event, phase) {
+    const element = event && event.target;
+    if (!element || String(element.tagName || "").toLowerCase() !== "script") return;
+    const info = youtubeAttestationAssetInfo(element.src || element.getAttribute("src"));
+    if (!info) return;
+    const scriptType = String(element.type || "classic").toLowerCase() === "module"
+      ? "module" : "classic";
+    record(
+      "youtube_attestation_resource",
+      info.target,
+      "phase=" + phase + " script_type=" + scriptType
+        + " async=" + Boolean(element.async)
+        + " defer=" + Boolean(element.defer)
+    );
+  }
+
   function observeYouTubeAttestationResources() {
+    nativeAdd.call(document, "load", event => {
+      recordYouTubeAttestationScriptEvent(event, "script_load");
+    }, true);
+    nativeAdd.call(document, "error", event => {
+      recordYouTubeAttestationScriptEvent(event, "script_error");
+    }, true);
+    nativeAdd.call(window, "error", event => {
+      const info = youtubeAttestationAssetInfo(event && event.filename);
+      if (!info) return;
+      const errorName = String(event && event.error && event.error.name || "ScriptError")
+        .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40);
+      record("youtube_attestation_resource", info.target,
+        "phase=script_runtime_error error=" + (errorName || "ScriptError"));
+    }, true);
+    nativeAdd.call(document, "securitypolicyviolation", event => {
+      const info = youtubeAttestationAssetInfo(event && event.blockedURI);
+      if (!info) return;
+      const directive = String(event.effectiveDirective || "unknown")
+        .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 48);
+      record("youtube_attestation_resource", info.target,
+        "phase=script_policy_blocked directive=" + (directive || "unknown"));
+    }, true);
+
     if (typeof PerformanceObserver !== "function") return;
     const observed = new Set();
     try {
       const observer = new PerformanceObserver(list => {
         for (const entry of list.getEntries()) {
-          const info = youtubeAttestationRpcInfo(entry.name);
-          if (!info) continue;
-          const key = info.target + "|" + Math.round(entry.startTime * 10)
-            + "|" + String(entry.initiatorType || "other");
-          if (observed.has(key)) continue;
-          observed.add(key);
-          if (observed.size > 512) observed.delete(observed.values().next().value);
           const number = value => Number.isFinite(Number(value))
             ? String(Math.max(0, Math.round(Number(value))))
             : "unknown";
           const initiator = String(entry.initiatorType || "other")
             .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 24) || "other";
+          const info = youtubeAttestationRpcInfo(entry.name);
+          if (info) {
+            const key = "rpc|" + info.target + "|" + Math.round(entry.startTime * 10)
+              + "|" + initiator;
+            if (observed.has(key)) continue;
+            observed.add(key);
+            if (observed.size > 512) observed.delete(observed.values().next().value);
+            record(
+              "youtube_attestation_rpc",
+              info.target,
+              "phase=resource_timing_observed operation=" + info.operation
+                + " initiator=" + initiator
+                + " start_ms=" + number(entry.startTime)
+                + " duration_ms=" + number(entry.duration)
+                + " transfer_bytes=" + number(entry.transferSize)
+                + " encoded_bytes=" + number(entry.encodedBodySize)
+            );
+            continue;
+          }
+          if (initiator !== "script") continue;
+          const asset = youtubeAttestationAssetInfo(entry.name);
+          if (!asset) continue;
+          const key = "asset|" + asset.target + "|" + Math.round(entry.startTime * 10);
+          if (observed.has(key)) continue;
+          observed.add(key);
+          if (observed.size > 512) observed.delete(observed.values().next().value);
           record(
-            "youtube_attestation_rpc",
-            info.target,
-            "phase=resource_timing_observed operation=" + info.operation
-              + " initiator=" + initiator
+            "youtube_attestation_resource",
+            asset.target,
+            "phase=script_resource_timing_observed initiator=script"
               + " start_ms=" + number(entry.startTime)
               + " duration_ms=" + number(entry.duration)
               + " transfer_bytes=" + number(entry.transferSize)
@@ -2803,11 +2907,25 @@
       ? beginYouTubeAttestationRpc(meta.attestation, meta.method, "xhr")
       : null;
     if (meta) {
+      nativeAdd.call(this, "load", () => {
+        recordYouTubeAttestationRpcResponse(attestationCall, this.status, this);
+      });
+      nativeAdd.call(this, "error", () => {
+        recordYouTubeAttestationRpcFailure(attestationCall, null, "error");
+      });
+      nativeAdd.call(this, "abort", () => {
+        recordYouTubeAttestationRpcFailure(attestationCall, null, "abort");
+      });
+      nativeAdd.call(this, "timeout", () => {
+        recordYouTubeAttestationRpcFailure(attestationCall, null, "timeout");
+      });
       nativeAdd.call(this, "loadend", () => {
         try {
           if (this.getResponseHeader("X-Intercept-Cookie-Updated") === "1") refreshCookieMirror();
         } catch (_) {}
-        recordYouTubeAttestationRpcResponse(attestationCall, this.status, this);
+        // XHR always fires loadend after its terminal event. This fallback
+        // records unusual implementations that omit load/error/abort/timeout.
+        recordYouTubeAttestationRpcFailure(attestationCall, null, "loadend");
       });
       const inputContext = currentInputEvent();
       const bodyDetail = requestBodyDiagnostic(args[0], args.length > 0);
@@ -2906,7 +3024,19 @@
     window.Worker = function(url, options) {
       const routed = routeToProxy(url);
       if (!routed) throw new DOMException("Intercept only proxies HTTP and HTTPS worker scripts.", "SecurityError");
-      return new NativeWorker(routed, options);
+      const asset = youtubeAttestationAssetInfo(url);
+      const worker = new NativeWorker(routed, options);
+      if (asset) {
+        record("youtube_attestation_resource", asset.target,
+          "phase=worker_construct transport=dedicated");
+        nativeAdd.call(worker, "error", event => {
+          const errorName = String(event && event.error && event.error.name || "WorkerError")
+            .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40);
+          record("youtube_attestation_resource", asset.target,
+            "phase=worker_error error=" + (errorName || "WorkerError"));
+        });
+      }
+      return worker;
     };
     window.Worker.prototype = NativeWorker.prototype;
   }
@@ -2916,7 +3046,13 @@
     window.SharedWorker = function(url, options) {
       const routed = routeToProxy(url);
       if (!routed) throw new DOMException("Intercept only proxies HTTP and HTTPS shared-worker scripts.", "SecurityError");
-      return new NativeSharedWorker(routed, options);
+      const asset = youtubeAttestationAssetInfo(url);
+      const worker = new NativeSharedWorker(routed, options);
+      if (asset) {
+        record("youtube_attestation_resource", asset.target,
+          "phase=worker_construct transport=shared");
+      }
+      return worker;
     };
     window.SharedWorker.prototype = NativeSharedWorker.prototype;
   }
@@ -2927,6 +3063,11 @@
       const routed = routeToProxy(scriptURL);
       if (!routed) return Promise.reject(new TypeError("Intercept only registers HTTP and HTTPS service workers."));
       record("service_worker_register", routed, "Service worker script routed through this session");
+      const asset = youtubeAttestationAssetInfo(scriptURL);
+      if (asset) {
+        record("youtube_attestation_resource", asset.target,
+          "phase=worker_register transport=service");
+      }
       return nativeRegister(routed, options);
     };
   }
