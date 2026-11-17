@@ -1696,7 +1696,6 @@ async fn wait_for_authorization(session: &Session) -> bool {
     }
 }
 
-
 #[derive(Default)]
 struct UmpStreamDiagnostics {
     buffer: Vec<u8>,
@@ -1712,22 +1711,30 @@ impl UmpStreamDiagnostics {
     // UMP frames contain prefix-encoded part type and payload length, then opaque payload bytes.
     // This parser counts framing metadata only; it never decodes or logs payload contents.
     fn feed(&mut self, chunk: &[u8]) {
-        if self.malformed { return; }
+        if self.malformed {
+            return;
+        }
         self.buffer.extend_from_slice(chunk);
         loop {
             if self.payload_remaining > 0 {
                 let consumed = self.payload_remaining.min(self.buffer.len());
                 self.buffer.drain(..consumed);
                 self.payload_remaining -= consumed;
-                if self.payload_remaining > 0 { break; }
+                if self.payload_remaining > 0 {
+                    break;
+                }
                 continue;
             }
             let Some((part_type, type_len)) = decode_ump_varint(&self.buffer) else {
-                if self.buffer.len() > 5 { self.malformed = true; }
+                if self.buffer.len() > 5 {
+                    self.malformed = true;
+                }
                 break;
             };
             let Some((payload_len, length_len)) = decode_ump_varint(&self.buffer[type_len..]) else {
-                if self.buffer.len() > 10 { self.malformed = true; }
+                if self.buffer.len() > 10 {
+                    self.malformed = true;
+                }
                 break;
             };
             self.buffer.drain(..type_len + length_len);
@@ -1747,7 +1754,8 @@ impl UmpStreamDiagnostics {
             format!("{name}:{count}/{bytes}B")
         }).collect::<Vec<_>>().join(",");
         let parts = if parts.is_empty() { "none".to_owned() } else { parts };
-        let frame_complete = !self.malformed && self.buffer.is_empty() && self.payload_remaining == 0;
+        let frame_complete =
+            !self.malformed && self.buffer.is_empty() && self.payload_remaining == 0;
         let media_payload_bytes = self.part_payload_bytes.get(&21).copied().unwrap_or_default();
         format!(
             "ump_parts={} total_parts={} total_payload_bytes={} media_payload_bytes={} frame_complete={} partial_header_bytes={} payload_remaining={} malformed={}",
@@ -1760,7 +1768,9 @@ impl UmpStreamDiagnostics {
 fn decode_ump_varint(input: &[u8]) -> Option<(u32, usize)> {
     let first = *input.first()?;
     let size = (first.leading_ones().min(4) + 1) as usize;
-    if input.len() < size { return None; }
+    if input.len() < size {
+        return None;
+    }
     let mut value = 0u32;
     let mut shift = 0;
     if size != 5 {
@@ -2657,7 +2667,9 @@ async fn ajax_passthrough(
                 chunk = upstream_stream.next() => match chunk {
                     Some(Ok(chunk)) => {
                         response_bytes = response_bytes.saturating_add(chunk.len() as u64);
-                        if is_sabr { ump_diagnostics.feed(&chunk); }
+                        if is_sabr {
+                            ump_diagnostics.feed(&chunk);
+                        }
                         Some((
                             Ok(chunk),
                             (upstream_stream, session, request_id, stream_target,
@@ -6100,7 +6112,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod ump_stream_diagnostics_tests {
     use super::UmpStreamDiagnostics;
@@ -6118,6 +6129,17 @@ mod ump_stream_diagnostics_tests {
         assert!(summary.contains("media_payload_bytes=3"));
         assert!(summary.contains("frame_complete=true"));
         assert!(summary.contains("malformed=false"));
+    }
+
+    #[test]
+    fn decodes_extended_length_varints() {
+        let mut frame = vec![20, 0x82, 0x02];
+        frame.extend(std::iter::repeat_n(0, 130));
+        let mut diagnostics = UmpStreamDiagnostics::default();
+        diagnostics.feed(&frame);
+        let summary = diagnostics.summary();
+        assert!(summary.contains("MEDIA_HEADER:1/130B"));
+        assert!(summary.contains("frame_complete=true"));
     }
 
     #[test]
