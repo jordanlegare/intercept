@@ -914,8 +914,11 @@
         clientVersion,
         runtimeFieldSources: runtimeSources
       };
-    } catch (_) {
-      return {body: null, reason: "INNERTUBE_CONTEXT is not serializable"};
+    } catch (error) {
+      // Report the failure class without exposing exception text, which may
+      // include page data supplied by upstream objects or getters.
+      const errorName = String(error && error.name || "unknown").slice(0, 40);
+      return {body: null, reason: "fallback_error=" + errorName};
     }
   }
 
