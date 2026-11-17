@@ -1126,7 +1126,10 @@
           lastHeartbeatAt: now,
           playbackStarted: false,
           stallStartedAt: null,
-          stallCause: null
+          stallCause: null,
+          unreadySince: null,
+          unreadyReported: false,
+          lastUnreadyHeartbeatAt: now
         };
         watchStates.set(video, state);
       }
@@ -1162,12 +1165,26 @@
       return "clock_stopped_with_buffer";
     }
 
-    function recordWatchdog(video, eventName, now, state, stalledForMs) {
+    function classifyMediaReadiness(video) {
+      if (document.visibilityState === "hidden") return "background_tab";
+      if (Number(video.networkState) === 3) return "no_source";
+      if (!video.currentSrc && !video.hasAttribute("src")
+          && video.srcObject === null && video.querySelectorAll("source").length === 0) {
+        return "source_unselected";
+      }
+      if (Number(video.readyState) < 2) return "no_current_frame_data";
+      const bufferedAhead = bufferedAheadSeconds(video);
+      if (bufferedAhead === null || bufferedAhead <= 0.25) return "no_buffer_ahead";
+      return "media_not_ready";
+    }
+
+    function recordWatchdog(video, eventName, now, state, stalledForMs, extraDetail = "") {
       const detail = snapshot(video, eventName)
         + " last_advance_ago_ms=" + Math.max(0, Math.round(now - state.lastAdvanceAt))
         + " stalled_for_ms=" + Math.max(0, Math.round(stalledForMs || 0))
         + " visibility_state=" + (document.visibilityState || "unknown")
-        + " stall_cause=" + (state.stallCause || "none");
+        + " stall_cause=" + (state.stallCause || "none")
+        + (extraDetail ? " " + extraDetail : "");
       record("youtube_player_watchdog", "video", detail);
     }
 
@@ -1182,21 +1199,64 @@
         const currentTime = Number(video.currentTime);
         if (!Number.isFinite(currentTime)) continue;
 
-        if (video.seeking || video.paused || video.ended || Number(video.playbackRate) === 0) {
+        const activelyRequested = !video.seeking && !video.paused && !video.ended
+          && Number(video.playbackRate) !== 0;
+        if (!activelyRequested) {
           state.lastCurrentTime = currentTime;
           state.lastAdvanceAt = now;
-          state.playbackStarted = !video.paused && !video.ended && !video.seeking;
+          state.playbackStarted = false;
           state.stallStartedAt = null;
           state.stallCause = null;
+          state.unreadySince = null;
+          state.unreadyReported = false;
+          state.lastUnreadyHeartbeatAt = now;
           continue;
         }
 
-        if (!state.playbackStarted && currentTime > 0.05) {
-          state.playbackStarted = true;
-          state.lastAdvanceAt = now;
-          state.lastCurrentTime = currentTime;
+        state.playbackStarted = true;
+        const mediaReadyState = Number(video.readyState) || 0;
+        if (mediaReadyState < 2) {
+          if (state.unreadySince === null) state.unreadySince = now;
+          const unreadyForMs = now - state.unreadySince;
+          if (!state.unreadyReported && unreadyForMs >= WATCHDOG_STALL_MS) {
+            state.unreadyReported = true;
+            state.lastUnreadyHeartbeatAt = now;
+            recordWatchdog(
+              video,
+              "playback_unready",
+              now,
+              state,
+              unreadyForMs,
+              "readiness_cause=" + classifyMediaReadiness(video)
+            );
+          } else if (state.unreadyReported
+              && now - state.lastUnreadyHeartbeatAt >= WATCHDOG_HEARTBEAT_MS) {
+            state.lastUnreadyHeartbeatAt = now;
+            recordWatchdog(
+              video,
+              "playback_unready_heartbeat",
+              now,
+              state,
+              unreadyForMs,
+              "readiness_cause=" + classifyMediaReadiness(video)
+            );
+          }
+        } else if (state.unreadySince !== null) {
+          const unreadyForMs = now - state.unreadySince;
+          if (state.unreadyReported) {
+            recordWatchdog(
+              video,
+              "playback_ready",
+              now,
+              state,
+              unreadyForMs,
+              "readiness_recovered=true"
+            );
+          }
+          state.unreadySince = null;
+          state.unreadyReported = false;
+          state.lastUnreadyHeartbeatAt = now;
         }
-        if (!state.playbackStarted) continue;
 
         const delta = currentTime - state.lastCurrentTime;
         if (delta >= 0.04) {
@@ -1255,6 +1315,9 @@
             state.lastHeartbeatAt = eventAt;
             state.stallStartedAt = null;
             state.stallCause = null;
+            state.unreadySince = null;
+            state.unreadyReported = false;
+            state.lastUnreadyHeartbeatAt = eventAt;
           } else if (eventName === "play" && !video.paused) {
             state.playbackStarted = true;
             state.lastCurrentTime = Number(video.currentTime) || 0;
@@ -1266,6 +1329,9 @@
             state.lastAdvanceAt = eventAt;
             state.stallStartedAt = null;
             state.stallCause = null;
+            state.unreadySince = null;
+            state.unreadyReported = false;
+            state.lastUnreadyHeartbeatAt = eventAt;
             if (video.paused || video.ended || eventName === "emptied" || eventName === "error") {
               state.playbackStarted = false;
             }
