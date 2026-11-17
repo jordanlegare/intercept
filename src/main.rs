@@ -1689,11 +1689,22 @@ async fn ajax_passthrough(
     context: ProxyRequestContext,
 ) -> Response<Body> {
     let ProxyRequestContext { request_id, started_at: request_started, permit: request_permit } = context;
-    let upstream_host = upstream_url.host_str().unwrap_or_default().to_owned();
+    let mut upstream_url = upstream_url;
     let upstream_path = upstream_url.path().to_owned();
+    let initial_host = upstream_url.host_str().unwrap_or_default().to_owned();
     let is_youtube_search = upstream_path == "/youtubei/v1/search"
-        && (upstream_host.eq_ignore_ascii_case("youtube.com")
-            || upstream_host.to_ascii_lowercase().ends_with(".youtube.com"));
+        && (initial_host.eq_ignore_ascii_case("youtube.com")
+            || initial_host.to_ascii_lowercase().ends_with(".youtube.com"));
+    if is_youtube_search && initial_host.eq_ignore_ascii_case("youtube.com") {
+        let x_origin_host = request_headers.get("x-origin")
+            .and_then(normalized_youtube_origin)
+            .and_then(|origin| Url::parse(&origin).ok())
+            .and_then(|origin| origin.host_str().map(str::to_owned));
+        if x_origin_host.as_deref().is_some_and(|host| host.eq_ignore_ascii_case("www.youtube.com")) {
+            let _ = upstream_url.set_host(Some("www.youtube.com"));
+        }
+    }
+    let upstream_host = upstream_url.host_str().unwrap_or_default().to_owned();
     let range_requested = request_headers.contains_key(header::RANGE);
     let mut request_headers = request_headers;
     let youtube_cookie_header = if is_youtube_search {
@@ -1741,6 +1752,15 @@ async fn ajax_passthrough(
                 if let Ok(value) = HeaderValue::from_str(delegated_session_id) {
                     request_headers.insert("x-goog-pageid", value);
                 }
+            }
+        }
+        // Ensure the upstream POST carries the browser's YouTube origin.
+        if !request_headers.contains_key(header::ORIGIN) {
+            if let Some(origin) = request_headers.get("x-origin")
+                .and_then(normalized_youtube_origin)
+                .and_then(|origin| HeaderValue::from_str(&origin).ok())
+            {
+                request_headers.insert(header::ORIGIN, origin);
             }
         }
         // Needed only to derive the hash; never forward or log this identifier.
@@ -1797,7 +1817,7 @@ async fn ajax_passthrough(
                 builder = builder.header(name.clone(), referer);
             }
         } else if name.as_str() == "sec-fetch-site" {
-            let fetch_site = if upstream_url.origin() == session.base_url.origin() {
+            let fetch_site = if is_youtube_search || upstream_url.origin() == session.base_url.origin() {
                 "same-origin"
             } else {
                 "cross-site"
@@ -1850,11 +1870,20 @@ async fn ajax_passthrough(
         } else {
             "absent".to_owned()
         };
-        let fetch_site_out = if upstream_url.origin() == session.base_url.origin() {
+        let fetch_site_out = if is_youtube_search || upstream_url.origin() == session.base_url.origin() {
             "same-origin"
         } else {
             "cross-site"
         };
+        push_event(
+            session,
+            "youtube_search_cookie_profile",
+            format!("{upstream_host}{upstream_path}"),
+            format!(
+                "rid={request_id} host={upstream_host} {}",
+                youtube_search_cookie_profile(youtube_cookie_header.as_ref())
+            ),
+        ).await;
         push_event(
             session,
             "youtube_search_header_profile",
@@ -3587,11 +3616,10 @@ fn youtube_sapisid_authorization(
         hash_parts.push(origin);
         let digest = Sha1::digest(hash_parts.join(" ").as_bytes());
         let digest_hex = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-        let user_suffix = if user_session_id.is_some_and(|value| !value.is_empty()) {
-            "_u"
-        } else {
-            ""
-        };
+        let user_suffix = user_session_id
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("_u{value}"))
+            .unwrap_or_default();
         authorizations.push(format!("{scheme} {timestamp}_{digest_hex}{user_suffix}"));
     }
 
@@ -3601,8 +3629,29 @@ fn youtube_sapisid_authorization(
     HeaderValue::from_str(&authorizations.join(" ")).ok()
 }
 
+fn youtube_search_cookie_profile(cookie_header: Option<&HeaderValue>) -> String {
+    let cookie_value_present = |name: &str| {
+        cookie_header
+            .and_then(|header| header.to_str().ok())
+            .is_some_and(|value| {
+                value.split(';').any(|part| {
+                    part.trim().split_once('=')
+                        .is_some_and(|(cookie_name, cookie_value)| {
+                            cookie_name == name && !cookie_value.is_empty()
+                        })
+                })
+            })
+    };
+    format!(
+        "primary_auth={};first_party_auth={};third_party_auth={}",
+        if cookie_value_present("SAPISID") { "present" } else { "absent" },
+        if cookie_value_present("__Secure-1PAPISID") { "present" } else { "absent" },
+        if cookie_value_present("__Secure-3PAPISID") { "present" } else { "absent" },
+    )
+}
+
 // Report only whether the important YouTube request headers are present.
- // Credential and cookie values are never copied into the event stream.
+// Credential and cookie values are never copied into the event stream.
 fn youtube_search_header_profile(
     headers: &HeaderMap,
     cookie_header: Option<&HeaderValue>,
@@ -4020,11 +4069,10 @@ mod tests {
                 b"user-session 1700000000 three-secret https://www.youtube.com"
             )
         );
-        assert!(auth.contains(&format!("SAPISIDHASH 1700000000_{digest}_u")));
-        assert!(auth.contains(&format!("SAPISID1PHASH 1700000000_{digest_one}_u")));
-        assert!(auth.contains(&format!("SAPISID3PHASH 1700000000_{digest_three}_u")));
+        assert!(auth.contains(&format!("SAPISIDHASH 1700000000_{digest}_uuser-session")));
+        assert!(auth.contains(&format!("SAPISID1PHASH 1700000000_{digest_one}_uuser-session")));
+        assert!(auth.contains(&format!("SAPISID3PHASH 1700000000_{digest_three}_uuser-session")));
         assert!(!auth.contains("primary-secret"));
-        assert!(!auth.contains("user-session"));
     }
 
     #[test]
@@ -4041,6 +4089,35 @@ mod tests {
         assert!(auth.contains("SAPISID3PHASH 1700000000_"));
         assert!(!auth.contains("_u"));
         assert!(!auth.contains("three-secret"));
+    }
+
+    #[test]
+    fn youtube_search_cookie_profile_reports_presence_without_cookie_values() {
+        let cookies = HeaderValue::from_static(
+            "SAPISID=private; __Secure-3PAPISID=private3; SID=session"
+        );
+        let profile = youtube_search_cookie_profile(Some(&cookies));
+        assert!(profile.contains("primary_auth=present"));
+        assert!(profile.contains("first_party_auth=absent"));
+        assert!(profile.contains("third_party_auth=present"));
+        assert!(!profile.contains("private"));
+        assert!(!profile.contains("SID"));
+    }
+
+    #[test]
+    fn youtube_origin_validation_accepts_www_youtube_only_over_https() {
+        assert_eq!(
+            normalized_youtube_origin(&HeaderValue::from_static("https://www.youtube.com")),
+            Some("https://www.youtube.com".to_owned())
+        );
+        for invalid in [
+            "http://www.youtube.com",
+            "https://youtube.example",
+            "https://www.youtube.com.attacker.example",
+            "https://www.youtube.com/path",
+        ] {
+            assert!(normalized_youtube_origin(&HeaderValue::from_str(invalid).unwrap()).is_none());
+        }
     }
 
     #[test]
