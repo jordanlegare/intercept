@@ -1692,10 +1692,12 @@ async fn ajax_passthrough(
     let mut upstream_url = upstream_url;
     let upstream_path = upstream_url.path().to_owned();
     let initial_host = upstream_url.host_str().unwrap_or_default().to_owned();
-    let is_youtube_search = upstream_path == "/youtubei/v1/search"
+    let is_youtube_inner_tube = (upstream_path == "/youtubei/v1/search"
+        || upstream_path == "/youtubei/v1/player")
         && (initial_host.eq_ignore_ascii_case("youtube.com")
             || initial_host.to_ascii_lowercase().ends_with(".youtube.com"));
-    if is_youtube_search && initial_host.eq_ignore_ascii_case("youtube.com") {
+    let is_youtube_search = upstream_path == "/youtubei/v1/search" && is_youtube_inner_tube;
+    if is_youtube_inner_tube && initial_host.eq_ignore_ascii_case("youtube.com") {
         let x_origin_host = request_headers.get("x-origin")
             .and_then(normalized_youtube_origin)
             .and_then(|origin| Url::parse(&origin).ok())
@@ -1707,13 +1709,13 @@ async fn ajax_passthrough(
     let upstream_host = upstream_url.host_str().unwrap_or_default().to_owned();
     let range_requested = request_headers.contains_key(header::RANGE);
     let mut request_headers = request_headers;
-    let youtube_cookie_header = if is_youtube_search {
+    let youtube_cookie_header = if is_youtube_inner_tube {
         session.cookie_jar.request_cookie_header(&upstream_url)
     } else {
         None
     };
     let mut youtube_auth_source = "not_applicable";
-    if is_youtube_search {
+    if is_youtube_inner_tube {
         let data_sync_id = request_headers.get("x-intercept-youtube-datasync-id")
             .and_then(|value| value.to_str().ok())
             .filter(|value| value.len() <= 512)
@@ -1802,7 +1804,7 @@ async fn ajax_passthrough(
             continue;
         }
         if name == header::ORIGIN {
-            let origin = if is_youtube_search {
+            let origin = if is_youtube_inner_tube {
                 request_headers.get("x-origin")
                     .and_then(normalized_youtube_origin)
                     .or_else(|| Some(upstream_url.origin().ascii_serialization()))
@@ -1817,7 +1819,7 @@ async fn ajax_passthrough(
                 builder = builder.header(name.clone(), referer);
             }
         } else if name.as_str() == "sec-fetch-site" {
-            let fetch_site = if is_youtube_search || upstream_url.origin() == session.base_url.origin() {
+            let fetch_site = if is_youtube_inner_tube || upstream_url.origin() == session.base_url.origin() {
                 "same-origin"
             } else {
                 "cross-site"
