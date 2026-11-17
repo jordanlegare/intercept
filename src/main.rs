@@ -1767,12 +1767,13 @@ async fn ajax_passthrough(
             .map(|value| clean_field(value.to_owned(), 80))
             .unwrap_or_else(|| "absent".to_owned());
         let body_encoding_out = request_body_encoding_diagnostic(&request_headers, &request_body);
+        let json_shape_out = youtube_search_json_shape_diagnostic(&request_body);
         push_event(
             session,
             "ajax_upstream_dispatch",
             format!("{upstream_host}{upstream_path}"),
             format!(
-                "rid={request_id} method={request_method} body_bytes={} body_encoding={body_encoding_out} content_encoding={content_encoding_out} content_type={content_type_out}",
+                "rid={request_id} method={request_method} body_bytes={} body_encoding={body_encoding_out} content_encoding={content_encoding_out} content_type={content_type_out} json_shape={json_shape_out}",
                 request_body.len()
             ),
         ).await;
@@ -3439,6 +3440,47 @@ fn request_body_encoding_diagnostic(headers: &HeaderMap, body: &[u8]) -> &'stati
     }
 }
 
+// Describe only JSON object keys at the upstream boundary. Payload values can
+// contain query text and session-specific identifiers, so they are never
+// copied into the event stream.
+fn youtube_search_json_shape_diagnostic(body: &[u8]) -> String {
+    let value = match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(value) => value,
+        Err(_) => return "json=invalid".to_owned(),
+    };
+    let Some(object) = value.as_object() else {
+        return "json=not_object".to_owned();
+    };
+    let key_list = |value: Option<&serde_json::Value>, limit: usize| -> String {
+        value
+            .and_then(serde_json::Value::as_object)
+            .map(|object| object.keys().take(limit).cloned().collect::<Vec<_>>().join(","))
+            .unwrap_or_else(|| "absent".to_owned())
+    };
+    let top_keys = object.keys().take(10).cloned().collect::<Vec<_>>().join(",");
+    let context_keys = key_list(object.get("context"), 8);
+    let client_keys = object.get("context")
+        .and_then(|value| value.get("client"))
+        .and_then(serde_json::Value::as_object)
+        .map(|client| client.keys().take(10).cloned().collect::<Vec<_>>().join(","))
+        .unwrap_or_else(|| "absent".to_owned());
+    let optional_fields = format!(
+        "user={},click={},ads={},stats={},inline={}",
+        object.contains_key("user"),
+        object.contains_key("clickTracking"),
+        object.contains_key("adSignalsInfo"),
+        object.contains_key("webSearchboxStatsUrl"),
+        object.contains_key("inlineSettingStatus"),
+    );
+    let mut summary = format!(
+        "top={top_keys};ctx={context_keys};client={client_keys};{optional_fields}"
+    );
+    if summary.len() > 260 {
+        summary.truncate(260);
+    }
+    summary
+}
+
 fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -> String {
     let header_text = |name: &str, limit: usize| {
         headers.get(name)
@@ -3701,6 +3743,36 @@ mod tests {
             cookie_jar: Arc::new(SessionCookieJar::default()),
             cookie_tokens: StdMutex::new(HashMap::new()),
         }
+    }
+
+    #[test]
+    fn youtube_search_json_shape_reports_keys_without_payload_values() {
+        let body = br#"{
+            "context":{"client":{"hl":"en","visitorData":"visitor-secret"}},
+            "request":{},
+            "query":"private search phrase",
+            "clickTracking":{"clickTrackingParams":"tracking-secret"},
+            "adSignalsInfo":{"params":[{"value":"ad-secret"}]}
+        }"#;
+        let detail = youtube_search_json_shape_diagnostic(body);
+        assert!(detail.contains("top="));
+        assert!(detail.contains("context"));
+        assert!(detail.contains("client"));
+        assert!(detail.contains("user=false"));
+        assert!(detail.contains("click=true"));
+        assert!(detail.contains("ads=true"));
+        assert!(detail.contains("stats=false"));
+        assert!(detail.contains("inline=false"));
+        assert!(!detail.contains("private search phrase"));
+        assert!(!detail.contains("visitor-secret"));
+        assert!(!detail.contains("tracking-secret"));
+        assert!(!detail.contains("ad-secret"));
+    }
+
+    #[test]
+    fn youtube_search_json_shape_marks_invalid_and_non_object_bodies() {
+        assert_eq!(youtube_search_json_shape_diagnostic(b"{"), "json=invalid");
+        assert_eq!(youtube_search_json_shape_diagnostic(b"[]"), "json=not_object");
     }
 
     #[test]
