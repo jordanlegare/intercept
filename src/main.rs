@@ -189,6 +189,7 @@ impl UpstreamClientCache {
         }
 
         if capacity == 0 {
+            self.entries.clear();
             return client;
         }
 
@@ -213,7 +214,6 @@ impl UpstreamClientCache {
         self.entries.clear();
     }
 
-    #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -4878,8 +4878,8 @@ mod tests {
             0,
         );
 
-        assert_eq!(cache.len(), 1);
-        assert!(cache.contains_origin("https://cdn-a.example"));
+        assert_eq!(cache.len(), 0);
+        assert!(!cache.contains_origin("https://cdn-a.example"));
         assert!(!cache.contains_origin("https://cdn-b.example"));
     }
 
@@ -5670,7 +5670,7 @@ mod tests {
         let session = Session {
             id: "session1234567890abcdef1234567890".to_owned(),
             base_url: Url::parse("https://example.com/start").unwrap(),
-            clients: Mutex::new(HashMap::new()),
+            clients: Mutex::new(UpstreamClientCache::default()),
             cache: Mutex::new(ResourceCache::default()),
             gate: Mutex::new(GateState::Waiting),
             gate_tx: watch::channel(GateState::Waiting).0,
