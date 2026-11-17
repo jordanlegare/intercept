@@ -1871,6 +1871,18 @@ fn ump_part_name(part_type: u32) -> String {
     name.to_owned()
 }
 
+fn is_youtube_stats_endpoint(url: &Url) -> bool {
+    let is_youtube_host = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("youtube.com")
+            || host.to_ascii_lowercase().ends_with(".youtube.com")
+    });
+    is_youtube_host
+        && matches!(
+            url.path(),
+            "/api/stats/qoe" | "/api/stats/watchtime" | "/api/stats/playback"
+        )
+}
+
 fn is_youtube_sabr_request(url: &Url) -> bool {
     url.path() == "/videoplayback"
         && url.host_str().is_some_and(|host| {
@@ -1923,16 +1935,7 @@ async fn ajax_passthrough(
     let is_youtube_get_watch = upstream_path == "/youtubei/v1/get_watch" && is_youtube_inner_tube;
     let is_youtube_next = upstream_path == "/youtubei/v1/next" && is_youtube_inner_tube;
     let is_youtube_feedback = upstream_path == "/youtubei/v1/feedback" && is_youtube_inner_tube;
-    let is_youtube_qoe = upstream_path == "/api/stats/qoe"
-        && (initial_host.eq_ignore_ascii_case("youtube.com")
-            || initial_host.to_ascii_lowercase().ends_with(".youtube.com"));
-    // YouTube includes session_token in the QoE URL query. Mirror that value
-    // into the text POST body as a form-encoded field without logging it.
-    let (request_body, qoe_session_token_body_status) = if is_youtube_qoe {
-        append_qoe_session_token_to_body(&request_body, &upstream_url)
-    } else {
-        (request_body, "not_qoe")
-    };
+    let is_youtube_stats = is_youtube_stats_endpoint(&upstream_url);
     let is_youtube_log_event = upstream_path == "/youtubei/v1/log_event"
         && (initial_host.eq_ignore_ascii_case("youtube.com")
             || initial_host.to_ascii_lowercase().ends_with(".youtube.com"));
@@ -2037,8 +2040,8 @@ async fn ajax_passthrough(
         method,
         reqwest::Method::POST | reqwest::Method::PUT | reqwest::Method::PATCH
     );
-    // Resolve transformed headers once, then use these exact values both for
-    // forwarding and the QoE outbound profile.
+    // Resolve proxy origin/referrer virtualization once, then use the effective
+    // values for forwarding and the YouTube stats diagnostics.
     let outbound_origin = request_headers.get(header::ORIGIN).and_then(|_| {
         let origin = if is_youtube_inner_tube {
             request_headers.get("x-origin")
@@ -2054,7 +2057,7 @@ async fn ajax_passthrough(
     let outbound_fetch_site = outbound_fetch_site_header(
         request_headers.contains_key("sec-fetch-site"),
         is_youtube_inner_tube,
-        is_youtube_qoe,
+        is_youtube_stats,
         upstream_url.origin() == session.base_url.origin(),
     );
 
@@ -2088,14 +2091,14 @@ async fn ajax_passthrough(
     if request_body_len > 0 || has_body_framing {
         builder = builder.header(header::CONTENT_LENGTH, request_body_len);
     }
-    if is_youtube_qoe {
+    if is_youtube_stats {
         let cookie_header = session.cookie_jar.request_cookie_header(&upstream_url);
         let cookie_scope_profile = session.cookie_jar.request_cookie_scope_profile(&upstream_url);
         push_event(
             &session,
-            "youtube_qoe_request_profile",
+            "youtube_stats_request_profile",
             format!("{upstream_host}{upstream_path}"),
-            format!("rid={request_id} {}", youtube_qoe_request_diagnostics(
+            format!("rid={request_id} {}", youtube_stats_request_diagnostics(
                 &request_method,
                 &request_headers,
                 &request_body,
@@ -2103,15 +2106,9 @@ async fn ajax_passthrough(
         ).await;
         push_event(
             &session,
-            "youtube_qoe_session_token_body",
+            "youtube_stats_outbound_header_profile",
             format!("{upstream_host}{upstream_path}"),
-            format!("rid={request_id} status={qoe_session_token_body_status}"),
-        ).await;
-        push_event(
-            &session,
-            "youtube_qoe_outbound_header_profile",
-            format!("{upstream_host}{upstream_path}"),
-            format!("rid={request_id} {} {}", youtube_qoe_outbound_header_diagnostics(
+            format!("rid={request_id} {} {}", youtube_stats_outbound_header_diagnostics(
                 &request_headers,
                 outbound_origin.as_ref(),
                 outbound_referer.as_ref(),
@@ -2475,7 +2472,7 @@ async fn ajax_passthrough(
         ).await;
     }
 
-    if is_youtube_qoe {
+    if is_youtube_stats {
         let response_content_type = upstream_headers.get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(|value| clean_field(value.to_owned(), 96))
@@ -2490,7 +2487,7 @@ async fn ajax_passthrough(
             .unwrap_or_else(|| "absent".to_owned());
         push_event(
             &session,
-            "youtube_qoe_upstream_response",
+            "youtube_stats_upstream_response",
             format!("{upstream_host}{upstream_path}"),
             format!(
                 "rid={request_id} status={} elapsed_ms={upstream_elapsed_ms} content_type={response_content_type} content_length={response_content_length} server={response_server}",
@@ -4392,44 +4389,7 @@ fn youtube_search_json_shape_diagnostic(body: &[u8]) -> String {
     summary
 }
 
-fn append_qoe_session_token_to_body(
-    body: &bytes::Bytes,
-    upstream_url: &Url,
-) -> (bytes::Bytes, &'static str) {
-    let Some((_, session_token)) = upstream_url
-        .query_pairs()
-        .find(|(name, value)| name == "session_token" && !value.is_empty())
-    else {
-        return (body.clone(), "url_token_absent");
-    };
-
-    let Ok(body_text) = std::str::from_utf8(body) else {
-        return (body.clone(), "body_not_utf8");
-    };
-    let already_present = body_text
-        .split(['&', '?', '\n', '\r'])
-        .filter_map(|field| field.split_once('='))
-        .any(|(name, _)| name == "session_token");
-    if already_present {
-        return (body.clone(), "already_in_body");
-    }
-
-    let encoded_field = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("session_token", &session_token)
-        .finish();
-    let separator = if body.is_empty() || body_text.ends_with('&') {
-        ""
-    } else {
-        "&"
-    };
-    let mut augmented = Vec::with_capacity(body.len() + separator.len() + encoded_field.len());
-    augmented.extend_from_slice(body);
-    augmented.extend_from_slice(separator.as_bytes());
-    augmented.extend_from_slice(encoded_field.as_bytes());
-    (bytes::Bytes::from(augmented), "appended")
-}
-
-fn youtube_qoe_request_diagnostics(
+fn youtube_stats_request_diagnostics(
     method: &Method,
     headers: &HeaderMap,
     body: &[u8],
@@ -4462,7 +4422,7 @@ fn youtube_qoe_request_diagnostics(
 fn outbound_fetch_site_header(
     has_fetch_site: bool,
     is_youtube_inner_tube: bool,
-    is_youtube_qoe: bool,
+    is_youtube_stats: bool,
     upstream_matches_session_origin: bool,
 ) -> Option<&'static str> {
     if !has_fetch_site {
@@ -4472,14 +4432,14 @@ fn outbound_fetch_site_header(
     // These requests originate from YouTube's own page context. The proxy's
     // localhost session origin must not make a first-party upstream request
     // appear cross-site to YouTube.
-    Some(if is_youtube_inner_tube || is_youtube_qoe || upstream_matches_session_origin {
+    Some(if is_youtube_inner_tube || is_youtube_stats || upstream_matches_session_origin {
         "same-origin"
     } else {
         "cross-site"
     })
 }
 
-fn youtube_qoe_outbound_header_diagnostics(
+fn youtube_stats_outbound_header_diagnostics(
     headers: &HeaderMap,
     origin: Option<&HeaderValue>,
     referer: Option<&HeaderValue>,
@@ -4883,45 +4843,20 @@ mod tests {
     }
 
     #[test]
-    fn qoe_session_token_is_copied_from_url_into_text_body() {
-        let url = Url::parse(
-            "https://www.youtube.com/api/stats/qoe?fmt=397&session_token=abc%2B123%3D&el=detailpage"
-        ).unwrap();
-        let body = bytes::Bytes::from_static(b"existing=qoe-data");
-        let (updated, status) = append_qoe_session_token_to_body(&body, &url);
-        assert_eq!(status, "appended");
-        assert_eq!(
-            std::str::from_utf8(&updated).unwrap(),
-            "existing=qoe-data&session_token=abc%2B123%3D"
-        );
-        assert_eq!(body.as_ref(), b"existing=qoe-data");
-    }
+    fn youtube_stats_endpoint_classifier_matches_only_the_three_first_party_stats_paths() {
+        for path in ["/api/stats/qoe", "/api/stats/watchtime", "/api/stats/playback"] {
+            let url = Url::parse(&format!("https://www.youtube.com{path}?fmt=397")).unwrap();
+            assert!(is_youtube_stats_endpoint(&url), "{path} should be classified as YouTube stats");
+        }
 
-    #[test]
-    fn qoe_session_token_is_not_duplicated_or_fabricated() {
-        let url = Url::parse(
-            "https://www.youtube.com/api/stats/qoe?session_token=secret"
-        ).unwrap();
-        let existing = bytes::Bytes::from_static(b"session_token=already-there&event=x");
-        let (same, status) = append_qoe_session_token_to_body(&existing, &url);
-        assert_eq!(status, "already_in_body");
-        assert_eq!(same, existing);
-
-        let no_token_url = Url::parse("https://www.youtube.com/api/stats/qoe?fmt=397").unwrap();
-        let (unchanged, status) = append_qoe_session_token_to_body(&existing, &no_token_url);
-        assert_eq!(status, "url_token_absent");
-        assert_eq!(unchanged, existing);
-    }
-
-    #[test]
-    fn qoe_session_token_is_not_appended_to_non_utf8_body() {
-        let url = Url::parse(
-            "https://www.youtube.com/api/stats/qoe?session_token=secret"
-        ).unwrap();
-        let body = bytes::Bytes::from_static(&[0xff, 0x00]);
-        let (same, status) = append_qoe_session_token_to_body(&body, &url);
-        assert_eq!(status, "body_not_utf8");
-        assert_eq!(same, body);
+        for url in [
+            "https://googlevideo.com/api/stats/qoe",
+            "https://www.youtube.com/api/stats/atr",
+            "https://www.youtube.com/api/stats/qoe/extra",
+            "https://example.com/api/stats/watchtime",
+        ] {
+            assert!(!is_youtube_stats_endpoint(&Url::parse(url).unwrap()), "{url} must not be classified as YouTube stats");
+        }
     }
 
     #[test]
@@ -4973,12 +4908,16 @@ mod tests {
     }
 
     #[test]
-    fn youtube_qoe_preserves_first_party_fetch_site_classification() {
-        assert_eq!(
-            outbound_fetch_site_header(true, false, true, false),
-            Some("same-origin"),
-            "YouTube QoE must remain same-origin despite the localhost proxy origin"
-        );
+    fn youtube_stats_preserve_first_party_fetch_site_classification() {
+        for path in ["/api/stats/qoe", "/api/stats/watchtime", "/api/stats/playback"] {
+            let url = Url::parse(&format!("https://www.youtube.com{path}")).unwrap();
+            assert!(is_youtube_stats_endpoint(&url));
+            assert_eq!(
+                outbound_fetch_site_header(true, false, is_youtube_stats_endpoint(&url), false),
+                Some("same-origin"),
+                "{path} must remain same-origin despite the localhost proxy origin"
+            );
+        }
     }
 
     #[test]
@@ -5245,13 +5184,13 @@ mod tests {
     }
 
     #[test]
-    fn youtube_qoe_request_profile_reports_body_framing_without_logging_payload() {
+    fn youtube_stats_request_profile_reports_body_framing_without_logging_payload() {
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain;charset=UTF-8"));
         headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("18"));
         headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("identity"));
         let body = b"private-qoe-payload";
-        let detail = youtube_qoe_request_diagnostics(&Method::POST, &headers, body);
+        let detail = youtube_stats_request_diagnostics(&Method::POST, &headers, body);
 
         assert!(detail.contains("method=POST"));
         assert!(detail.contains("bytes=19"));
@@ -5264,7 +5203,7 @@ mod tests {
     }
 
     #[test]
-    fn youtube_qoe_outbound_profile_reports_effective_headers_without_values() {
+    fn youtube_stats_outbound_profile_reports_effective_headers_without_values() {
         let mut headers = HeaderMap::new();
         headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
         headers.insert("sec-fetch-mode", HeaderValue::from_static("no-cors"));
@@ -5273,7 +5212,7 @@ mod tests {
         let origin = HeaderValue::from_static("https://www.youtube.com");
         let referer = HeaderValue::from_static("https://www.youtube.com/watch?v=private-video");
         let cookie_header = HeaderValue::from_static("SID=private-cookie");
-        let detail = youtube_qoe_outbound_header_diagnostics(
+        let detail = youtube_stats_outbound_header_diagnostics(
             &headers,
             Some(&origin),
             Some(&referer),
@@ -5295,9 +5234,9 @@ mod tests {
     }
 
     #[test]
-    fn youtube_qoe_outbound_profile_marks_default_user_agent_and_missing_headers() {
+    fn youtube_stats_outbound_profile_marks_default_user_agent_and_missing_headers() {
         let headers = HeaderMap::new();
-        let detail = youtube_qoe_outbound_header_diagnostics(&headers, None, None, None, None);
+        let detail = youtube_stats_outbound_header_diagnostics(&headers, None, None, None, None);
 
         assert!(detail.contains("origin=absent"));
         assert!(detail.contains("referer=absent"));
