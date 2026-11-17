@@ -1833,14 +1833,14 @@ async fn ajax_passthrough(
         request_headers.remove("x-intercept-youtube-datasync-id");
     }
     let client = tokio::select! {
-        _ = wait_for_session_termination(session) => {
+        _ = wait_for_session_termination(&session) => {
             return plain(StatusCode::GONE, "Session terminated");
         }
-        result = client_for(session, &upstream_url) => match result {
+        result = client_for(&session, &upstream_url) => match result {
             Ok(client) => client,
             Err((status, message)) => {
                 push_event(
-                    session,
+            &session,
                     "ajax_error",
                     format!("{upstream_host}{upstream_path}"),
                     format!(
@@ -1917,7 +1917,7 @@ async fn ajax_passthrough(
         let cookie_header = session.cookie_jar.request_cookie_header(&upstream_url);
         let cookie_scope_profile = session.cookie_jar.request_cookie_scope_profile(&upstream_url);
         push_event(
-            session,
+            &session,
             "youtube_qoe_request_profile",
             format!("{upstream_host}{upstream_path}"),
             format!("rid={request_id} {}", youtube_qoe_request_diagnostics(
@@ -1927,13 +1927,13 @@ async fn ajax_passthrough(
             )),
         ).await;
         push_event(
-            session,
+            &session,
             "youtube_qoe_session_token_body",
             format!("{upstream_host}{upstream_path}"),
             format!("rid={request_id} status={qoe_session_token_body_status}"),
         ).await;
         push_event(
-            session,
+            &session,
             "youtube_qoe_outbound_header_profile",
             format!("{upstream_host}{upstream_path}"),
             format!("rid={request_id} {} {}", youtube_qoe_outbound_header_diagnostics(
@@ -1958,7 +1958,7 @@ async fn ajax_passthrough(
         let body_encoding_out = request_body_encoding_diagnostic(&request_headers, &request_body);
         let json_shape_out = youtube_search_json_shape_diagnostic(&request_body);
         push_event(
-            session,
+            &session,
             "youtube_player_upstream_dispatch",
             format!("{upstream_host}{upstream_path}"),
             format!(
@@ -1967,7 +1967,7 @@ async fn ajax_passthrough(
             ),
         ).await;
         push_event(
-            session,
+            &session,
             "youtube_player_cookie_profile",
             format!("{upstream_host}{upstream_path}"),
             format!(
@@ -1981,7 +1981,7 @@ async fn ajax_passthrough(
             .and_then(|value| value.host_str().map(str::to_owned))
             .unwrap_or_else(|| upstream_host.clone());
         push_event(
-            session,
+            &session,
             "youtube_player_header_profile",
             format!("{upstream_host}{upstream_path}"),
             format!(
@@ -2008,7 +2008,7 @@ async fn ajax_passthrough(
         let body_encoding_out = request_body_encoding_diagnostic(&request_headers, &request_body);
         let json_shape_out = youtube_search_json_shape_diagnostic(&request_body);
         push_event(
-            session,
+            &session,
             "youtube_get_watch_upstream_dispatch",
             format!("{upstream_host}{upstream_path}"),
             format!(
@@ -2017,7 +2017,7 @@ async fn ajax_passthrough(
             ),
         ).await;
         push_event(
-            session,
+            &session,
             "youtube_get_watch_cookie_profile",
             format!("{upstream_host}{upstream_path}"),
             format!(
@@ -2031,7 +2031,7 @@ async fn ajax_passthrough(
             .and_then(|value| value.host_str().map(str::to_owned))
             .unwrap_or_else(|| upstream_host.clone());
         push_event(
-            session,
+            &session,
             "youtube_get_watch_header_profile",
             format!("{upstream_host}{upstream_path}"),
             format!(
@@ -2062,7 +2062,7 @@ async fn ajax_passthrough(
         let body_encoding_out = request_body_encoding_diagnostic(&request_headers, &request_body);
         let json_shape_out = youtube_search_json_shape_diagnostic(&request_body);
         push_event(
-            session,
+            &session,
             if label == "next" { "youtube_next_upstream_dispatch" } else { "youtube_feedback_upstream_dispatch" },
             format!("{upstream_host}{endpoint}"),
             format!(
@@ -2071,7 +2071,7 @@ async fn ajax_passthrough(
             ),
         ).await;
         push_event(
-            session,
+            &session,
             if label == "next" { "youtube_next_cookie_profile" } else { "youtube_feedback_cookie_profile" },
             format!("{upstream_host}{endpoint}"),
             format!(
@@ -2085,7 +2085,7 @@ async fn ajax_passthrough(
             .and_then(|value| value.host_str().map(str::to_owned))
             .unwrap_or_else(|| upstream_host.clone());
         push_event(
-            session,
+            &session,
             if label == "next" { "youtube_next_header_profile" } else { "youtube_feedback_header_profile" },
             format!("{upstream_host}{endpoint}"),
             format!(
@@ -2112,7 +2112,7 @@ async fn ajax_passthrough(
         let body_encoding_out = request_body_encoding_diagnostic(&request_headers, &request_body);
         let json_shape_out = youtube_search_json_shape_diagnostic(&request_body);
         push_event(
-            session,
+            &session,
             "ajax_upstream_dispatch",
             format!("{upstream_host}{upstream_path}"),
             format!(
@@ -2140,7 +2140,7 @@ async fn ajax_passthrough(
             "cross-site"
         };
         push_event(
-            session,
+            &session,
             "youtube_search_cookie_profile",
             format!("{upstream_host}{upstream_path}"),
             format!(
@@ -2149,7 +2149,7 @@ async fn ajax_passthrough(
             ),
         ).await;
         push_event(
-            session,
+            &session,
             "youtube_search_header_profile",
             format!("{upstream_host}{upstream_path}"),
             format!(
@@ -2166,7 +2166,7 @@ async fn ajax_passthrough(
 
     if is_youtube_log_event {
         push_event(
-            session,
+            &session,
             "youtube_log_event_upstream_dispatch",
             format!("{upstream_host}{upstream_path}"),
             format!(
@@ -2199,7 +2199,7 @@ async fn ajax_passthrough(
             .map(|value| clean_field(value.to_owned(), 100))
             .unwrap_or_else(|| "absent".to_owned());
         push_event(
-            session,
+            &session,
             "youtube_sabr_upstream_dispatch",
             format!("{upstream_host}{upstream_path}"),
             format!(
@@ -2211,7 +2211,7 @@ async fn ajax_passthrough(
     }
 
     let upstream = tokio::select! {
-        _ = wait_for_session_termination(session) => {
+        _ = wait_for_session_termination(&session) => {
             return plain(StatusCode::GONE, "Session terminated");
         }
         result = builder
@@ -2248,7 +2248,7 @@ async fn ajax_passthrough(
                 "AJAX upstream request failed"
             );
             push_event(
-                session,
+            &session,
                 "ajax_error",
                 format!("{upstream_host}{upstream_path}"),
                 format!(
@@ -2290,7 +2290,7 @@ async fn ajax_passthrough(
             .map(|value| clean_field(value.to_owned(), 64))
             .unwrap_or_else(|| "absent".to_owned());
         push_event(
-            session,
+            &session,
             "youtube_sabr_upstream_response",
             format!("{upstream_host}{upstream_path}"),
             format!(
@@ -2314,7 +2314,7 @@ async fn ajax_passthrough(
             .map(|value| clean_field(value.to_owned(), 64))
             .unwrap_or_else(|| "absent".to_owned());
         push_event(
-            session,
+            &session,
             "youtube_qoe_upstream_response",
             format!("{upstream_host}{upstream_path}"),
             format!(
