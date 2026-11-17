@@ -1766,10 +1766,35 @@ async fn wait_for_authorization(session: &Session) -> bool {
     }
 }
 
+const MAX_UMP_METADATA_PAYLOAD_BYTES: usize = 512;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct StreamProtectionStatusDiagnostic {
+    status: Option<i32>,
+    max_retries: Option<i32>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct NextRequestPolicyDiagnostic {
+    target_audio_readahead_ms: Option<i32>,
+    target_video_readahead_ms: Option<i32>,
+    max_time_since_last_request_ms: Option<i32>,
+    backoff_time_ms: Option<i32>,
+    min_audio_readahead_ms: Option<i32>,
+    min_video_readahead_ms: Option<i32>,
+}
+
 #[derive(Default)]
 struct UmpStreamDiagnostics {
     buffer: Vec<u8>,
     payload_remaining: usize,
+    current_metadata_part: Option<u32>,
+    current_metadata_payload: Option<Vec<u8>>,
+    current_metadata_truncated: bool,
+    latest_stream_protection_status: Option<StreamProtectionStatusDiagnostic>,
+    latest_next_request_policy: Option<NextRequestPolicyDiagnostic>,
+    stream_protection_status_decode_errors: usize,
+    next_request_policy_decode_errors: usize,
     part_counts: std::collections::BTreeMap<u32, usize>,
     part_payload_bytes: std::collections::BTreeMap<u32, u64>,
     total_parts: usize,
@@ -1778,8 +1803,8 @@ struct UmpStreamDiagnostics {
 }
 
 impl UmpStreamDiagnostics {
-    // UMP frames contain prefix-encoded part type and payload length, then opaque payload bytes.
-    // This parser counts framing metadata only; it never decodes or logs payload contents.
+    // Decode only bounded, non-secret scalar fields from the two policy parts.
+    // Media bytes, playback cookies, video IDs, and opaque tokens are never retained.
     fn feed(&mut self, chunk: &[u8]) {
         if self.malformed {
             return;
@@ -1788,11 +1813,21 @@ impl UmpStreamDiagnostics {
         loop {
             if self.payload_remaining > 0 {
                 let consumed = self.payload_remaining.min(self.buffer.len());
+                if let Some(payload) = self.current_metadata_payload.as_mut() {
+                    let remaining_capacity =
+                        MAX_UMP_METADATA_PAYLOAD_BYTES.saturating_sub(payload.len());
+                    let captured = consumed.min(remaining_capacity);
+                    payload.extend_from_slice(&self.buffer[..captured]);
+                    if captured < consumed {
+                        self.current_metadata_truncated = true;
+                    }
+                }
                 self.buffer.drain(..consumed);
                 self.payload_remaining -= consumed;
                 if self.payload_remaining > 0 {
                     break;
                 }
+                self.finish_metadata_part();
                 continue;
             }
             let Some((part_type, type_len)) = decode_ump_varint(&self.buffer) else {
@@ -1814,6 +1849,58 @@ impl UmpStreamDiagnostics {
             self.total_parts += 1;
             self.total_payload_bytes = self.total_payload_bytes.saturating_add(payload_len as u64);
             self.payload_remaining = payload_len;
+
+            let is_metadata_part = matches!(part_type, 35 | 58);
+            self.current_metadata_part = is_metadata_part.then_some(part_type);
+            self.current_metadata_truncated =
+                is_metadata_part && payload_len > MAX_UMP_METADATA_PAYLOAD_BYTES;
+            self.current_metadata_payload = if is_metadata_part
+                && payload_len <= MAX_UMP_METADATA_PAYLOAD_BYTES
+            {
+                Some(Vec::with_capacity(payload_len))
+            } else {
+                None
+            };
+            if self.payload_remaining == 0 {
+                self.finish_metadata_part();
+            }
+        }
+    }
+
+    fn finish_metadata_part(&mut self) {
+        let Some(part_type) = self.current_metadata_part.take() else {
+            self.current_metadata_payload = None;
+            self.current_metadata_truncated = false;
+            return;
+        };
+        let truncated = std::mem::take(&mut self.current_metadata_truncated);
+        let Some(payload) = self.current_metadata_payload.take() else {
+            self.record_metadata_decode_error(part_type);
+            return;
+        };
+        if truncated {
+            self.record_metadata_decode_error(part_type);
+            return;
+        }
+
+        match part_type {
+            58 => match decode_stream_protection_status(&payload) {
+                Some(decoded) => self.latest_stream_protection_status = Some(decoded),
+                None => self.record_metadata_decode_error(part_type),
+            },
+            35 => match decode_next_request_policy(&payload) {
+                Some(decoded) => self.latest_next_request_policy = Some(decoded),
+                None => self.record_metadata_decode_error(part_type),
+            },
+            _ => {}
+        }
+    }
+
+    fn record_metadata_decode_error(&mut self, part_type: u32) {
+        match part_type {
+            58 => self.stream_protection_status_decode_errors += 1,
+            35 => self.next_request_policy_decode_errors += 1,
+            _ => {}
         }
     }
 
@@ -1827,12 +1914,164 @@ impl UmpStreamDiagnostics {
         let frame_complete =
             !self.malformed && self.buffer.is_empty() && self.payload_remaining == 0;
         let media_payload_bytes = self.part_payload_bytes.get(&21).copied().unwrap_or_default();
+
+        let mut decoded_metadata = Vec::new();
+        if let Some(status) = self.latest_stream_protection_status {
+            decoded_metadata.push(format!(
+                "stream_protection_status=status:{},max_retries:{}",
+                diagnostic_i32(status.status),
+                diagnostic_i32(status.max_retries),
+            ));
+        }
+        if let Some(policy) = self.latest_next_request_policy {
+            decoded_metadata.push(format!(
+                "next_request_policy=target_audio_readahead_ms:{},target_video_readahead_ms:{},max_time_since_last_request_ms:{},backoff_time_ms:{},min_audio_readahead_ms:{},min_video_readahead_ms:{}",
+                diagnostic_i32(policy.target_audio_readahead_ms),
+                diagnostic_i32(policy.target_video_readahead_ms),
+                diagnostic_i32(policy.max_time_since_last_request_ms),
+                diagnostic_i32(policy.backoff_time_ms),
+                diagnostic_i32(policy.min_audio_readahead_ms),
+                diagnostic_i32(policy.min_video_readahead_ms),
+            ));
+        }
+        if self.stream_protection_status_decode_errors > 0
+            || self.next_request_policy_decode_errors > 0
+        {
+            decoded_metadata.push(format!(
+                "metadata_decode_errors=sps:{},next_policy:{}",
+                self.stream_protection_status_decode_errors,
+                self.next_request_policy_decode_errors,
+            ));
+        }
+        let decoded_metadata = if decoded_metadata.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", decoded_metadata.join(" "))
+        };
+
         format!(
-            "ump_parts={} total_parts={} total_payload_bytes={} media_payload_bytes={} frame_complete={} partial_header_bytes={} payload_remaining={} malformed={}",
+            "ump_parts={} total_parts={} total_payload_bytes={} media_payload_bytes={} frame_complete={} partial_header_bytes={} payload_remaining={} malformed={}{}",
             parts, self.total_parts, self.total_payload_bytes, media_payload_bytes,
             frame_complete, self.buffer.len(), self.payload_remaining, self.malformed,
+            decoded_metadata,
         )
     }
+}
+
+fn diagnostic_i32(value: Option<i32>) -> String {
+    value.map(|number| number.to_string()).unwrap_or_else(|| "absent".to_owned())
+}
+
+fn read_protobuf_varint(input: &[u8], position: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    for index in 0..10 {
+        let byte = *input.get(*position)?;
+        *position += 1;
+        if index == 9 && byte > 1 {
+            return None;
+        }
+        value |= u64::from(byte & 0x7f) << (index * 7);
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+// Walk protobuf wire fields without copying length-delimited values. This lets
+// us validate and skip opaque cookie/token/string fields without exposing them.
+fn decode_protobuf_wire_fields(input: &[u8]) -> Option<Vec<(u32, u8, Option<u64>)>> {
+    let mut position = 0usize;
+    let mut fields = Vec::new();
+    while position < input.len() {
+        let tag = read_protobuf_varint(input, &mut position)?;
+        if tag == 0 {
+            return None;
+        }
+        let field_number = u32::try_from(tag >> 3).ok()?;
+        if field_number == 0 || field_number > 0x1fff_ffff {
+            return None;
+        }
+        let wire_type = (tag & 0x07) as u8;
+        let value = match wire_type {
+            0 => Some(read_protobuf_varint(input, &mut position)?),
+            1 => {
+                position = position.checked_add(8)?;
+                if position > input.len() {
+                    return None;
+                }
+                None
+            }
+            2 => {
+                let length = usize::try_from(read_protobuf_varint(input, &mut position)?).ok()?;
+                position = position.checked_add(length)?;
+                if position > input.len() {
+                    return None;
+                }
+                None
+            }
+            5 => {
+                position = position.checked_add(4)?;
+                if position > input.len() {
+                    return None;
+                }
+                None
+            }
+            _ => return None,
+        };
+        fields.push((field_number, wire_type, value));
+    }
+    Some(fields)
+}
+
+fn decode_stream_protection_status(
+    input: &[u8],
+) -> Option<StreamProtectionStatusDiagnostic> {
+    let mut decoded = StreamProtectionStatusDiagnostic::default();
+    for (field_number, wire_type, value) in decode_protobuf_wire_fields(input)? {
+        match field_number {
+            1 => {
+                if wire_type != 0 {
+                    return None;
+                }
+                decoded.status = Some(value? as i32);
+            }
+            2 => {
+                if wire_type != 0 {
+                    return None;
+                }
+                decoded.max_retries = Some(value? as i32);
+            }
+            _ => {}
+        }
+    }
+    Some(decoded)
+}
+
+fn decode_next_request_policy(input: &[u8]) -> Option<NextRequestPolicyDiagnostic> {
+    let mut decoded = NextRequestPolicyDiagnostic::default();
+    for (field_number, wire_type, value) in decode_protobuf_wire_fields(input)? {
+        match field_number {
+            1..=6 => {
+                if wire_type != 0 {
+                    return None;
+                }
+                let number = Some(value? as i32);
+                match field_number {
+                    1 => decoded.target_audio_readahead_ms = number,
+                    2 => decoded.target_video_readahead_ms = number,
+                    3 => decoded.max_time_since_last_request_ms = number,
+                    4 => decoded.backoff_time_ms = number,
+                    5 => decoded.min_audio_readahead_ms = number,
+                    6 => decoded.min_video_readahead_ms = number,
+                    _ => unreachable!(),
+                }
+            }
+            7 | 8 if wire_type != 2 => return None,
+            _ => {}
+        }
+    }
+    Some(decoded)
 }
 
 fn decode_ump_varint(input: &[u8]) -> Option<(u32, usize)> {
@@ -2609,6 +2848,34 @@ async fn ajax_passthrough(
         error_sampled_bytes,
         error_read_failed,
     );
+    if is_youtube_player {
+        let response_content_type = upstream_headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 96))
+            .unwrap_or_else(|| "absent".to_owned());
+        let response_content_length = upstream_headers.get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 24))
+            .unwrap_or_else(|| "absent".to_owned());
+        let response_server = upstream_headers.get(header::SERVER)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 64))
+            .unwrap_or_else(|| "absent".to_owned());
+        let error_preview = error_preview.as_deref()
+            .map(|value| format!(" error_preview={}", clean_field(value.to_owned(), 200)))
+            .unwrap_or_default();
+        push_event(
+            &session,
+            "youtube_player_upstream_response",
+            format!("{upstream_host}{upstream_path}"),
+            format!(
+                "rid={request_id} status={} elapsed_ms={upstream_elapsed_ms} content_type={response_content_type} content_length={response_content_length} server={response_server} body_state={error_body_state} body_captured_bytes={}{}",
+                status.as_u16(),
+                error_body_capture.len(),
+                error_preview,
+            ),
+        ).await;
+    }
     let mut response = Response::builder().status(status);
     let response_headers = response.headers_mut().expect("fresh response builder");
     response_headers.insert("origin-agent-cluster", HeaderValue::from_static("?1"));
@@ -6199,7 +6466,9 @@ mod tests {
 
 #[cfg(test)]
 mod ump_stream_diagnostics_tests {
-    use super::UmpStreamDiagnostics;
+    use super::{
+        decode_next_request_policy, decode_stream_protection_status, UmpStreamDiagnostics,
+    };
 
     #[test]
     fn parses_parts_across_arbitrary_chunk_boundaries() {
@@ -6214,6 +6483,46 @@ mod ump_stream_diagnostics_tests {
         assert!(summary.contains("media_payload_bytes=3"));
         assert!(summary.contains("frame_complete=true"));
         assert!(summary.contains("malformed=false"));
+    }
+
+    #[test]
+    fn decodes_stream_protection_status_and_optional_retry_count() {
+        let status_only = decode_stream_protection_status(&[0x08, 0x02]).unwrap();
+        assert_eq!(status_only.status, Some(2));
+        assert_eq!(status_only.max_retries, None);
+
+        let with_retries =
+            decode_stream_protection_status(&[0x08, 0x02, 0x10, 0x00]).unwrap();
+        assert_eq!(with_retries.status, Some(2));
+        assert_eq!(with_retries.max_retries, Some(0));
+    }
+
+    #[test]
+    fn decodes_next_request_policy_timing_fields_and_skips_opaque_fields() {
+        // target_audio_readahead_ms=100, backoff_time_ms=500,
+        // followed by length-delimited playbackCookie and videoId fields.
+        let policy = decode_next_request_policy(&[
+            0x08, 0x64, 0x20, 0xf4, 0x03,
+            0x3a, 0x02, 0xaa, 0xbb,
+            0x42, 0x03, b'v', b'i', b'd',
+        ]).unwrap();
+        assert_eq!(policy.target_audio_readahead_ms, Some(100));
+        assert_eq!(policy.backoff_time_ms, Some(500));
+        assert_eq!(policy.target_video_readahead_ms, None);
+    }
+
+    #[test]
+    fn includes_decoded_protection_and_policy_fields_in_ump_summary() {
+        let mut frame = vec![58, 4, 0x08, 0x02, 0x10, 0x00];
+        frame.extend_from_slice(&[35, 5, 0x08, 0x64, 0x20, 0xf4, 0x03]);
+        let mut diagnostics = UmpStreamDiagnostics::default();
+        diagnostics.feed(&frame[..4]);
+        diagnostics.feed(&frame[4..]);
+        let summary = diagnostics.summary();
+        assert!(summary.contains("stream_protection_status=status:2,max_retries:0"));
+        assert!(summary.contains("target_audio_readahead_ms:100"));
+        assert!(summary.contains("backoff_time_ms:500"));
+        assert!(summary.contains("frame_complete=true"));
     }
 
     #[test]
