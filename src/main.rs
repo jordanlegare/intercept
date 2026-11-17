@@ -4871,7 +4871,7 @@ fn rewrite_worker_javascript(
       let attestationSequence=0;
       function nextAttestationId(){{
         attestationSequence=(attestationSequence%999999)+1;
-        return Date.now().toString(36)+"-"+attestationSequence;
+        return Date.now().toString(36)+"-"+attestationSequence+"-"+Math.random().toString(36).slice(2,8);
       }}
       function attestationInfo(value){{
         try{{
