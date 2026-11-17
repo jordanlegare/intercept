@@ -729,6 +729,7 @@
       method,
       transport,
       startedAt: null,
+      headersReported: false,
       terminal: false
     };
   }
@@ -776,6 +777,23 @@
         + " operation=" + call.info.operation
         + " phase=dispatch method=" + call.method
         + " transport=" + call.transport
+    );
+  }
+
+  function recordYouTubeAttestationRpcHeaders(call, status, headers) {
+    if (!call || call.headersReported || call.terminal) return;
+    call.headersReported = true;
+    const elapsed = call.startedAt === null
+      ? "not_dispatched"
+      : String(Math.max(0, Math.round(performance.now() - call.startedAt)));
+    record(
+      "youtube_attestation_rpc",
+      call.info.target,
+      "rpc=" + call.id
+        + " operation=" + call.info.operation
+        + " phase=response_headers status=" + (Number(status) || 0)
+        + " elapsed_ms=" + elapsed
+        + " ct=" + youtubeAttestationContentType(headers)
     );
   }
 
@@ -840,7 +858,7 @@
       const googleHost = hostname === "google.com" || hostname.endsWith(".google.com")
         || hostname === "gstatic.com" || hostname.endsWith(".gstatic.com")
         || hostname === "googleapis.com" || hostname.endsWith(".googleapis.com");
-      if (!googleHost) return null;
+      const youtubeHost = hostname === "youtube.com" || hostname.endsWith(".youtube.com");
       const lowerPath = pathname.toLowerCase();
       const namedAsset = lowerPath.includes("botguard")
         || lowerPath.includes("bot_guard")
@@ -849,8 +867,14 @@
         || lowerPath.includes("challenge")
         || lowerPath.includes("/js/bg/")
         || /(^|\/)bg(?:\.min)?\.js$/.test(lowerPath);
-      if (!namedAsset) return null;
-      return {target: hostname + pathname};
+      const googleScript = googleHost
+        && (lowerPath.endsWith(".js") || lowerPath.includes(".js/"));
+      if (!namedAsset && !googleScript) return null;
+      if (!googleHost && !(youtubeHost && namedAsset)) return null;
+      return {
+        target: hostname + pathname,
+        candidate: namedAsset ? "named_attestation_hint" : "google_hosted_script"
+      };
     } catch (_) {
       return null;
     }
@@ -866,7 +890,8 @@
     record(
       "youtube_attestation_resource",
       info.target,
-      "phase=" + phase + " script_type=" + scriptType
+      "phase=" + phase + " candidate=" + info.candidate
+        + " script_type=" + scriptType
         + " async=" + Boolean(element.async)
         + " defer=" + Boolean(element.defer)
     );
@@ -2911,6 +2936,11 @@
       ? beginYouTubeAttestationRpc(meta.attestation, meta.method, "xhr")
       : null;
     if (meta) {
+      nativeAdd.call(this, "readystatechange", () => {
+        if (this.readyState === 2) {
+          recordYouTubeAttestationRpcHeaders(attestationCall, this.status, this);
+        }
+      });
       nativeAdd.call(this, "load", () => {
         recordYouTubeAttestationRpcResponse(attestationCall, this.status, this);
       });
