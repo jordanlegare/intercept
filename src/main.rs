@@ -4607,6 +4607,7 @@ fn rewrite_worker_javascript(
       const sessionId={session};
       const primaryOrigin={primary_origin};
       const prefix="/p/"+encodeURIComponent(sessionId);
+      const rawWorkerFetch=typeof self.fetch==="function"?self.fetch.bind(self):null;
       function attestationInfo(value){{
         try{{
           const url=new URL(value instanceof URL?value.href:String(value),self.location.href);
@@ -4632,11 +4633,11 @@ fn rewrite_worker_javascript(
         }}catch(_e){{return null}}
       }}
       function reportAttestation(info,detail){{
-        if(!info)return;
+        if(!info||!rawWorkerFetch)return;
         try{{
           const endpoint=new URL("/_intercept/events",self.location.origin).href;
           const payload=[{{kind:"youtube_attestation_rpc",target:info.target,detail:String(detail||"").slice(0,300)}}];
-          nativeFetch(endpoint,{{
+          rawWorkerFetch(endpoint,{{
             method:"POST",
             headers:{{"content-type":"application/json"}},
             body:JSON.stringify(payload),
@@ -4690,7 +4691,7 @@ fn rewrite_worker_javascript(
         return prefix+"/_/"+url.protocol.slice(0,-1)+"/"+url.host+path;
       }}
       if(self.fetch){{
-        const nativeFetch=self.fetch.bind(self);
+        const nativeFetch=rawWorkerFetch;
         function reportDispatch(target,detail){{
           try{{
             const endpoint=new URL("/_intercept/events",self.location.origin).href;
