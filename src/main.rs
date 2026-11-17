@@ -1808,33 +1808,47 @@ async fn ajax_passthrough(
         method,
         reqwest::Method::POST | reqwest::Method::PUT | reqwest::Method::PATCH
     );
+    // Resolve transformed headers once, then use these exact values both for
+    // forwarding and the QoE outbound profile.
+    let outbound_origin = request_headers.get(header::ORIGIN).and_then(|_| {
+        let origin = if is_youtube_inner_tube {
+            request_headers.get("x-origin")
+                .and_then(normalized_youtube_origin)
+                .or_else(|| Some(upstream_url.origin().ascii_serialization()))
+        } else {
+            Some(session.base_url.origin().ascii_serialization())
+        };
+        origin.and_then(|value| HeaderValue::from_str(&value).ok())
+    });
+    let outbound_referer = request_headers.get(header::REFERER)
+        .and_then(|value| rewrite_referer(value, session));
+    let outbound_fetch_site = if request_headers.contains_key("sec-fetch-site") {
+        Some(if is_youtube_inner_tube || upstream_url.origin() == session.base_url.origin() {
+            "same-origin"
+        } else {
+            "cross-site"
+        })
+    } else {
+        None
+    };
+
     let mut builder = client.request(method, upstream_url.clone());
     for (name, value) in request_headers.iter() {
         if should_skip_request_header(name) {
             continue;
         }
         if name == header::ORIGIN {
-            let origin = if is_youtube_inner_tube {
-                request_headers.get("x-origin")
-                    .and_then(normalized_youtube_origin)
-                    .or_else(|| Some(upstream_url.origin().ascii_serialization()))
-            } else {
-                Some(session.base_url.origin().ascii_serialization())
-            };
-            if let Some(origin) = origin.and_then(|value| HeaderValue::from_str(&value).ok()) {
-                builder = builder.header(name.clone(), origin);
+            if let Some(origin) = outbound_origin.as_ref() {
+                builder = builder.header(name.clone(), origin.clone());
             }
         } else if name == header::REFERER {
-            if let Some(referer) = rewrite_referer(value, session) {
-                builder = builder.header(name.clone(), referer);
+            if let Some(referer) = outbound_referer.as_ref() {
+                builder = builder.header(name.clone(), referer.clone());
             }
         } else if name.as_str() == "sec-fetch-site" {
-            let fetch_site = if is_youtube_inner_tube || upstream_url.origin() == session.base_url.origin() {
-                "same-origin"
-            } else {
-                "cross-site"
-            };
-            builder = builder.header(name.clone(), fetch_site);
+            if let Some(fetch_site) = outbound_fetch_site {
+                builder = builder.header(name.clone(), fetch_site);
+            }
         } else {
             builder = builder.header(name.clone(), value.clone());
         }
@@ -1849,14 +1863,27 @@ async fn ajax_passthrough(
         builder = builder.header(header::CONTENT_LENGTH, request_body_len);
     }
     if is_youtube_qoe {
+        let cookie_header = session.cookie_jar.request_cookie_header(&upstream_url);
         push_event(
             session,
-            "youtube_qoe_upstream_dispatch",
+            "youtube_qoe_request_profile",
             format!("{upstream_host}{upstream_path}"),
             format!("rid={request_id} {}", youtube_qoe_request_diagnostics(
                 &request_method,
                 &request_headers,
                 &request_body,
+            )),
+        ).await;
+        push_event(
+            session,
+            "youtube_qoe_outbound_header_profile",
+            format!("{upstream_host}{upstream_path}"),
+            format!("rid={request_id} {}", youtube_qoe_outbound_header_diagnostics(
+                &request_headers,
+                outbound_origin.as_ref(),
+                outbound_referer.as_ref(),
+                outbound_fetch_site,
+                cookie_header.as_ref(),
             )),
         ).await;
     }
@@ -3971,18 +3998,9 @@ fn youtube_qoe_request_diagnostics(
             .map(|value| clean_field(value.to_owned(), limit))
             .filter(|value| !value.is_empty())
     };
-    let host_only = |name: &str| {
-        header_text(name, 2048)
-            .and_then(|value| Url::parse(&value).ok())
-            .and_then(|url| url.host_str().map(str::to_owned))
-            .unwrap_or_else(|| "absent".to_owned())
-    };
-    let content_type = header_text("content-type", 96).unwrap_or_else(|| "absent".to_owned());
-    let content_encoding = header_text("content-encoding", 48).unwrap_or_else(|| "absent".to_owned());
-    let content_length_in = header_text("content-length", 24).unwrap_or_else(|| "absent".to_owned());
-    let fetch_dest = header_text("sec-fetch-dest", 24).unwrap_or_else(|| "absent".to_owned());
-    let fetch_mode = header_text("sec-fetch-mode", 24).unwrap_or_else(|| "absent".to_owned());
-    let fetch_site = header_text("sec-fetch-site", 24).unwrap_or_else(|| "absent".to_owned());
+    let content_type = header_text("content-type", 80).unwrap_or_else(|| "absent".to_owned());
+    let content_encoding = header_text("content-encoding", 32).unwrap_or_else(|| "absent".to_owned());
+    let content_length_in = header_text("content-length", 20).unwrap_or_else(|| "absent".to_owned());
     let body_text = if body.is_empty() {
         "empty"
     } else if std::str::from_utf8(body).is_ok() {
@@ -3990,26 +4008,51 @@ fn youtube_qoe_request_diagnostics(
     } else {
         "binary"
     };
-    let json_state = if body.is_empty() {
-        "empty"
-    } else if serde_json::from_slice::<serde_json::Value>(body).is_ok() {
-        "valid"
-    } else {
-        "not_json"
-    };
-    let cookie = headers.get(header::COOKIE)
-        .map(|value| format!("present({}B)", value.as_bytes().len()))
-        .unwrap_or_else(|| "absent".to_owned());
-    let authorization = if headers.contains_key(header::AUTHORIZATION) { "present" } else { "absent" };
-    let user_agent = if headers.contains_key(header::USER_AGENT) { "present" } else { "absent" };
 
     format!(
-        "method={method} bytes={} text={body_text} json={json_state} ct={content_type} len_in={content_length_in} len_out={} ce={content_encoding} encoding={} origin={} ref={} fetch={fetch_dest}/{fetch_mode}/{fetch_site} cookie={cookie} auth={authorization} ua={user_agent}",
+        "method={method} bytes={} text={body_text} ct={content_type} len_in={content_length_in} len_out={} ce={content_encoding} encoding={}",
         body.len(),
         body.len(),
         request_body_encoding_diagnostic(headers, body),
-        host_only("origin"),
-        host_only("referer"),
+    )
+}
+
+fn youtube_qoe_outbound_header_diagnostics(
+    headers: &HeaderMap,
+    origin: Option<&HeaderValue>,
+    referer: Option<&HeaderValue>,
+    fetch_site: Option<&str>,
+    cookie_header: Option<&HeaderValue>,
+) -> String {
+    let host_only = |value: Option<&HeaderValue>| {
+        value
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| Url::parse(value).ok())
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_else(|| "absent".to_owned())
+    };
+    let header_text = |name: &str, limit: usize| {
+        headers.get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), limit))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "absent".to_owned())
+    };
+    let cookie_profile = cookie_header
+        .map(|value| format!("present({}B)", value.as_bytes().len()))
+        .unwrap_or_else(|| "absent".to_owned());
+    let authorization = if headers.contains_key(header::AUTHORIZATION) { "present" } else { "absent" };
+    // The reqwest client supplies its configured default User-Agent when the
+    // browser request does not provide one.
+    let user_agent = if headers.contains_key(header::USER_AGENT) { "browser" } else { "client_default" };
+
+    format!(
+        "origin={} referer={} fetch={}/{}/{} cookie_jar={cookie_profile} auth={authorization} ua={user_agent}",
+        host_only(origin),
+        host_only(referer),
+        header_text("sec-fetch-dest", 16),
+        header_text("sec-fetch-mode", 16),
+        fetch_site.unwrap_or("absent"),
     )
 }
 
@@ -4518,16 +4561,11 @@ mod tests {
     }
 
     #[test]
-    fn youtube_qoe_diagnostics_report_body_framing_without_logging_payload() {
+    fn youtube_qoe_request_profile_reports_body_framing_without_logging_payload() {
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain;charset=UTF-8"));
         headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("18"));
-        headers.insert(header::ORIGIN, HeaderValue::from_static("https://www.youtube.com"));
-        headers.insert(header::REFERER, HeaderValue::from_static("https://www.youtube.com/watch"));
-        headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
-        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
-        headers.insert(header::USER_AGENT, HeaderValue::from_static("browser"));
-        headers.insert(header::COOKIE, HeaderValue::from_static("session=private"));
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("identity"));
         let body = b"private-qoe-payload";
         let detail = youtube_qoe_request_diagnostics(&Method::POST, &headers, body);
 
@@ -4537,12 +4575,51 @@ mod tests {
         assert!(detail.contains("ct=text/plain;charset=UTF-8"));
         assert!(detail.contains("len_in=18"));
         assert!(detail.contains("len_out=19"));
-        assert!(detail.contains("origin=www.youtube.com"));
-        assert!(detail.contains("ref=www.youtube.com"));
-        assert!(detail.contains("cookie=present("));
-        assert!(detail.contains("ua=present"));
+        assert!(detail.contains("encoding=identity"));
         assert!(!detail.contains("private-qoe-payload"));
-        assert!(!detail.contains("session=private"));
+    }
+
+    #[test]
+    fn youtube_qoe_outbound_profile_reports_effective_headers_without_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
+        headers.insert("sec-fetch-mode", HeaderValue::from_static("no-cors"));
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer private-token"));
+        headers.insert(header::USER_AGENT, HeaderValue::from_static("private-user-agent"));
+        let origin = HeaderValue::from_static("https://www.youtube.com");
+        let referer = HeaderValue::from_static("https://www.youtube.com/watch?v=private-video");
+        let cookie_header = HeaderValue::from_static("SID=private-cookie");
+        let detail = youtube_qoe_outbound_header_diagnostics(
+            &headers,
+            Some(&origin),
+            Some(&referer),
+            Some("same-origin"),
+            Some(&cookie_header),
+        );
+
+        assert!(detail.contains("origin=www.youtube.com"));
+        assert!(detail.contains("referer=www.youtube.com"));
+        assert!(detail.contains("fetch=empty/no-cors/same-origin"));
+        assert!(detail.contains("cookie_jar=present("));
+        assert!(detail.contains("auth=present"));
+        assert!(detail.contains("ua=browser"));
+        assert!(!detail.contains("private-token"));
+        assert!(!detail.contains("private-user-agent"));
+        assert!(!detail.contains("private-video"));
+        assert!(!detail.contains("private-cookie"));
+    }
+
+    #[test]
+    fn youtube_qoe_outbound_profile_marks_default_user_agent_and_missing_headers() {
+        let headers = HeaderMap::new();
+        let detail = youtube_qoe_outbound_header_diagnostics(&headers, None, None, None, None);
+
+        assert!(detail.contains("origin=absent"));
+        assert!(detail.contains("referer=absent"));
+        assert!(detail.contains("fetch=absent/absent/absent"));
+        assert!(detail.contains("cookie_jar=absent"));
+        assert!(detail.contains("auth=absent"));
+        assert!(detail.contains("ua=client_default"));
     }
 
     #[test]
