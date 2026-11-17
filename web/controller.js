@@ -3198,7 +3198,7 @@
       + "if(url.origin===self.location.origin){const marker=prefix+'/_/https/';const at=path.indexOf(marker);"
       + "if(at>=0){const target=path.slice(at+marker.length),slash=target.indexOf('/');if(slash>0){host=target.slice(0,slash).toLowerCase();path=target.slice(slash);}}}"
       + "if(host==='jnn-pa.googleapis.com'||(host.endsWith('.googleapis.com')&&path.toLowerCase().includes('waa')))"
-      + "return {target:host+path,operation:(path.match(/^\\/$rpc\\/google\\.internal\\.waa\\.v1\\.Waa\\/(Create|GenerateIT)$/)||[])[1]||'Other'};"
+      + "return {target:host+path,operation:(path.match(/^\\/\\$rpc\\/google\\.internal\\.waa\\.v1\\.Waa\\/(Create|GenerateIT)$/)||[])[1]||'Other'};"
       + "}catch(_e){return null}}"
       + "function report(info,detail){if(!info||!rawFetch)return;try{"
       + "rawFetch(new URL('/_intercept/events',self.location.origin).href,{method:'POST',"
