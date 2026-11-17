@@ -652,8 +652,9 @@
 
   function buildYouTubeSearchFallbackBody() {
     let context = null;
+    let config = null;
     try {
-      const config = window.ytcfg;
+      config = window.ytcfg;
       if (config && typeof config.get === "function") {
         context = config.get("INNERTUBE_CONTEXT");
       }
@@ -665,6 +666,20 @@
     if (!context || typeof context !== "object" || !context.client) {
       return {body: null, reason: "INNERTUBE_CONTEXT unavailable"};
     }
+
+    const configValue = key => {
+      try {
+        if (config && typeof config.get === "function") {
+          const value = config.get(key);
+          if (value !== undefined && value !== null) return value;
+        }
+        if (config && config.data_
+            && Object.prototype.hasOwnProperty.call(config.data_, key)) {
+          return config.data_[key];
+        }
+      } catch (_) {}
+      return undefined;
+    };
 
     let query = "";
     let querySource = "";
@@ -710,11 +725,46 @@
 
     try {
       const client = context.client;
-      const headers = {};
+      const payload = {context};
 
-      // InnerTube's WEB client identity is supplied in both the context and
-      // matching HTTP headers. Preserve headers from YouTube's original
-      // request; these values are only fallbacks when one is absent.
+      // Match the stable request envelope observed in a successful WEB search.
+      // Optional page-specific values are copied only when YouTube exposes them
+      // through ytcfg; do not fabricate click tracking or advertising signals.
+      payload.request = {
+        useSsl: true,
+        internalExperimentFlags: [],
+        consistencyTokenJars: []
+      };
+
+      const lockedSafetyMode = configValue("LOCKED_SAFETY_MODE");
+      if (typeof lockedSafetyMode === "boolean") {
+        payload.user = {lockedSafetyMode};
+      }
+
+      const clickTrackingParams = configValue("CLICK_TRACKING_PARAMS");
+      if (typeof clickTrackingParams === "string" && clickTrackingParams) {
+        payload.clickTracking = {clickTrackingParams};
+      }
+
+      const adSignalsInfo = configValue("AD_SIGNALS_INFO");
+      if (adSignalsInfo && typeof adSignalsInfo === "object"
+          && Array.isArray(adSignalsInfo.params)) {
+        payload.adSignalsInfo = adSignalsInfo;
+      }
+
+      payload.query = query.trim();
+
+      const webSearchboxStatsUrl = configValue("WEB_SEARCHBOX_STATS_URL");
+      if (typeof webSearchboxStatsUrl === "string" && webSearchboxStatsUrl) {
+        payload.webSearchboxStatsUrl = webSearchboxStatsUrl;
+      }
+
+      const inlineSettingStatus = configValue("INLINE_SETTING_STATUS");
+      if (typeof inlineSettingStatus === "string" && inlineSettingStatus) {
+        payload.inlineSettingStatus = inlineSettingStatus;
+      }
+
+      const headers = {"Content-Type": "application/json"};
       if (client.clientName === "WEB") {
         headers["X-YouTube-Client-Name"] = "1";
       }
@@ -724,12 +774,22 @@
       if (typeof client.visitorData === "string" && client.visitorData.trim()) {
         headers["X-Goog-Visitor-Id"] = client.visitorData.trim();
       }
-      headers["Content-Type"] = "application/json";
+
+      const keys = Object.keys(payload);
+      const clientName = typeof client.clientName === "string"
+        ? client.clientName.slice(0, 24)
+        : "unknown";
+      const clientVersion = typeof client.clientVersion === "string"
+        ? client.clientVersion.slice(0, 48)
+        : "unknown";
 
       return {
-        body: JSON.stringify({context, query: query.trim()}),
+        body: JSON.stringify(payload),
         querySource,
-        headers
+        headers,
+        payloadKeys: keys.join(","),
+        clientName,
+        clientVersion
       };
     } catch (_) {
       return {body: null, reason: "INNERTUBE_CONTEXT is not serializable"};
@@ -878,15 +938,39 @@
           && youtubeSearchCheck.endpointMatch) {
         const fallback = buildYouTubeSearchFallbackBody();
         if (fallback.body) {
-          routedRequest = new Request(routedRequest, {body: fallback.body});
+          const replacementRequest = new Request(routedRequest, {body: fallback.body});
+          const replacementHeaders = new Headers(replacementRequest.headers);
+          const inheritedContentEncoding = replacementHeaders.has("content-encoding");
+          // The fallback body above is plain JSON, not the original GZIP byte
+          // stream. Never retain an upstream Content-Encoding declaration from
+          // the bodyless request when replacing its body.
+          replacementHeaders.delete("content-encoding");
+          replacementHeaders.delete("content-length");
+          replacementHeaders.set("content-type", "application/json");
+          routedRequest = new Request(replacementRequest, {headers: replacementHeaders});
           youtubeSearchFallbackHeaders = fallback.headers || {};
           bodyDetail = "body_arg=generated_innertube_search body_arg_bytes="
             + new TextEncoder().encode(fallback.body).byteLength;
           record(
             "youtube_search_body_generated",
             routed,
-            "Generated InnerTube search payload · query_source=" + fallback.querySource
+            "Generated InnerTube JSON · query_source=" + fallback.querySource
+              + " · payload_keys=" + (fallback.payloadKeys || "unknown")
               + " · body_bytes=" + new TextEncoder().encode(fallback.body).byteLength
+          );
+          record(
+            "youtube_search_payload_shape",
+            routed,
+            "keys=" + (fallback.payloadKeys || "unknown")
+              + " · client=" + (fallback.clientName || "unknown")
+              + " · version=" + (fallback.clientVersion || "unknown")
+              + " · query_present=true"
+          );
+          record(
+            "youtube_search_fallback_encoding",
+            routed,
+            "body_encoding=identity · content_type=application/json"
+              + " · inherited_content_encoding=" + (inheritedContentEncoding ? "removed" : "absent")
           );
         } else {
           record("youtube_search_body_unavailable", routed, fallback.reason);
