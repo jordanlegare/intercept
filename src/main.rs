@@ -1656,7 +1656,7 @@ async fn push_event_with_error_body(
         at_unix_ms: now_ms(),
         kind: clean_field(kind.to_owned(), 80),
         target: clean_field(target, 240),
-        detail: clean_field(detail, 300),
+        detail: clean_field(detail, event_detail_limit(kind)),
         upstream_error_body,
     });
 }
@@ -5977,6 +5977,13 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         || ip.to_ipv4_mapped().is_some_and(|v4| !is_public_v4(v4)))
 }
 
+fn event_detail_limit(kind: &str) -> usize {
+    // This server-generated snapshot combines four independent lifecycle
+    // observations. Keep the default event size bounded, but preserve the
+    // response status and correlation suffix for this specific diagnostic.
+    if kind == "youtube_sabr_attestation_context" { 480 } else { 300 }
+}
+
 fn clean_field(value: String, max: usize) -> String {
     value.chars().filter(|ch| !ch.is_control()).take(max).collect()
 }
@@ -7622,8 +7629,19 @@ mod ump_stream_diagnostics_tests {
         mark_sabr_response_complete, observe_sabr_request_gap,
         Duration, Instant, SabrBackoffWindow, SabrRequestParseState, SabrRequestTiming,
         YouTubeAttestationTiming,
-        UmpStreamDiagnostics,
+        UmpStreamDiagnostics, event_detail_limit, clean_field,
     };
+
+    #[test]
+    fn sabr_attestation_context_retains_response_fields_past_default_event_limit() {
+        let detail = format!("{}last_rpc_response_status=200 last_rpc_response_ago_ms=42", "x".repeat(300));
+        let stored = clean_field(detail, event_detail_limit("youtube_sabr_attestation_context"));
+        assert!(stored.len() > 300);
+        assert!(stored.ends_with("last_rpc_response_status=200 last_rpc_response_ago_ms=42"));
+
+        let ordinary = clean_field("x".repeat(400), event_detail_limit("ajax_response"));
+        assert_eq!(ordinary.len(), 300);
+    }
 
     #[test]
     fn parses_parts_across_arbitrary_chunk_boundaries() {
