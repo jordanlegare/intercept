@@ -697,6 +697,72 @@
     }
   }
 
+  let youtubeSabrRequestBodyMeasurementStarted = false;
+
+  function requestBodyPropertyDiagnostic(request) {
+    try {
+      const body = request.body;
+      if (body === null) return "null";
+      if (body === undefined) return "undefined";
+      return "non_null";
+    } catch (_) {
+      return "throws";
+    }
+  }
+
+  function requestCloneByteCount(request) {
+    let clone;
+    try {
+      clone = request.clone();
+    } catch (error) {
+      const errorName = String(error && error.name || "unknown")
+        .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "unknown";
+      return Promise.resolve({ok: false, errorName});
+    }
+
+    try {
+      if (!clone || typeof clone.arrayBuffer !== "function") {
+        return Promise.resolve({ok: false, errorName: "BodyReadUnavailable"});
+      }
+      return clone.arrayBuffer().then(buffer => ({
+        ok: true,
+        bytes: buffer.byteLength
+      }), error => {
+        const errorName = String(error && error.name || "unknown")
+          .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "unknown";
+        return {ok: false, errorName};
+      });
+    } catch (error) {
+      const errorName = String(error && error.name || "unknown")
+        .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "unknown";
+      return Promise.resolve({ok: false, errorName});
+    }
+  }
+
+  function recordYouTubeSabrRequestBodyMeasurement(originalRequest, routedRequest) {
+    const originalBodyProperty = requestBodyPropertyDiagnostic(originalRequest);
+    const routedBodyProperty = requestBodyPropertyDiagnostic(routedRequest);
+    const originalMeasurement = requestCloneByteCount(originalRequest);
+    const routedMeasurement = requestCloneByteCount(routedRequest);
+
+    Promise.all([originalMeasurement, routedMeasurement]).then(([original, routed]) => {
+      const describe = measurement => measurement.ok
+        ? "ok bytes=" + measurement.bytes
+        : "error name=" + measurement.errorName;
+      record(
+        "youtube_sabr_request_body_measurement",
+        "/videoplayback",
+        "original_body_property=" + originalBodyProperty
+          + " original_clone=" + describe(original)
+          + " routed_body_property=" + routedBodyProperty
+          + " routed_clone=" + describe(routed)
+      );
+    }, () => {
+      record("youtube_sabr_request_body_measurement", "/videoplayback",
+        "original_clone=error name=MeasurementFailed routed_clone=error name=MeasurementFailed");
+    });
+  }
+
   function youtubeSearchEndpointCheck(source) {
     try {
       const upstream = new URL(upstreamOrigin);
@@ -2129,6 +2195,13 @@
             + " routed_body_null=" + (routedRequest.body === null)
             + " callsite=" + sanitizedYouTubeFetchCallsite()
         );
+        if (requestInput && !youtubeSabrRequestBodyMeasurementStarted) {
+          // Read cloned copies in parallel with the original Fetch path. The
+          // original Request and the routed Request passed to nativeFetch are
+          // never consumed by this measurement.
+          youtubeSabrRequestBodyMeasurementStarted = true;
+          recordYouTubeSabrRequestBodyMeasurement(input, routedRequest);
+        }
       }
       let youtubeSearchFallbackHeaders = null;
       const youtubeSearchCheck = youtubeSearchEndpointCheck(source);
