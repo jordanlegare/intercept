@@ -1702,10 +1702,11 @@
     try {
       const targetUrl = new URL(value, document.baseURI);
       const upstreamHost = new URL(upstreamOrigin).hostname.toLowerCase();
+      const upstreamIsYouTube = upstreamHost === "youtube.com" || upstreamHost.endsWith(".youtube.com");
       const targetHost = targetUrl.hostname.toLowerCase();
       const isYouTubeHost = targetHost === "youtube.com" || targetHost.endsWith(".youtube.com");
       const isSessionOrigin = targetUrl.origin === location.origin;
-      if (!isYouTubeHost && !isSessionOrigin) return null;
+      if (!upstreamIsYouTube || (!isYouTubeHost && !isSessionOrigin)) return null;
 
       let videoId = targetUrl.searchParams.get("v");
       let source = "anchor_href";
@@ -1765,8 +1766,10 @@
       }
 
       const metadata = readYouTubeField(object, "webCommandMetadata");
-      const metadataUrl = readYouTubeField(metadata, "url");
-      const urlCandidate = youtubeNavigationFromUrl(metadataUrl);
+      const metadataUrl = readYouTubeField(metadata, "url")
+        || readYouTubeField(metadata, "url");
+      const directUrlCandidate = youtubeNavigationFromUrl(readYouTubeField(object, "url"));
+      const urlCandidate = directUrlCandidate || youtubeNavigationFromUrl(metadataUrl);
       if (urlCandidate) {
         urlCandidate.source = "command_metadata_url";
         return urlCandidate;
@@ -1784,6 +1787,27 @@
       }
     }
     return null;
+  }
+
+  function pathLooksLikeYouTubeVideoSurface(event) {
+    let path = [];
+    try {
+      path = typeof event.composedPath === "function" ? event.composedPath() : [event.target];
+    } catch (_) {
+      path = [event.target];
+    }
+    return path.some(node => {
+      if (!(node instanceof Element)) return false;
+      const tag = String(node.localName || "").toLowerCase();
+      return tag === "ytd-video-renderer"
+        || tag === "ytd-compact-video-renderer"
+        || tag === "ytd-rich-item-renderer"
+        || tag === "ytd-grid-video-renderer"
+        || tag === "ytd-playlist-video-renderer"
+        || tag === "ytd-thumbnail"
+        || tag === "yt-lockup-view-model"
+        || tag === "ytm-compact-video-renderer";
+    });
   }
 
   function captureYouTubeNavigation(event, eventType) {
@@ -1897,6 +1921,15 @@
               + " · event=" + type
               + " · composed_path_nodes=" + candidate.composedPathLength
           );
+        } else if (type === "click") {
+          const videoSurface = pathLooksLikeYouTubeVideoSurface(event);
+          if (videoSurface) {
+            record(
+              "youtube_navigation_candidate_missed",
+              selectorFor(event.target),
+              "source=none · event=click"
+            );
+          }
         }
       }
       if (type === "pointerdown" && event.target instanceof Element) {
