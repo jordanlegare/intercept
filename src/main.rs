@@ -156,6 +156,7 @@ struct Session {
     cookie_jar: Arc<SessionCookieJar>,
     cookie_tokens: StdMutex<HashMap<String, String>>,
     sabr_backoff: StdMutex<Option<SabrBackoffWindow>>,
+    sabr_request_timing: StdMutex<SabrRequestTiming>,
 }
 
 #[derive(Default)]
@@ -1172,6 +1173,7 @@ async fn create_session(
         cookie_jar,
         cookie_tokens: StdMutex::new(HashMap::new()),
         sabr_backoff: StdMutex::new(None),
+        sabr_request_timing: StdMutex::new(SabrRequestTiming::default()),
     });
 
     // Preserve the submitted destination path, query, and browser-side fragment
@@ -1993,6 +1995,40 @@ struct SabrBackoffObservation {
     elapsed_ms: u64,
     remaining_ms: u64,
     satisfied: bool,
+}
+
+#[derive(Default)]
+struct SabrRequestTiming {
+    last_request_at: Option<Instant>,
+    last_response_completed_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SabrRequestGapObservation {
+    since_previous_request_ms: Option<u64>,
+    since_previous_response_ms: Option<u64>,
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn observe_sabr_request_gap(
+    timing: &mut SabrRequestTiming,
+    observed_at: Instant,
+) -> SabrRequestGapObservation {
+    let observation = SabrRequestGapObservation {
+        since_previous_request_ms: timing.last_request_at
+            .map(|previous| duration_millis(observed_at.saturating_duration_since(previous))),
+        since_previous_response_ms: timing.last_response_completed_at
+            .map(|previous| duration_millis(observed_at.saturating_duration_since(previous))),
+    };
+    timing.last_request_at = Some(observed_at);
+    observation
+}
+
+fn mark_sabr_response_complete(timing: &mut SabrRequestTiming, completed_at: Instant) {
+    timing.last_response_completed_at = Some(completed_at);
 }
 
 fn observe_sabr_backoff(
@@ -3498,6 +3534,11 @@ async fn ajax_passthrough(
                     }
                     None => {
                         if is_sabr {
+                            {
+                                let mut timing = session.sabr_request_timing.lock()
+                                    .unwrap_or_else(|error| error.into_inner());
+                                mark_sabr_response_complete(&mut timing, Instant::now());
+                            }
                             let backoff_window = ump_diagnostics.next_request_backoff_window();
                             *session.sabr_backoff.lock()
                                 .unwrap_or_else(|error| error.into_inner()) = backoff_window;
@@ -3724,6 +3765,21 @@ async fn proxy(
             .and_then(|value| value.to_str().ok())
             .map(|value| clean_field(value.to_owned(), 100))
             .unwrap_or_else(|| "absent".to_owned());
+        let gap = {
+            let mut timing = session.sabr_request_timing.lock()
+                .unwrap_or_else(|error| error.into_inner());
+            observe_sabr_request_gap(&mut timing, Instant::now())
+        };
+        push_event(
+            &session,
+            "youtube_sabr_request_gap",
+            format!("{}{}", upstream_url.host_str().unwrap_or_default(), upstream_url.path()),
+            format!(
+                "rid={request_id} phase=request_arrival since_previous_request_ms={} since_previous_response_ms={}",
+                gap.since_previous_request_ms.map(|value| value.to_string()).unwrap_or_else(|| "first".to_owned()),
+                gap.since_previous_response_ms.map(|value| value.to_string()).unwrap_or_else(|| "unobserved".to_owned()),
+            ),
+        ).await;
         push_event(
             &session,
             "youtube_sabr_request_ingress",
@@ -5675,6 +5731,7 @@ mod tests {
             cookie_jar: Arc::new(SessionCookieJar::default()),
             cookie_tokens: StdMutex::new(HashMap::new()),
             sabr_backoff: StdMutex::new(None),
+            sabr_request_timing: StdMutex::new(SabrRequestTiming::default()),
         }
     }
 
@@ -6594,6 +6651,7 @@ mod tests {
             cookie_jar: Arc::new(SessionCookieJar::default()),
             cookie_tokens: StdMutex::new(HashMap::new()),
             sabr_backoff: StdMutex::new(None),
+            sabr_request_timing: StdMutex::new(SabrRequestTiming::default()),
         };
         let referer = HeaderValue::from_str(
             "http://session1234567890abcdef1234567890.localhost:5000/p/session1234567890abcdef1234567890/profile"
@@ -7172,7 +7230,8 @@ mod ump_stream_diagnostics_tests {
     use super::{
         decode_next_request_policy, decode_sabr_request_metadata,
         decode_stream_protection_status, observe_sabr_backoff,
-        Duration, Instant, SabrBackoffWindow, SabrRequestParseState,
+        mark_sabr_response_complete, observe_sabr_request_gap,
+        Duration, Instant, SabrBackoffWindow, SabrRequestParseState, SabrRequestTiming,
         UmpStreamDiagnostics,
     };
 
@@ -7298,6 +7357,22 @@ mod ump_stream_diagnostics_tests {
         let body = [0x9a, 0x01, 0x03, 0x12, 0x05, 0xaa];
         let metadata = decode_sabr_request_metadata(&body, None);
         assert_eq!(metadata.parse_state, Some(SabrRequestParseState::Truncated));
+    }
+
+    #[test]
+    fn sabr_request_gap_distinguishes_request_and_completed_response_spacing() {
+        let start = Instant::now();
+        let mut timing = SabrRequestTiming::default();
+
+        let first = observe_sabr_request_gap(&mut timing, start);
+        assert_eq!(first.since_previous_request_ms, None);
+        assert_eq!(first.since_previous_response_ms, None);
+
+        mark_sabr_response_complete(&mut timing, start + Duration::from_millis(100));
+        let second_at = start + Duration::from_millis(145);
+        let second = observe_sabr_request_gap(&mut timing, second_at);
+        assert_eq!(second.since_previous_request_ms, Some(145));
+        assert_eq!(second.since_previous_response_ms, Some(45));
     }
 
     #[test]
