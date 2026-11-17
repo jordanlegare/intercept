@@ -157,6 +157,7 @@ struct Session {
     cookie_tokens: StdMutex<HashMap<String, String>>,
     sabr_backoff: StdMutex<Option<SabrBackoffWindow>>,
     sabr_request_timing: StdMutex<SabrRequestTiming>,
+    youtube_attestation_timing: StdMutex<YouTubeAttestationTiming>,
 }
 
 #[derive(Default)]
@@ -1174,6 +1175,7 @@ async fn create_session(
         cookie_tokens: StdMutex::new(HashMap::new()),
         sabr_backoff: StdMutex::new(None),
         sabr_request_timing: StdMutex::new(SabrRequestTiming::default()),
+        youtube_attestation_timing: StdMutex::new(YouTubeAttestationTiming::default()),
     });
 
     // Preserve the submitted destination path, query, and browser-side fragment
@@ -2029,6 +2031,38 @@ fn observe_sabr_request_gap(
 
 fn mark_sabr_response_complete(timing: &mut SabrRequestTiming, completed_at: Instant) {
     timing.last_response_completed_at = Some(completed_at);
+}
+
+#[derive(Default)]
+struct YouTubeAttestationTiming {
+    proxy_request_count: u64,
+    last_operation: Option<&'static str>,
+    last_request_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct YouTubeAttestationTimingSnapshot {
+    proxy_request_count: u64,
+    last_operation: Option<&'static str>,
+    last_request_ago_ms: Option<u64>,
+}
+
+impl YouTubeAttestationTiming {
+    fn observe_proxy_request(&mut self, operation: &'static str, observed_at: Instant) {
+        self.proxy_request_count = self.proxy_request_count.saturating_add(1);
+        self.last_operation = Some(operation);
+        self.last_request_at = Some(observed_at);
+    }
+
+    fn snapshot(&self, observed_at: Instant) -> YouTubeAttestationTimingSnapshot {
+        YouTubeAttestationTimingSnapshot {
+            proxy_request_count: self.proxy_request_count,
+            last_operation: self.last_operation,
+            last_request_ago_ms: self.last_request_at.map(|previous| {
+                duration_millis(observed_at.saturating_duration_since(previous))
+            }),
+        }
+    }
 }
 
 fn observe_sabr_backoff(
@@ -3534,6 +3568,28 @@ async fn ajax_passthrough(
                     }
                     None => {
                         if is_sabr {
+                            if ump_diagnostics.latest_stream_protection_status
+                                .and_then(|status| status.status) == Some(3)
+                            {
+                                let attestation = {
+                                    let timing = session.youtube_attestation_timing.lock()
+                                        .unwrap_or_else(|error| error.into_inner());
+                                    timing.snapshot(Instant::now())
+                                };
+                                push_event(
+                                    &session,
+                                    "youtube_sabr_attestation_context",
+                                    stream_target.clone(),
+                                    format!(
+                                        "rid={request_id} status=3 proxy_waa_requests={} last_operation={} last_proxy_waa_ago_ms={}",
+                                        attestation.proxy_request_count,
+                                        attestation.last_operation.unwrap_or("none"),
+                                        attestation.last_request_ago_ms
+                                            .map(|value| value.to_string())
+                                            .unwrap_or_else(|| "never".to_owned()),
+                                    ),
+                                ).await;
+                            }
                             {
                                 let mut timing = session.sabr_request_timing.lock()
                                     .unwrap_or_else(|error| error.into_inner());
@@ -3677,6 +3733,11 @@ async fn proxy(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "worker" | "sharedworker" | "serviceworker"));
     if let Some(operation) = attestation_operation {
+        {
+            let mut timing = session.youtube_attestation_timing.lock()
+                .unwrap_or_else(|error| error.into_inner());
+            timing.observe_proxy_request(operation, Instant::now());
+        }
         let declared_length = parts.headers.get(header::CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
             .map(|value| clean_field(value.to_owned(), 24))
@@ -5732,6 +5793,7 @@ mod tests {
             cookie_tokens: StdMutex::new(HashMap::new()),
             sabr_backoff: StdMutex::new(None),
             sabr_request_timing: StdMutex::new(SabrRequestTiming::default()),
+            youtube_attestation_timing: StdMutex::new(YouTubeAttestationTiming::default()),
         }
     }
 
@@ -6652,6 +6714,7 @@ mod tests {
             cookie_tokens: StdMutex::new(HashMap::new()),
             sabr_backoff: StdMutex::new(None),
             sabr_request_timing: StdMutex::new(SabrRequestTiming::default()),
+            youtube_attestation_timing: StdMutex::new(YouTubeAttestationTiming::default()),
         };
         let referer = HeaderValue::from_str(
             "http://session1234567890abcdef1234567890.localhost:5000/p/session1234567890abcdef1234567890/profile"
@@ -7232,6 +7295,7 @@ mod ump_stream_diagnostics_tests {
         decode_stream_protection_status, observe_sabr_backoff,
         mark_sabr_response_complete, observe_sabr_request_gap,
         Duration, Instant, SabrBackoffWindow, SabrRequestParseState, SabrRequestTiming,
+        YouTubeAttestationTiming,
         UmpStreamDiagnostics,
     };
 
@@ -7373,6 +7437,23 @@ mod ump_stream_diagnostics_tests {
         let second = observe_sabr_request_gap(&mut timing, second_at);
         assert_eq!(second.since_previous_request_ms, Some(145));
         assert_eq!(second.since_previous_response_ms, Some(45));
+    }
+
+    #[test]
+    fn attestation_timing_snapshot_reports_never_seen_and_last_proxy_request() {
+        let start = Instant::now();
+        let mut timing = YouTubeAttestationTiming::default();
+
+        let never_seen = timing.snapshot(start);
+        assert_eq!(never_seen.proxy_request_count, 0);
+        assert_eq!(never_seen.last_operation, None);
+        assert_eq!(never_seen.last_request_ago_ms, None);
+
+        timing.observe_proxy_request("GenerateIT", start);
+        let observed = timing.snapshot(start + Duration::from_millis(125));
+        assert_eq!(observed.proxy_request_count, 1);
+        assert_eq!(observed.last_operation, Some("GenerateIT"));
+        assert_eq!(observed.last_request_ago_ms, Some(125));
     }
 
     #[test]
