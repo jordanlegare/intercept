@@ -3421,7 +3421,7 @@ async fn ajax_passthrough(
             "youtube_attestation_rpc",
             format!("{upstream_host}{upstream_path}"),
             format!(
-                "rid={request_id} rpc={attestation_rpc_id} operation={operation} phase=upstream_response status={} elapsed_ms={upstream_elapsed_ms} ct={response_content_type} cl={response_content_length}",
+                "rid={request_id} rpc={attestation_rpc_id} operation={operation} phase=upstream_response_headers status={} elapsed_ms={upstream_elapsed_ms} ct={response_content_type} cl={response_content_length}",
                 status.as_u16(),
             ),
         ).await;
