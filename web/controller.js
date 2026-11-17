@@ -63,6 +63,14 @@
     }
   }
 
+  function sanitizeEventTarget(target) {
+    const value = String(target || "");
+    const urlLike = value.startsWith("/")
+      || value.includes("://")
+      || /^[a-z0-9.-]+(?::\\d+)?\\//i.test(value);
+    return urlLike ? value.split(/[?#]/, 1)[0] : value;
+  }
+
   function record(kind, target, detail) {
     if (INTERNAL_AUTHORITY_EVENTS.has(kind)) return;
     const eventKind = String(kind).slice(0, 80);
@@ -70,7 +78,7 @@
       : eventKind === "youtube_player_state" ? 640 : 300;
     eventBuffer.push({
       kind: eventKind,
-      target: String(target || "").slice(0, 240),
+      target: sanitizeEventTarget(target).slice(0, 240),
       detail: String(detail || "").slice(0, detailLimit)
     });
     trimEventBuffer();
