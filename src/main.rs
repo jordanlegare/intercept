@@ -7704,6 +7704,44 @@ mod ump_stream_diagnostics_tests {
     }
 
     #[test]
+    fn correlates_latest_waa_response_metadata_with_following_sabr_po_presence() {
+        let observed_at = Instant::now();
+        let mut timing = YouTubeAttestationTiming::default();
+        timing.observe_proxy_response(
+            "GenerateIT",
+            Some("mwl4oib2-1-wu4yb4"),
+            200,
+            "application/json".to_owned(),
+            "512".to_owned(),
+            "identity".to_owned(),
+            observed_at,
+        );
+        let snapshot = timing.snapshot(observed_at + Duration::from_millis(37));
+        assert_eq!(snapshot.last_rpc_response_operation, Some("GenerateIT"));
+        assert_eq!(
+            snapshot.last_rpc_response_correlation_id.as_deref(),
+            Some("mwl4oib2-1-wu4yb4")
+        );
+        assert_eq!(snapshot.last_rpc_response_status, Some(200));
+        assert_eq!(snapshot.last_rpc_response_content_type.as_deref(), Some("application/json"));
+        assert_eq!(snapshot.last_rpc_response_content_length.as_deref(), Some("512"));
+        assert_eq!(snapshot.last_rpc_response_content_encoding.as_deref(), Some("identity"));
+        assert_eq!(snapshot.last_rpc_response_ago_ms, Some(37));
+
+        // StreamerContext.poToken is measured by length only. Its bytes are
+        // intentionally opaque and never appear in the diagnostic summary.
+        let body = [
+            0x9a, 0x01, 0x06, // VideoPlaybackAbrRequest.streamerContext
+            0x12, 0x04, 0xaa, 0xbb, 0xcc, 0xdd, // poToken
+        ];
+        let metadata = decode_sabr_request_metadata(&body, None);
+        assert_eq!(metadata.parse_state, Some(SabrRequestParseState::Ok));
+        assert_eq!(metadata.po_token_bytes, Some(4));
+        assert!(metadata.summary().contains("po=present:4"));
+        assert!(!metadata.summary().contains("aabbccdd"));
+    }
+
+    #[test]
     fn parses_parts_across_arbitrary_chunk_boundaries() {
         let frame = [21, 3, 0, 1, 2, 22, 1, 0];
         let mut diagnostics = UmpStreamDiagnostics::default();
