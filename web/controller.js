@@ -1766,8 +1766,7 @@
       }
 
       const metadata = readYouTubeField(object, "webCommandMetadata");
-      const metadataUrl = readYouTubeField(metadata, "url")
-        || readYouTubeField(metadata, "url");
+      const metadataUrl = readYouTubeField(metadata, "url");
       const directUrlCandidate = youtubeNavigationFromUrl(readYouTubeField(object, "url"));
       const urlCandidate = directUrlCandidate || youtubeNavigationFromUrl(metadataUrl);
       if (urlCandidate) {
