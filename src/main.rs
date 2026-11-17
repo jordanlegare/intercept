@@ -2472,6 +2472,10 @@ impl UmpStreamDiagnostics {
         let parts = if parts.is_empty() { "none".to_owned() } else { parts };
         let frame_complete =
             !self.malformed && self.buffer.is_empty() && self.payload_remaining == 0;
+        let part_count_sum = self.part_counts.values().copied().sum::<usize>();
+        let part_payload_sum = self.part_payload_bytes.values().copied().sum::<u64>();
+        let part_count_mismatch = part_count_sum != self.total_parts;
+        let payload_sum_mismatch = part_payload_sum != self.total_payload_bytes;
         let media_payload_bytes = self.part_payload_bytes.get(&21).copied().unwrap_or_default();
 
         let mut decoded_metadata = Vec::new();
@@ -2509,8 +2513,9 @@ impl UmpStreamDiagnostics {
         };
 
         format!(
-            "ump_parts={} total_parts={} total_payload_bytes={} media_payload_bytes={} frame_complete={} partial_header_bytes={} payload_remaining={} malformed={}{}",
-            parts, self.total_parts, self.total_payload_bytes, media_payload_bytes,
+            "ump_parts={} total_parts={} part_count_sum={} part_count_mismatch={} total_payload_bytes={} part_payload_sum={} payload_sum_mismatch={} media_payload_bytes={} frame_complete={} partial_header_bytes={} payload_remaining={} malformed={}{}",
+            parts, self.total_parts, part_count_sum, part_count_mismatch,
+            self.total_payload_bytes, part_payload_sum, payload_sum_mismatch, media_payload_bytes,
             frame_complete, self.buffer.len(), self.payload_remaining, self.malformed,
             decoded_metadata,
         )
@@ -6041,12 +6046,13 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
 }
 
 fn event_detail_limit(kind: &str) -> usize {
-    // This server-generated snapshot combines four independent lifecycle
-    // observations. Keep the default event size bounded, but preserve the
-    // response status and correlation suffix for this specific diagnostic.
+    // Keep larger correlated diagnostics intact while retaining the
+    // conservative default for ordinary events.
     if matches!(kind,
         "youtube_sabr_attestation_context"
             | "youtube_sabr_request_metadata"
+            | "youtube_sabr_response_stream_complete"
+            | "youtube_player_state"
             | "youtube_attestation_rpc"
     ) { 480 } else { 300 }
 }
@@ -7708,6 +7714,39 @@ mod ump_stream_diagnostics_tests {
 
         let ordinary = clean_field("x".repeat(400), event_detail_limit("ajax_response"));
         assert_eq!(ordinary.len(), 300);
+    }
+
+    #[test]
+    fn sabr_completion_event_preserves_full_ump_payload_totals() {
+        let diagnostics = UmpStreamDiagnostics {
+            total_parts: 11,
+            total_payload_bytes: 260_109,
+            part_counts: std::collections::BTreeMap::from([
+                (20, 2), (21, 2), (22, 2), (35, 1), (47, 1), (52, 1), (53, 1),
+            ]),
+            part_payload_bytes: std::collections::BTreeMap::from([
+                (20, 154), (21, 259_839), (22, 2), (35, 82),
+                (47, 12), (52, 8), (53, 12),
+            ]),
+            ..UmpStreamDiagnostics::default()
+        };
+        let detail = format!(
+            "rid={} outcome=complete response_bytes=260137 · {}",
+            "a".repeat(32),
+            diagnostics.summary(),
+        );
+        let stored = clean_field(
+            detail,
+            event_detail_limit("youtube_sabr_response_stream_complete"),
+        );
+        assert!(stored.contains("total_parts=11"), "{stored}");
+        assert!(stored.contains("part_count_sum=10"), "{stored}");
+        assert!(stored.contains("part_count_mismatch=true"), "{stored}");
+        assert!(stored.contains("total_payload_bytes=260109"), "{stored}");
+        assert!(stored.contains("part_payload_sum=260109"), "{stored}");
+        assert!(stored.contains("payload_sum_mismatch=false"), "{stored}");
+        assert!(stored.contains("media_payload_bytes=259839"), "{stored}");
+        assert!(stored.contains("malformed=false"), "{stored}");
     }
 
     #[test]
