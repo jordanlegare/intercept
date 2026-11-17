@@ -706,6 +706,7 @@
   let youtubePlayerTimerSequence = 0;
   let activeYouTubePlayerTimer = null;
   const recentYouTubePlayerTimerFires = [];
+  const observedYouTubeTimerRegistrations = new Set();
   let latestYouTubePlayerState = null;
   const playbackContextId = (() => {
     try {
@@ -1483,11 +1484,11 @@
         : "unknown";
       const scheduledAgo = Math.max(0, Math.round(now - timer.scheduledAt));
       return timer.kind + "#" + timer.id
+        + ":scheduled_by=" + timer.callsite
         + ":delay_ms=" + timer.delayMs
         + ":fires=" + timer.fireCount
         + ":fired_ago_ms=" + firedAgo
-        + ":scheduled_ago_ms=" + scheduledAgo
-        + ":scheduled_by=" + timer.callsite;
+        + ":scheduled_ago_ms=" + scheduledAgo;
     }).join("|").slice(0, 360);
   }
 
@@ -1516,6 +1517,22 @@
         fireCount: 0,
         lastFiredAt: null
       };
+
+      // Emit registration metadata once per unique player timer site. This
+      // makes the scheduler visible even when a later GenerateIT event omits
+      // or truncates its timer-context suffix.
+      const callbackName = String(handler.name || "anonymous")
+        .replace(/[^A-Za-z0-9_$.-]/g, "").slice(0, 40) || "anonymous";
+      const registrationKey = kind + "|" + timer.delayMs + "|" + callsite;
+      if (!observedYouTubeTimerRegistrations.has(registrationKey)
+          && observedYouTubeTimerRegistrations.size < 32) {
+        observedYouTubeTimerRegistrations.add(registrationKey);
+        record("youtube_player_runtime", "kevlar timer",
+          "phase=timer_registered timer=" + kind + "#" + timer.id
+          + " delay_ms=" + timer.delayMs
+          + " callback=" + callbackName
+          + " scheduled_by=" + callsite);
+      }
 
       const observedHandler = function(...callbackArgs) {
         const firedAt = performance.now();
