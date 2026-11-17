@@ -4738,7 +4738,7 @@ fn rewrite_worker_javascript(
           headers.set("X-Intercept-Proxy-Mode","ajax");
           headers.set("X-Intercept-Body-Diagnostic",bodyDetail);
           headers.set("X-Intercept-Transport-Diagnostic","worker-fetch");
-          reportDispatch(routed,method+" · "+bodyDetail+" · transport=worker-fetch");
+          reportDispatch(attestation?attestation.target:routed,method+" · "+bodyDetail+" · transport=worker-fetch");
           const pending=nativeFetch(new Request(request,{{headers}}));
           if(!attestation)return pending;
           reportAttestation(attestation,"phase=worker_dispatch operation="+attestation.operation
@@ -4775,7 +4775,7 @@ fn rewrite_worker_javascript(
               nativeSet.call(this,"X-Intercept-Body-Diagnostic",bodyDetail);
               nativeSet.call(this,"X-Intercept-Transport-Diagnostic","worker-xhr");
             }}catch(_e){{}}
-            if(meta)reportDispatch(meta.url,meta.method+" · "+bodyDetail+" · transport=worker-xhr");
+            if(meta)reportDispatch(meta.attestation?meta.attestation.target:meta.url,meta.method+" · "+bodyDetail+" · transport=worker-xhr");
             if(meta&&meta.attestation){{
               reportAttestation(meta.attestation,"phase=worker_dispatch operation="+meta.attestation.operation
                 +" method="+meta.method+" transport=worker-xhr");
@@ -5636,6 +5636,25 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn worker_bootstrap_instruments_waa_fetch_xhr_and_resource_timing() {
+        let base = Url::parse("https://www.youtube.com/watch?v=test").unwrap();
+        let output = rewrite_worker_javascript(
+            "fetch('https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/Create?key=not-logged');",
+            &base,
+            &base,
+            "0123456789abcdef0123456789abcdef",
+        ).unwrap();
+
+        assert!(output.contains("phase=worker_dispatch"));
+        assert!(output.contains("phase=worker_response"));
+        assert!(output.contains("phase=worker_resource_timing_observed"));
+        assert!(output.contains("youtube_attestation_rpc"));
+        assert!(output.contains("attestation?attestation.target:routed"));
+        assert!(output.contains("attestation?meta.attestation.target:meta.url"));
+        assert!(output.contains(r#"const match=pathname.match(/^\\/\\$rpc\\/google\\.internal\\.waa\\.v1\\.Waa\\/(Create|GenerateIT)$/);"#));
+    }
 
     #[test]
     fn detects_unexpected_waa_paths_on_the_attestation_host() {
