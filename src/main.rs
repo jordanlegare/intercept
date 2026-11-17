@@ -7324,6 +7324,11 @@ mod ump_stream_diagnostics_tests {
             decode_stream_protection_status(&[0x08, 0x02, 0x10, 0x00]).unwrap();
         assert_eq!(with_retries.status, Some(2));
         assert_eq!(with_retries.max_retries, Some(0));
+
+        let attestation_required =
+            decode_stream_protection_status(&[0x08, 0x03, 0x10, 0x0a]).unwrap();
+        assert_eq!(attestation_required.status, Some(3));
+        assert_eq!(attestation_required.max_retries, Some(10));
     }
 
     #[test]
