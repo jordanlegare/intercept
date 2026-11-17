@@ -913,6 +913,34 @@
           && dataSyncId.length <= 512) {
         headers["X-Intercept-YouTube-DataSync-Id"] = dataSyncId;
       }
+
+      // Restore the request's WEB API origin/client-account headers. The
+      // primary session URL can be youtube.com while InnerTube uses www.
+      let youtubeOrigin = "https://www.youtube.com";
+      const configuredApiHost = configValue("INNERTUBE_HOST");
+      if (typeof configuredApiHost === "string" && configuredApiHost.trim()) {
+        try {
+          const candidate = new URL(
+            configuredApiHost.includes("://")
+              ? configuredApiHost : "https://" + configuredApiHost
+          );
+          const host = candidate.hostname.toLowerCase();
+          if (candidate.protocol === "https:"
+              && (host === "youtube.com" || host.endsWith(".youtube.com"))
+              && !candidate.username && !candidate.password
+              && !candidate.search && !candidate.hash) {
+            youtubeOrigin = candidate.origin;
+          }
+        } catch (_) {}
+      }
+      headers["X-Origin"] = youtubeOrigin;
+      const sessionIndex = configValue("SESSION_INDEX");
+      headers["X-Goog-AuthUser"] = (
+        (typeof sessionIndex === "number" && Number.isInteger(sessionIndex)
+          && sessionIndex >= 0)
+        || (typeof sessionIndex === "string" && /^\d+$/.test(sessionIndex))
+      ) ? String(sessionIndex) : "0";
+
       const authDiagnostic = "authorization=deferred_to_proxy"
         + " · data_sync_id=" + (
           typeof dataSyncId === "string" && dataSyncId.length > 0
