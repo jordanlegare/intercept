@@ -2472,6 +2472,10 @@ impl UmpStreamDiagnostics {
         let parts = if parts.is_empty() { "none".to_owned() } else { parts };
         let frame_complete =
             !self.malformed && self.buffer.is_empty() && self.payload_remaining == 0;
+        let part_count_sum = self.part_counts.values().copied().sum::<usize>();
+        let part_payload_sum = self.part_payload_bytes.values().copied().sum::<u64>();
+        let part_count_mismatch = part_count_sum != self.total_parts;
+        let payload_sum_mismatch = part_payload_sum != self.total_payload_bytes;
         let media_payload_bytes = self.part_payload_bytes.get(&21).copied().unwrap_or_default();
 
         let mut decoded_metadata = Vec::new();
@@ -2509,8 +2513,9 @@ impl UmpStreamDiagnostics {
         };
 
         format!(
-            "ump_parts={} total_parts={} total_payload_bytes={} media_payload_bytes={} frame_complete={} partial_header_bytes={} payload_remaining={} malformed={}{}",
-            parts, self.total_parts, self.total_payload_bytes, media_payload_bytes,
+            "ump_parts={} total_parts={} part_count_sum={} part_count_mismatch={} total_payload_bytes={} part_payload_sum={} payload_sum_mismatch={} media_payload_bytes={} frame_complete={} partial_header_bytes={} payload_remaining={} malformed={}{}",
+            parts, self.total_parts, part_count_sum, part_count_mismatch,
+            self.total_payload_bytes, part_payload_sum, payload_sum_mismatch, media_payload_bytes,
             frame_complete, self.buffer.len(), self.payload_remaining, self.malformed,
             decoded_metadata,
         )
@@ -7732,7 +7737,12 @@ mod ump_stream_diagnostics_tests {
             detail,
             event_detail_limit("youtube_sabr_response_stream_complete"),
         );
+        assert!(stored.contains("total_parts=11"), "{stored}");
+        assert!(stored.contains("part_count_sum=10"), "{stored}");
+        assert!(stored.contains("part_count_mismatch=true"), "{stored}");
         assert!(stored.contains("total_payload_bytes=260109"), "{stored}");
+        assert!(stored.contains("part_payload_sum=260109"), "{stored}");
+        assert!(stored.contains("payload_sum_mismatch=false"), "{stored}");
         assert!(stored.contains("media_payload_bytes=259839"), "{stored}");
         assert!(stored.contains("malformed=false"), "{stored}");
     }
