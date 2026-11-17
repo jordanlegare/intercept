@@ -1704,6 +1704,9 @@ async fn ajax_passthrough(
     let is_youtube_get_watch = upstream_path == "/youtubei/v1/get_watch" && is_youtube_inner_tube;
     let is_youtube_next = upstream_path == "/youtubei/v1/next" && is_youtube_inner_tube;
     let is_youtube_feedback = upstream_path == "/youtubei/v1/feedback" && is_youtube_inner_tube;
+    let is_youtube_qoe = upstream_path == "/api/stats/qoe"
+        && (initial_host.eq_ignore_ascii_case("youtube.com")
+            || initial_host.to_ascii_lowercase().ends_with(".youtube.com"));
     if is_youtube_inner_tube && initial_host.eq_ignore_ascii_case("youtube.com") {
         let x_origin_host = request_headers.get("x-origin")
             .and_then(normalized_youtube_origin)
@@ -1845,6 +1848,19 @@ async fn ajax_passthrough(
     if request_body_len > 0 || has_body_framing {
         builder = builder.header(header::CONTENT_LENGTH, request_body_len);
     }
+    if is_youtube_qoe {
+        push_event(
+            session,
+            "youtube_qoe_upstream_dispatch",
+            format!("{upstream_host}{upstream_path}"),
+            format!("rid={request_id} {}", youtube_qoe_request_diagnostics(
+                &request_method,
+                &request_headers,
+                &request_body,
+            )),
+        ).await;
+    }
+
     if is_youtube_player {
         let content_encoding_out = request_headers.get(header::CONTENT_ENCODING)
             .and_then(|value| value.to_str().ok())
@@ -2120,6 +2136,30 @@ async fn ajax_passthrough(
     let upstream_headers = upstream.headers().clone();
     let upstream_set_cookie = upstream_headers.contains_key(header::SET_COOKIE);
     let upstream_elapsed_ms = request_started.elapsed().as_millis();
+
+    if is_youtube_qoe {
+        let response_content_type = upstream_headers.get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 96))
+            .unwrap_or_else(|| "absent".to_owned());
+        let response_content_length = upstream_headers.get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 24))
+            .unwrap_or_else(|| "absent".to_owned());
+        let response_server = upstream_headers.get(header::SERVER)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), 64))
+            .unwrap_or_else(|| "absent".to_owned());
+        push_event(
+            session,
+            "youtube_qoe_upstream_response",
+            format!("{upstream_host}{upstream_path}"),
+            format!(
+                "rid={request_id} status={} elapsed_ms={upstream_elapsed_ms} content_type={response_content_type} content_length={response_content_length} server={response_server}",
+                status.as_u16()
+            ),
+        ).await;
+    }
 
     // Sample a bounded prefix of textual error responses for the JSON event
     // export. Every consumed byte is replayed unchanged to the browser.
@@ -3920,6 +3960,59 @@ fn youtube_search_json_shape_diagnostic(body: &[u8]) -> String {
     summary
 }
 
+fn youtube_qoe_request_diagnostics(
+    method: &Method,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> String {
+    let header_text = |name: &str, limit: usize| {
+        headers.get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), limit))
+            .filter(|value| !value.is_empty())
+    };
+    let host_only = |name: &str| {
+        header_text(name, 2048)
+            .and_then(|value| Url::parse(&value).ok())
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_else(|| "absent".to_owned())
+    };
+    let content_type = header_text("content-type", 96).unwrap_or_else(|| "absent".to_owned());
+    let content_encoding = header_text("content-encoding", 48).unwrap_or_else(|| "absent".to_owned());
+    let content_length_in = header_text("content-length", 24).unwrap_or_else(|| "absent".to_owned());
+    let fetch_dest = header_text("sec-fetch-dest", 24).unwrap_or_else(|| "absent".to_owned());
+    let fetch_mode = header_text("sec-fetch-mode", 24).unwrap_or_else(|| "absent".to_owned());
+    let fetch_site = header_text("sec-fetch-site", 24).unwrap_or_else(|| "absent".to_owned());
+    let body_text = if body.is_empty() {
+        "empty"
+    } else if std::str::from_utf8(body).is_ok() {
+        "utf8_text"
+    } else {
+        "binary"
+    };
+    let json_state = if body.is_empty() {
+        "empty"
+    } else if serde_json::from_slice::<serde_json::Value>(body).is_ok() {
+        "valid"
+    } else {
+        "not_json"
+    };
+    let cookie = headers.get(header::COOKIE)
+        .map(|value| format!("present({}B)", value.as_bytes().len()))
+        .unwrap_or_else(|| "absent".to_owned());
+    let authorization = if headers.contains_key(header::AUTHORIZATION) { "present" } else { "absent" };
+    let user_agent = if headers.contains_key(header::USER_AGENT) { "present" } else { "absent" };
+
+    format!(
+        "method={method} body_bytes={} body_text={body_text} json={json_state} content_type={content_type} content_length_in={content_length_in} content_length_out={} content_encoding={content_encoding} body_encoding={} origin_host={} referer_host={} fetch_dest={fetch_dest} fetch_mode={fetch_mode} fetch_site={fetch_site} cookie={cookie} authorization={authorization} ua={user_agent}",
+        body.len(),
+        body.len(),
+        request_body_encoding_diagnostic(headers, body),
+        host_only("origin"),
+        host_only("referer"),
+    )
+}
+
 fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -> String {
     let header_text = |name: &str, limit: usize| {
         headers.get(name)
@@ -4422,6 +4515,34 @@ mod tests {
         assert!(marked.contains("content_encoding_in=absent"));
         assert!(marked.contains("body_encoding=identity"));
         assert!(marked.contains("json=valid"));
+    }
+
+    #[test]
+    fn youtube_qoe_diagnostics_report_body_framing_without_logging_payload() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain;charset=UTF-8"));
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("19"));
+        headers.insert(header::ORIGIN, HeaderValue::from_static("https://www.youtube.com"));
+        headers.insert(header::REFERER, HeaderValue::from_static("https://www.youtube.com/watch"));
+        headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        headers.insert(header::USER_AGENT, HeaderValue::from_static("browser"));
+        headers.insert(header::COOKIE, HeaderValue::from_static("session=private"));
+        let body = b"private-qoe-payload";
+        let detail = youtube_qoe_request_diagnostics(&Method::POST, &headers, body);
+
+        assert!(detail.contains("method=POST"));
+        assert!(detail.contains("body_bytes=20"));
+        assert!(detail.contains("body_text=utf8_text"));
+        assert!(detail.contains("content_type=text/plain;charset=UTF-8"));
+        assert!(detail.contains("content_length_in=19"));
+        assert!(detail.contains("content_length_out=20"));
+        assert!(detail.contains("origin_host=www.youtube.com"));
+        assert!(detail.contains("referer_host=www.youtube.com"));
+        assert!(detail.contains("cookie=present("));
+        assert!(detail.contains("ua=present"));
+        assert!(!detail.contains("private-qoe-payload"));
+        assert!(!detail.contains("session=private"));
     }
 
     #[test]
