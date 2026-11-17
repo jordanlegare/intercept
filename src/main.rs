@@ -6635,7 +6635,7 @@ mod ump_stream_diagnostics_tests {
     fn compact_policy_diagnostic_preserves_decoded_scalars_under_event_limit() {
         let mut frame = vec![58, 4, 0x08, 0x02, 0x10, 0x00];
         frame.extend_from_slice(&[
-            35, 12,
+            35, 13,
             0x08, 100,
             0x10, 0xc8, 0x01,
             0x18, 30,
