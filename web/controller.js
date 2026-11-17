@@ -739,7 +739,8 @@
   function beginYouTubeAttestationRpc(info, method, transport) {
     youtubeAttestationRpcSequence = (youtubeAttestationRpcSequence % 999999) + 1;
     return {
-      id: Date.now().toString(36) + "-" + youtubeAttestationRpcSequence,
+      id: Date.now().toString(36) + "-" + youtubeAttestationRpcSequence
+        + "-" + Math.random().toString(36).slice(2, 8),
       info,
       method,
       transport,
@@ -3205,7 +3206,7 @@
       + "if(typeof WorkerGlobalScope==='undefined'||!(self instanceof WorkerGlobalScope))return;"
       + "const prefix=" + prefixLiteral + ",primaryOrigin=" + primaryOriginLiteral + ";"
       + "const rawFetch=typeof self.fetch==='function'?self.fetch.bind(self):null;"
-      + "let attestationSequence=0;function nextAttestationId(){attestationSequence=(attestationSequence%999999)+1;return Date.now().toString(36)+'-'+attestationSequence;}"
+      + "let attestationSequence=0;function nextAttestationId(){attestationSequence=(attestationSequence%999999)+1;return Date.now().toString(36)+'-'+attestationSequence+'-'+Math.random().toString(36).slice(2,8);}"
       + "function route(value){"
       + "const raw=value instanceof Request?value.url:value instanceof URL?value.href:String(value);"
       + "const url=new URL(raw,self.location.origin+'/');"
