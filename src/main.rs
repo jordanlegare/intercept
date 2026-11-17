@@ -2037,20 +2037,28 @@ fn mark_sabr_response_complete(timing: &mut SabrRequestTiming, completed_at: Ins
 struct YouTubeAttestationTiming {
     proxy_request_count: u64,
     last_operation: Option<&'static str>,
+    last_correlation_id: Option<String>,
     last_request_at: Option<Instant>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct YouTubeAttestationTimingSnapshot {
     proxy_request_count: u64,
     last_operation: Option<&'static str>,
+    last_correlation_id: Option<String>,
     last_request_ago_ms: Option<u64>,
 }
 
 impl YouTubeAttestationTiming {
-    fn observe_proxy_request(&mut self, operation: &'static str, observed_at: Instant) {
+    fn observe_proxy_request(
+        &mut self,
+        operation: &'static str,
+        correlation_id: Option<&str>,
+        observed_at: Instant,
+    ) {
         self.proxy_request_count = self.proxy_request_count.saturating_add(1);
         self.last_operation = Some(operation);
+        self.last_correlation_id = correlation_id.map(str::to_owned);
         self.last_request_at = Some(observed_at);
     }
 
@@ -2058,6 +2066,7 @@ impl YouTubeAttestationTiming {
         YouTubeAttestationTimingSnapshot {
             proxy_request_count: self.proxy_request_count,
             last_operation: self.last_operation,
+            last_correlation_id: self.last_correlation_id.clone(),
             last_request_ago_ms: self.last_request_at.map(|previous| {
                 duration_millis(observed_at.saturating_duration_since(previous))
             }),
@@ -3162,7 +3171,7 @@ async fn ajax_passthrough(
                     "youtube_attestation_rpc",
                     format!("{upstream_host}{upstream_path}"),
                     format!(
-                        "rid={request_id} phase=upstream_error operation={operation} stage=send error_kind={failure_kind} elapsed_ms={}",
+                        "rid={request_id} rpc={attestation_rpc_id} phase=upstream_error operation={operation} stage=send error_kind={failure_kind} elapsed_ms={}",
                         request_started.elapsed().as_millis()
                     ),
                 ).await;
@@ -3632,9 +3641,10 @@ async fn ajax_passthrough(
                                     "youtube_sabr_attestation_context",
                                     stream_target.clone(),
                                     format!(
-                                        "rid={request_id} status=3 proxy_waa_requests={} last_operation={} last_proxy_waa_ago_ms={}",
+                                        "rid={request_id} status=3 proxy_waa_requests={} last_operation={} last_rpc_id={} last_proxy_waa_ago_ms={}",
                                         attestation.proxy_request_count,
                                         attestation.last_operation.unwrap_or("none"),
+                                        attestation.last_correlation_id.as_deref().unwrap_or("unmatched"),
                                         attestation.last_request_ago_ms
                                             .map(|value| value.to_string())
                                             .unwrap_or_else(|| "never".to_owned()),
@@ -3795,7 +3805,11 @@ async fn proxy(
         {
             let mut timing = session.youtube_attestation_timing.lock()
                 .unwrap_or_else(|error| error.into_inner());
-            timing.observe_proxy_request(operation, Instant::now());
+            timing.observe_proxy_request(
+                operation,
+                youtube_attestation_correlation_id(&parts.headers),
+                Instant::now(),
+            );
         }
         let declared_length = parts.headers.get(header::CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
@@ -5933,6 +5947,8 @@ mod tests {
         assert!(output.contains("phase=worker_response"));
         assert!(output.contains("phase=worker_resource_timing_observed"));
         assert!(output.contains("youtube_attestation_rpc"));
+        assert!(output.contains("X-Intercept-Attestation-Id"));
+        assert!(output.contains("nextAttestationId"));
         assert!(output.contains("attestation?attestation.target:routed"));
         assert!(output.contains("attestation?meta.attestation.target:meta.url"));
         assert!(output.contains(r#"const match=pathname.match(/^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/)"#));
@@ -7601,10 +7617,11 @@ mod ump_stream_diagnostics_tests {
         assert_eq!(never_seen.last_operation, None);
         assert_eq!(never_seen.last_request_ago_ms, None);
 
-        timing.observe_proxy_request("GenerateIT", start);
+        timing.observe_proxy_request("GenerateIT", Some("mwl2lpxu-1"), start);
         let observed = timing.snapshot(start + Duration::from_millis(125));
         assert_eq!(observed.proxy_request_count, 1);
         assert_eq!(observed.last_operation, Some("GenerateIT"));
+        assert_eq!(observed.last_correlation_id.as_deref(), Some("mwl2lpxu-1"));
         assert_eq!(observed.last_request_ago_ms, Some(125));
     }
 
