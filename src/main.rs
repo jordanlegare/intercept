@@ -4627,7 +4627,7 @@ fn rewrite_worker_javascript(
           const candidate=hostname==="jnn-pa.googleapis.com"
             ||(hostname.endsWith(".googleapis.com")&&lowerPath.includes("waa"));
           if(!candidate)return null;
-          const match=pathname.match(/^\\/\\$rpc\\/google\\.internal\\.waa\\.v1\\.Waa\\/(Create|GenerateIT)$/);
+          const match=pathname.match(/^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/);
           return {{target:hostname+pathname,operation:match?match[1]:"Other"}};
         }}catch(_e){{return null}}
       }}
@@ -4650,7 +4650,7 @@ fn rewrite_worker_javascript(
           if(!value)return "absent";
           if(mode==="mime"){{
             const mime=String(value).split(";",1)[0].trim().toLowerCase();
-            return /^[a-z0-9.+_-]+\\/[a-z0-9.+_-]+$/.test(mime)?mime:"other";
+            return /^[a-z0-9.+_-]+\/[a-z0-9.+_-]+$/.test(mime)?mime:"other";
           }}
           if(mode==="length")return /^\\d{{1,15}}$/.test(String(value).trim())?String(value).trim():"absent";
           const encoding=String(value).trim().toLowerCase();
