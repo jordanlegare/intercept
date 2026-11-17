@@ -76,7 +76,7 @@
   function record(kind, target, detail) {
     if (INTERNAL_AUTHORITY_EVENTS.has(kind)) return;
     const eventKind = String(kind).slice(0, 80);
-    const detailLimit = eventKind === "youtube_player_watchdog" ? 900
+    const detailLimit = eventKind === "youtube_player_watchdog" || eventKind === "youtube_attestation_rpc" ? 900
       : eventKind === "youtube_player_state" ? 640 : 300;
     eventBuffer.push({
       kind: eventKind,
@@ -703,6 +703,7 @@
   }
 
   let youtubeAttestationRpcSequence = 0;
+  let latestYouTubePlayerState = null;
   const playbackContextId = (() => {
     try {
       if (window.crypto && typeof window.crypto.randomUUID === "function") {
@@ -766,12 +767,18 @@
 
   function beginYouTubeAttestationRpc(info, method, transport) {
     youtubeAttestationRpcSequence = (youtubeAttestationRpcSequence % 999999) + 1;
+    const playerState = latestYouTubePlayerState;
     return {
       id: Date.now().toString(36) + "-" + youtubeAttestationRpcSequence
         + "-" + Math.random().toString(36).slice(2, 8),
       info,
       method,
       transport,
+      callsite: sanitizedYouTubeFetchCallsite(4),
+      playerState: playerState ? {
+        ageMs: Math.max(0, Math.round(performance.now() - playerState.at)),
+        detail: playerState.detail
+      } : null,
       startedAt: null,
       headersReported: false,
       terminal: false
@@ -821,6 +828,9 @@
         + " operation=" + call.info.operation
         + " phase=dispatch method=" + call.method
         + " transport=" + call.transport
+        + " callsite=" + (call.callsite || "unavailable")
+        + " player_state_age_ms=" + (call.playerState ? call.playerState.ageMs : "unobserved")
+        + " player_state=" + (call.playerState ? call.playerState.detail : "unobserved")
     );
   }
 
@@ -1357,6 +1367,7 @@
               state.playbackStarted = false;
             }
           }
+          latestYouTubePlayerState = {at: eventAt, detail: snapshot(video, eventName)};
           if (sampledEvents.has(eventName)) {
             let samples = lastSampleAt.get(video);
             if (!samples) {
@@ -1370,7 +1381,8 @@
           record("youtube_player_state", "video", snapshot(video, eventName));
         });
       }
-      record("youtube_player_state", "video", snapshot(video, "observed"));
+      latestYouTubePlayerState = {at: now, detail: snapshot(video, "observed")};
+      record("youtube_player_state", "video", latestYouTubePlayerState.detail);
     }
 
     function observeTree(root) {
@@ -1397,7 +1409,7 @@
 
   observeYouTubePlayerState();
 
-  function sanitizedYouTubeFetchCallsite() {
+  function sanitizedYouTubeFetchCallsite(maxFrames = 2) {
     try {
       const frames = String(new Error().stack || "").split("\n").slice(3);
       const safeFrames = [];
@@ -1419,7 +1431,7 @@
         const scriptLocation = parsed.hostname + "/" + file
           + (position ? ":" + position[1] + ":" + position[2] : "");
         safeFrames.push((functionName ? functionName + "@" : "") + scriptLocation);
-        if (safeFrames.length >= 2) break;
+        if (safeFrames.length >= Math.max(1, Math.min(6, Number(maxFrames) || 2))) break;
       }
       return safeFrames.length ? safeFrames.join(">") : "unavailable";
     } catch (_) {
