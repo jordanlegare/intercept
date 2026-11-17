@@ -1125,7 +1125,8 @@
           lastAdvanceAt: now,
           lastHeartbeatAt: now,
           playbackStarted: false,
-          stallStartedAt: null
+          stallStartedAt: null,
+          stallCause: null
         };
         watchStates.set(video, state);
       }
@@ -1166,7 +1167,7 @@
         + " last_advance_ago_ms=" + Math.max(0, Math.round(now - state.lastAdvanceAt))
         + " stalled_for_ms=" + Math.max(0, Math.round(stalledForMs || 0))
         + " visibility_state=" + (document.visibilityState || "unknown")
-        + " stall_cause=" + (state.stallStartedAt === null ? "none" : classifyClockStall(video));
+        + " stall_cause=" + (state.stallCause || "none");
       record("youtube_player_watchdog", "video", detail);
     }
 
@@ -1186,6 +1187,7 @@
           state.lastAdvanceAt = now;
           state.playbackStarted = !video.paused && !video.ended && !video.seeking;
           state.stallStartedAt = null;
+          state.stallCause = null;
           continue;
         }
 
@@ -1203,6 +1205,7 @@
           if (state.stallStartedAt !== null) {
             recordWatchdog(video, "clock_resumed", now, state, now - state.stallStartedAt);
             state.stallStartedAt = null;
+          state.stallCause = null;
             state.lastHeartbeatAt = now;
           }
         } else if (delta < -0.25) {
@@ -1210,6 +1213,7 @@
           state.lastCurrentTime = currentTime;
           state.lastAdvanceAt = now;
           state.stallStartedAt = null;
+          state.stallCause = null;
         } else {
           state.lastCurrentTime = currentTime;
         }
@@ -1217,6 +1221,7 @@
         const noAdvanceMs = now - state.lastAdvanceAt;
         if (state.stallStartedAt === null && noAdvanceMs >= WATCHDOG_STALL_MS) {
           state.stallStartedAt = state.lastAdvanceAt;
+          state.stallCause = classifyClockStall(video);
           recordWatchdog(video, "clock_stalled", now, state, noAdvanceMs);
           state.lastHeartbeatAt = now;
         } else if (now - state.lastHeartbeatAt >= WATCHDOG_HEARTBEAT_MS) {
@@ -1249,6 +1254,7 @@
             state.lastAdvanceAt = eventAt;
             state.lastHeartbeatAt = eventAt;
             state.stallStartedAt = null;
+          state.stallCause = null;
           } else if (eventName === "play" && !video.paused) {
             state.playbackStarted = true;
             state.lastCurrentTime = Number(video.currentTime) || 0;
@@ -1259,6 +1265,7 @@
             state.lastCurrentTime = Number(video.currentTime) || 0;
             state.lastAdvanceAt = eventAt;
             state.stallStartedAt = null;
+          state.stallCause = null;
             if (video.paused || video.ended || eventName === "emptied" || eventName === "error") {
               state.playbackStarted = false;
             }
