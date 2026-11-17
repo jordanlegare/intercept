@@ -767,14 +767,15 @@
 
   function beginYouTubeAttestationRpc(info, method, transport) {
     youtubeAttestationRpcSequence = (youtubeAttestationRpcSequence % 999999) + 1;
-    const playerState = latestYouTubePlayerState;
+    const capturePlayerCallsite = info.operation === "GenerateIT";
+    const playerState = capturePlayerCallsite ? latestYouTubePlayerState : null;
     return {
       id: Date.now().toString(36) + "-" + youtubeAttestationRpcSequence
         + "-" + Math.random().toString(36).slice(2, 8),
       info,
       method,
       transport,
-      callsite: sanitizedYouTubeFetchCallsite(4),
+      callsite: capturePlayerCallsite ? sanitizedYouTubeFetchCallsite(4) : null,
       playerState: playerState ? {
         ageMs: Math.max(0, Math.round(performance.now() - playerState.at)),
         detail: playerState.detail
@@ -828,9 +829,10 @@
         + " operation=" + call.info.operation
         + " phase=dispatch method=" + call.method
         + " transport=" + call.transport
-        + " callsite=" + (call.callsite || "unavailable")
-        + " player_state_age_ms=" + (call.playerState ? call.playerState.ageMs : "unobserved")
-        + " player_state=" + (call.playerState ? call.playerState.detail : "unobserved")
+        + (call.callsite ? " callsite=" + call.callsite : "")
+        + (call.playerState
+          ? " player_state_age_ms=" + call.playerState.ageMs + " player_state=" + call.playerState.detail
+          : (call.info.operation === "GenerateIT" ? " player_state=unobserved" : ""))
     );
   }
 
@@ -1147,6 +1149,25 @@
         + " media_error_code=" + (Number.isFinite(errorCode) && errorCode > 0 ? errorCode : "none");
     }
 
+    function attestationPlayerSnapshot(video, eventName) {
+      const bufferedAhead = bufferedAheadSeconds(video);
+      const errorCode = video.error && Number(video.error.code);
+      return "event=" + eventName
+        + " current_time=" + metric(video.currentTime)
+        + " ready_state=" + (Number(video.readyState) || 0)
+        + " network_state=" + (Number(video.networkState) || 0)
+        + " paused=" + Boolean(video.paused)
+        + " ended=" + Boolean(video.ended)
+        + " seeking=" + Boolean(video.seeking)
+        + " playback_rate=" + metric(video.playbackRate, 2)
+        + " current_src=" + Boolean(video.currentSrc)
+        + " src_attr=" + video.hasAttribute("src")
+        + " src_object=" + (video.srcObject !== null)
+        + " buffered_ahead_s=" + (bufferedAhead === null ? "unknown" : metric(bufferedAhead))
+        + " media_error_code=" + (Number.isFinite(errorCode) && errorCode > 0 ? errorCode : "none")
+        + " visibility=" + (document.visibilityState || "unknown");
+    }
+
     function getWatchState(video, now) {
       let state = watchStates.get(video);
       if (!state) {
@@ -1367,7 +1388,7 @@
               state.playbackStarted = false;
             }
           }
-          latestYouTubePlayerState = {at: eventAt, detail: snapshot(video, eventName)};
+          latestYouTubePlayerState = {at: eventAt, detail: attestationPlayerSnapshot(video, eventName)};
           if (sampledEvents.has(eventName)) {
             let samples = lastSampleAt.get(video);
             if (!samples) {
@@ -1381,7 +1402,7 @@
           record("youtube_player_state", "video", snapshot(video, eventName));
         });
       }
-      latestYouTubePlayerState = {at: now, detail: snapshot(video, "observed")};
+      latestYouTubePlayerState = {at: now, detail: attestationPlayerSnapshot(video, "observed")};
       record("youtube_player_state", "video", latestYouTubePlayerState.detail);
     }
 
