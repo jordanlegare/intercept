@@ -40,7 +40,7 @@ use uuid::Uuid;
 const LISTEN: &str = "127.0.0.1:5000";
 const MAX_REQUEST_BODY: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE_BODY: usize = 32 * 1024 * 1024;
-const MAX_EVENTS: usize = 500;
+const MAX_EVENTS: usize = 2_000;
 const MAX_ERROR_BODY_BYTES: usize = 2 * 1024;
 const MAX_ERROR_BODY_SAMPLE_MS: u64 = 500;
 const MAX_DELAY_SECONDS: u64 = 24 * 60 * 60;
