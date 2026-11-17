@@ -7615,6 +7615,7 @@ mod ump_stream_diagnostics_tests {
         let never_seen = timing.snapshot(start);
         assert_eq!(never_seen.proxy_request_count, 0);
         assert_eq!(never_seen.last_operation, None);
+        assert_eq!(never_seen.last_correlation_id, None);
         assert_eq!(never_seen.last_request_ago_ms, None);
 
         timing.observe_proxy_request("GenerateIT", Some("mwl2lpxu-1"), start);
