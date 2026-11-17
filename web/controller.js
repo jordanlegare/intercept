@@ -46,8 +46,11 @@
       event.kind === "youtube_attestation_rpc"
       || event.kind === "youtube_attestation_resource"
       || event.kind === "youtube_player_state"
+      || event.kind === "youtube_player_worker"
+      || event.kind === "youtube_player_runtime"
       || event.kind === "youtube_sabr_request_gap"
       || event.kind === "youtube_sabr_response_stream_complete"
+      || event.kind === "youtube_sabr_attestation_context"
     );
   }
 
@@ -872,13 +875,19 @@
         || lowerPath.includes("challenge")
         || lowerPath.includes("/js/bg/")
         || /(^|\/)bg(?:\.min)?\.js$/.test(lowerPath);
+      // YouTube's player runtime can host the BotGuard adapter without
+      // mentioning BotGuard in its URL. Track the player bundle lifecycle
+      // separately instead of silently treating it as an unrelated script.
+      const youtubePlayerRuntime = youtubeHost
+        && (lowerPath === "/s/player" || lowerPath.startsWith("/s/player/"));
       const googleScript = googleHost
         && (lowerPath.endsWith(".js") || lowerPath.includes(".js/"));
-      if (!namedAsset && !googleScript) return null;
-      if (!googleHost && !(youtubeHost && namedAsset)) return null;
+      if (!namedAsset && !googleScript && !youtubePlayerRuntime) return null;
+      if (!googleHost && !(youtubeHost && (namedAsset || youtubePlayerRuntime))) return null;
       return {
         target: hostname + pathname,
-        candidate: namedAsset ? "named_attestation_hint" : "google_hosted_script"
+        candidate: namedAsset ? "named_attestation_hint"
+          : youtubePlayerRuntime ? "youtube_player_runtime" : "google_hosted_script"
       };
     } catch (_) {
       return null;
@@ -916,6 +925,13 @@
         .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40);
       record("youtube_attestation_resource", info.target,
         "phase=script_runtime_error error=" + (errorName || "ScriptError"));
+    }, true);
+    nativeAdd.call(window, "unhandledrejection", event => {
+      const reason = event && event.reason;
+      const errorName = String(reason && reason.name || "UnhandledRejection")
+        .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "UnhandledRejection";
+      record("youtube_player_runtime", "window",
+        "phase=unhandled_rejection error=" + errorName);
     }, true);
     nativeAdd.call(document, "securitypolicyviolation", event => {
       const info = youtubeAttestationAssetInfo(event && event.blockedURI);
@@ -3163,23 +3179,179 @@
     window.EventSource.prototype = NativeEventSource.prototype;
   }
 
+  // Blob-backed workers bypass rewrite_worker_javascript because their source
+  // never crosses the proxy as a worker-script response. For JavaScript Blobs
+  // created by YouTube pages, prepend a guarded worker-only bootstrap that
+  // routes fetch/XHR/importScripts through this session. In window/script
+  // contexts the bootstrap exits without changing browser behavior.
+  function youtubeBlobWorkerBootstrap() {
+    const prefixLiteral = JSON.stringify(sessionPrefix);
+    const primaryOriginLiteral = JSON.stringify(upstreamOrigin);
+    return "(function(){try{"
+      + "if(typeof WorkerGlobalScope==='undefined'||!(self instanceof WorkerGlobalScope))return;"
+      + "const prefix=" + prefixLiteral + ",primaryOrigin=" + primaryOriginLiteral + ";"
+      + "const rawFetch=typeof self.fetch==='function'?self.fetch.bind(self):null;"
+      + "function route(value){"
+      + "const raw=value instanceof Request?value.url:value instanceof URL?value.href:String(value);"
+      + "const url=new URL(raw,self.location.origin+'/');"
+      + "if(url.protocol!=='http:'&&url.protocol!=='https:')return url.href;"
+      + "if(url.origin===self.location.origin)return url.href;"
+      + "const path=url.pathname+url.search+url.hash;"
+      + "if(url.origin===primaryOrigin)return new URL(path,self.location.origin+'/').href;"
+      + "return self.location.origin+prefix+'/_/'+url.protocol.slice(0,-1)+'/'+url.host+path;"
+      + "}"
+      + "function attestationInfo(value){try{"
+      + "const url=new URL(value instanceof Request?value.url:value instanceof URL?value.href:String(value),self.location.origin+'/');"
+      + "let host=url.hostname.toLowerCase(),path=url.pathname;"
+      + "if(url.origin===self.location.origin){const marker=prefix+'/_/https/';const at=path.indexOf(marker);"
+      + "if(at>=0){const target=path.slice(at+marker.length),slash=target.indexOf('/');if(slash>0){host=target.slice(0,slash).toLowerCase();path=target.slice(slash);}}}"
+      + "if(host==='jnn-pa.googleapis.com'||(host.endsWith('.googleapis.com')&&path.toLowerCase().includes('waa')))"
+      + "return {target:host+path,operation:(path.match(/^\\/\\$rpc\\/google\\.internal\\.waa\\.v1\\.Waa\\/(Create|GenerateIT)$/)||[])[1]||'Other'};"
+      + "}catch(_e){return null}}"
+      + "function report(info,detail){if(!info||!rawFetch)return;try{"
+      + "rawFetch(new URL('/_intercept/events',self.location.origin).href,{method:'POST',"
+      + "headers:{'content-type':'application/json'},body:JSON.stringify([{kind:'youtube_attestation_rpc',"
+      + "target:info.target,detail:String(detail||'').slice(0,300)}]),keepalive:true}).catch(()=>{});"
+      + "}catch(_e){}}"
+      + "if(rawFetch){self.fetch=function(input,init){"
+      + "const source=input instanceof Request?input.url:input;"
+      + "const routed=route(source);let request=input instanceof Request?new Request(routed,input):new Request(routed,init);"
+      + "if(input instanceof Request&&init)request=new Request(request,init);"
+      + "const headers=new Headers(request.headers);headers.set('X-Intercept-Proxy-Mode','ajax');"
+      + "headers.set('X-Intercept-Transport-Diagnostic','worker-fetch');"
+      + "const marked=new Request(request,{headers});const info=attestationInfo(source);"
+      + "if(info)report(info,'phase=blob_worker_dispatch operation='+info.operation+' method='+marked.method+' transport=worker-fetch');"
+      + "return rawFetch(marked).then(response=>{if(info)report(info,'phase=blob_worker_response operation='+info.operation+' status='+response.status);return response;});"
+      + "};}"
+      + "if(self.XMLHttpRequest){const X=self.XMLHttpRequest,open=X.prototype.open,send=X.prototype.send,meta=new WeakMap();"
+      + "X.prototype.open=function(method,url,...rest){const info=attestationInfo(url),routed=route(url);"
+      + "meta.set(this,{info,method:String(method).toUpperCase()});return open.call(this,method,routed,...rest);};"
+      + "X.prototype.send=function(...args){const call=meta.get(this);if(!call)return send.apply(this,args);"
+      + "try{this.setRequestHeader('X-Intercept-Proxy-Mode','ajax');"
+      + "this.setRequestHeader('X-Intercept-Transport-Diagnostic','worker-xhr');}catch(_e){}"
+      + "if(call.info)report(call.info,'phase=blob_worker_dispatch operation='+call.info.operation+' method='+call.method+' transport=worker-xhr');"
+      + "this.addEventListener('load',()=>{if(call.info)report(call.info,'phase=blob_worker_response operation='+call.info.operation+' status='+this.status);},{once:true});"
+      + "this.addEventListener('error',()=>{if(call.info)report(call.info,'phase=blob_worker_error operation='+call.info.operation+' error=network');},{once:true});"
+      + "return send.apply(this,args);};}"
+      + "if(typeof self.importScripts==='function'){const nativeImport=self.importScripts.bind(self);self.importScripts=function(...urls){"
+      + "return nativeImport(...urls.map(route));};}"
+      + "}catch(_e){}})();\n";
+  }
+
+  (function instrumentYouTubeJavascriptBlobs() {
+    let primaryHost = "";
+    try { primaryHost = new URL(upstreamOrigin).hostname.toLowerCase(); } catch (_) {}
+    if (primaryHost !== "youtube.com" && !primaryHost.endsWith(".youtube.com")) return;
+    if (typeof window.Blob !== "function") return;
+    const NativeBlob = window.Blob;
+    const blobWorkerBootstrap = youtubeBlobWorkerBootstrap();
+    const javascriptMimeTypes = new Set([
+      "text/javascript", "application/javascript", "application/x-javascript",
+      "text/ecmascript", "application/ecmascript"
+    ]);
+    try {
+      window.Blob = new Proxy(NativeBlob, {
+        construct(target, args, newTarget) {
+          const options = args[1] || {};
+          const mime = String(options.type || "").split(";", 1)[0].trim().toLowerCase();
+          if (!javascriptMimeTypes.has(mime)) {
+            return Reflect.construct(target, args, newTarget);
+          }
+          let parts;
+          try { parts = Array.from(args[0] || []); } catch (_) {
+            return Reflect.construct(target, args, newTarget);
+          }
+          record("youtube_player_worker", "blob:worker",
+            "phase=javascript_blob_created parts=" + parts.length + " bootstrap=worker_only");
+          return Reflect.construct(target, [[blobWorkerBootstrap, ...parts], options], newTarget);
+        }
+      });
+    } catch (_) {
+      record("youtube_player_worker", "blob:worker", "phase=blob_constructor_patch_failed");
+    }
+  })();
+
+  function youtubeWorkerResourceInfo(source) {
+    let primaryHost = "";
+    try { primaryHost = new URL(upstreamOrigin).hostname.toLowerCase(); } catch (_) {}
+    if (primaryHost !== "youtube.com" && !primaryHost.endsWith(".youtube.com")) return null;
+    try {
+      const raw = source instanceof URL ? source.href : String(source || "");
+      const parsed = new URL(raw, document.baseURI);
+      if (parsed.protocol === "blob:") {
+        return {target: "blob:worker", candidate: "blob_worker"};
+      }
+      if (parsed.protocol === "data:") {
+        return {target: "data:worker", candidate: "data_worker"};
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return {target: "worker", candidate: "non_http_worker"};
+      }
+
+      let hostname = parsed.hostname.toLowerCase();
+      let pathname = parsed.pathname;
+      if (parsed.origin === location.origin) {
+        const routeMarker = sessionPrefix + "/_/https/";
+        const routeIndex = pathname.indexOf(routeMarker);
+        if (routeIndex >= 0) {
+          const target = pathname.slice(routeIndex + routeMarker.length);
+          const slash = target.indexOf("/");
+          if (slash > 0) {
+            hostname = target.slice(0, slash).toLowerCase();
+            pathname = target.slice(slash);
+          }
+        }
+      }
+      const asset = youtubeAttestationAssetInfo(raw);
+      return {
+        target: hostname + pathname,
+        candidate: asset ? asset.candidate : "worker_script"
+      };
+    } catch (_) {
+      return {target: "worker", candidate: "unresolved_worker"};
+    }
+  }
+
+  function workerMessageType(value) {
+    if (value === null) return "null";
+    if (value === undefined) return "undefined";
+    if (typeof value !== "object") return typeof value;
+    if (value instanceof ArrayBuffer) return "array_buffer";
+    if (ArrayBuffer.isView(value)) return "typed_array";
+    if (Array.isArray(value)) return "array";
+    return "object";
+  }
+
+  function observeYouTubeWorker(worker, info, transport) {
+    if (!info) return;
+    const target = info.target;
+    record("youtube_player_worker", target,
+      "phase=construct candidate=" + info.candidate + " transport=" + transport);
+    nativeAdd.call(worker, "error", event => {
+      const errorName = String(event && event.error && event.error.name || "WorkerError")
+        .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "WorkerError";
+      record("youtube_player_worker", target,
+        "phase=error error=" + errorName + " transport=" + transport);
+    });
+    nativeAdd.call(worker, "message", event => {
+      record("youtube_player_worker", target,
+        "phase=message message_type=" + workerMessageType(event && event.data)
+          + " transport=" + transport);
+    });
+    nativeAdd.call(worker, "messageerror", () => {
+      record("youtube_player_worker", target,
+        "phase=message_error transport=" + transport);
+    });
+  }
+
   if (window.Worker) {
     const NativeWorker = window.Worker;
     window.Worker = function(url, options) {
       const routed = routeToProxy(url);
       if (!routed) throw new DOMException("Intercept only proxies HTTP and HTTPS worker scripts.", "SecurityError");
-      const asset = youtubeAttestationAssetInfo(url);
+      const info = youtubeWorkerResourceInfo(url);
       const worker = new NativeWorker(routed, options);
-      if (asset) {
-        record("youtube_attestation_resource", asset.target,
-          "phase=worker_construct transport=dedicated");
-        nativeAdd.call(worker, "error", event => {
-          const errorName = String(event && event.error && event.error.name || "WorkerError")
-            .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40);
-          record("youtube_attestation_resource", asset.target,
-            "phase=worker_error error=" + (errorName || "WorkerError"));
-        });
-      }
+      observeYouTubeWorker(worker, info, options && options.type === "module" ? "module" : "classic");
       return worker;
     };
     window.Worker.prototype = NativeWorker.prototype;
@@ -3190,11 +3362,19 @@
     window.SharedWorker = function(url, options) {
       const routed = routeToProxy(url);
       if (!routed) throw new DOMException("Intercept only proxies HTTP and HTTPS shared-worker scripts.", "SecurityError");
-      const asset = youtubeAttestationAssetInfo(url);
+      const info = youtubeWorkerResourceInfo(url);
       const worker = new NativeSharedWorker(routed, options);
-      if (asset) {
-        record("youtube_attestation_resource", asset.target,
-          "phase=worker_construct transport=shared");
+      if (info) {
+        const target = info.target;
+        record("youtube_player_worker", target,
+          "phase=construct candidate=" + info.candidate + " transport=shared");
+        nativeAdd.call(worker.port, "message", event => {
+          record("youtube_player_worker", target,
+            "phase=message message_type=" + workerMessageType(event && event.data) + " transport=shared");
+        });
+        nativeAdd.call(worker.port, "messageerror", () => {
+          record("youtube_player_worker", target, "phase=message_error transport=shared");
+        });
       }
       return worker;
     };
@@ -3202,6 +3382,30 @@
   }
 
   if (navigator.serviceWorker && navigator.serviceWorker.register) {
+    let primaryHost = "";
+    try { primaryHost = new URL(upstreamOrigin).hostname.toLowerCase(); } catch (_) {}
+    if (primaryHost === "youtube.com" || primaryHost.endsWith(".youtube.com")) {
+      nativeAdd.call(navigator.serviceWorker, "controllerchange", () => {
+        record("youtube_player_worker", "service-worker",
+          "phase=controller_change controlled=" + Boolean(navigator.serviceWorker.controller));
+      });
+      record("youtube_player_worker", "service-worker",
+        "phase=initial_state controlled=" + Boolean(navigator.serviceWorker.controller));
+      navigator.serviceWorker.ready.then(registration => {
+        const active = registration && registration.active;
+        record("youtube_player_worker", "service-worker",
+          "phase=ready active_state=" + (active && active.state || "none"));
+      }).catch(() => {
+        record("youtube_player_worker", "service-worker", "phase=ready_error");
+      });
+      nativeAdd.call(navigator.serviceWorker, "message", event => {
+        record("youtube_player_worker", "service-worker",
+          "phase=message message_type=" + workerMessageType(event && event.data));
+      });
+      nativeAdd.call(navigator.serviceWorker, "messageerror", () => {
+        record("youtube_player_worker", "service-worker", "phase=message_error");
+      });
+    }
     const nativeRegister = navigator.serviceWorker.register.bind(navigator.serviceWorker);
     navigator.serviceWorker.register = function(scriptURL, options) {
       const routed = routeToProxy(scriptURL);
