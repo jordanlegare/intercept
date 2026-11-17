@@ -49,6 +49,7 @@
       || event.kind === "youtube_player_worker"
       || event.kind === "youtube_sabr_request_gap"
       || event.kind === "youtube_sabr_response_stream_complete"
+      || event.kind === "youtube_sabr_attestation_context"
     );
   }
 
