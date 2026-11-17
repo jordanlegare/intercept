@@ -2108,6 +2108,31 @@ impl UmpStreamDiagnostics {
             decoded_metadata,
         )
     }
+
+    // Keep this event compact enough to survive the 300-character event detail cap.
+    // Only decoded scalar metadata is recorded; opaque protobuf fields are never emitted.
+    fn policy_diagnostic(&self, request_id: &str, outcome: &str) -> String {
+        let status = self.latest_stream_protection_status.unwrap_or_default();
+        let policy = self.latest_next_request_policy.unwrap_or_default();
+        let frame_complete =
+            !self.malformed && self.buffer.is_empty() && self.payload_remaining == 0;
+
+        format!(
+            "rid={request_id} outcome={outcome} sps=status:{},retry:{} nrp=ta:{},tv:{},max:{},bo:{},mina:{},minv:{} decode_err=sps:{},nrp:{} malformed={} frame={}",
+            diagnostic_i32(status.status),
+            diagnostic_i32(status.max_retries),
+            diagnostic_i32(policy.target_audio_readahead_ms),
+            diagnostic_i32(policy.target_video_readahead_ms),
+            diagnostic_i32(policy.max_time_since_last_request_ms),
+            diagnostic_i32(policy.backoff_time_ms),
+            diagnostic_i32(policy.min_audio_readahead_ms),
+            diagnostic_i32(policy.min_video_readahead_ms),
+            self.stream_protection_status_decode_errors,
+            self.next_request_policy_decode_errors,
+            self.malformed,
+            frame_complete,
+        )
+    }
 }
 
 fn diagnostic_i32(value: Option<i32>) -> String {
@@ -3058,6 +3083,12 @@ async fn ajax_passthrough(
                             stream_target.clone(),
                             format!("rid={request_id} outcome=cancelled response_bytes={response_bytes} · {}", ump_diagnostics.summary()),
                         ).await;
+                        push_event(
+                            &session,
+                            "youtube_sabr_policy_diagnostic",
+                            stream_target,
+                            ump_diagnostics.policy_diagnostic(&request_id, "cancelled"),
+                        ).await;
                     }
                     None
                 }
@@ -3088,6 +3119,12 @@ async fn ajax_passthrough(
                                 stream_target.clone(),
                                 format!("rid={request_id} outcome=stream_error response_bytes={response_bytes} · {}", ump_diagnostics.summary()),
                             ).await;
+                            push_event(
+                                &session,
+                                "youtube_sabr_policy_diagnostic",
+                                stream_target.clone(),
+                                ump_diagnostics.policy_diagnostic(&request_id, "stream_error"),
+                            ).await;
                         }
                         Some((
                             Err(io::Error::other(safe_error)),
@@ -3100,8 +3137,14 @@ async fn ajax_passthrough(
                             push_event(
                                 &session,
                                 "youtube_sabr_response_stream_complete",
-                                stream_target,
+                                stream_target.clone(),
                                 format!("rid={request_id} outcome=complete response_bytes={response_bytes} · {}", ump_diagnostics.summary()),
+                            ).await;
+                            push_event(
+                                &session,
+                                "youtube_sabr_policy_diagnostic",
+                                stream_target,
+                                ump_diagnostics.policy_diagnostic(&request_id, "complete"),
                             ).await;
                         }
                         None
@@ -6586,6 +6629,32 @@ mod ump_stream_diagnostics_tests {
         assert!(summary.contains("target_audio_readahead_ms:100"));
         assert!(summary.contains("backoff_time_ms:500"));
         assert!(summary.contains("frame_complete=true"));
+    }
+
+    #[test]
+    fn compact_policy_diagnostic_preserves_decoded_scalars_under_event_limit() {
+        let mut frame = vec![58, 4, 0x08, 0x02, 0x10, 0x00];
+        frame.extend_from_slice(&[
+            35, 12,
+            0x08, 100,
+            0x10, 0xc8, 0x01,
+            0x18, 30,
+            0x20, 5,
+            0x28, 10,
+            0x30, 20,
+        ]);
+        let mut diagnostics = UmpStreamDiagnostics::default();
+        diagnostics.feed(&frame);
+
+        let detail = diagnostics.policy_diagnostic(
+            "0123456789abcdef0123456789abcdef",
+            "complete",
+        );
+        assert!(detail.len() < 300, "diagnostic detail was {} bytes", detail.len());
+        assert!(detail.contains("sps=status:2,retry:0"));
+        assert!(detail.contains("nrp=ta:100,tv:200,max:30,bo:5,mina:10,minv:20"));
+        assert!(detail.contains("decode_err=sps:0,nrp:0"));
+        assert!(detail.contains("malformed=false frame=true"));
     }
 
     #[test]
