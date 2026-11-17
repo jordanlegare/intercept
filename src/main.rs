@@ -5863,7 +5863,9 @@ mod tests {
         assert!(output.contains("youtube_attestation_rpc"));
         assert!(output.contains("attestation?attestation.target:routed"));
         assert!(output.contains("attestation?meta.attestation.target:meta.url"));
-        assert!(output.contains(r#"const match=pathname.match(/^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/);"#));
+        assert!(output.contains(r#"const match=pathname.match(/^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/)"#));
+        assert!(output.contains(r#"pathname.match(/^\/api\/jnn\/v1\/(Create|GenerateIT)$/)"#));
+        assert!(output.contains("youtube_attestation_resource"));
     }
 
     #[test]
