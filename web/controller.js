@@ -2164,16 +2164,56 @@
     try {
       // Mark the request explicitly instead of relying on browser-specific
       // Fetch Metadata support. Preserve Request/init overrides and bodies.
+      let bodyDetail = fetchBodyDiagnostic(input, init);
+      const originalBodyDetail = bodyDetail;
+      const isYouTubeSabrPost = method === "POST" && youtubeSabrEndpointCheck(source);
+      let recoveredSabrBody = null;
+      if (isYouTubeSabrPost
+          && input instanceof Request
+          && input.body === undefined
+          && bodyDetail === "body_arg=none"
+          && !(init && Object.prototype.hasOwnProperty.call(init, "body")
+            && init.body !== undefined)) {
+        // Firefox can expose Request.body as undefined even when its internal
+        // request body is readable. Limit recovery to SABR POSTs: applying this
+        // workaround to unrelated application fetches caused regressions.
+        // Read a clone so the page-owned Request remains untouched. If cloning
+        // fails, preserve the pre-existing Fetch behavior rather than rejecting
+        // an unrelated part of the page.
+        try {
+          const bodyBuffer = await input.clone().arrayBuffer();
+          if (bodyBuffer.byteLength > 0) {
+            recoveredSabrBody = bodyBuffer;
+            bodyDetail = "body_arg=request_recovered body_arg_bytes=" + bodyBuffer.byteLength;
+            record(
+              "youtube_sabr_request_body_recovered",
+              "/videoplayback",
+              "body_bytes=" + bodyBuffer.byteLength + " source=Request.clone"
+            );
+          }
+        } catch (error) {
+          const errorName = String(error && error.name || "unknown")
+            .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "unknown";
+          record(
+            "youtube_sabr_request_body_recovery_failed",
+            "/videoplayback",
+            "error_name=" + errorName + " fallback=original_request_path"
+          );
+        }
+      }
+
       let routedRequest;
       if (input instanceof Request) {
         routedRequest = new Request(routed, input);
         if (init) routedRequest = new Request(routedRequest, init);
+        if (recoveredSabrBody !== null) {
+          routedRequest = new Request(routedRequest, {body: recoveredSabrBody});
+        }
       } else {
         routedRequest = new Request(routed, init);
       }
-      let bodyDetail = fetchBodyDiagnostic(input, init);
       if (routedRequest.method === "POST"
-          && bodyDetail === "body_arg=none"
+          && originalBodyDetail === "body_arg=none"
           && youtubeSabrEndpointCheck(source)) {
         const requestInput = input instanceof Request;
         const initPresent = init !== undefined && init !== null;
@@ -2189,7 +2229,8 @@
             + " input=" + (requestInput ? "Request" : input instanceof URL ? "URL" : typeof input)
             + " init_present=" + initPresent
             + " init_body_present=" + initBodyPresent
-            + " body_diag=" + bodyDetail
+            + " body_diag=" + originalBodyDetail
+            + " recovered_body_bytes=" + (recoveredSabrBody ? recoveredSabrBody.byteLength : 0)
             + " input_body_null=" + (inputBodyNull === null ? "n/a" : inputBodyNull)
             + " input_body_used=" + (inputBodyUsed === null ? "n/a" : inputBodyUsed)
             + " routed_body_null=" + (routedRequest.body === null)
