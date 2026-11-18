@@ -5,8 +5,12 @@
   if (globalThis[KEY]) return;
 
   const host = location.hostname.toLowerCase();
-  const isInterceptHost = host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1";
-  if (location.protocol !== "http:" || location.port !== "5000" || !isInterceptHost) return;
+  const isNativeYouTube = location.protocol === "https:"
+    && (host === "youtube.com" || host.endsWith(".youtube.com"))
+    && (location.port === "" || location.port === "443");
+  const isInterceptProxy = location.protocol === "http:" && location.port === "5000"
+    && (host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1");
+  if (!isNativeYouTube && !isInterceptProxy) return;
 
   const MAX_EVENTS = 200;
 
