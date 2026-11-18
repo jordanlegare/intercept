@@ -3,7 +3,13 @@
   "name": "Intercept · Native Origin",
   "version": "0.2.0",
   "description": "Observe YouTube request lifecycle metadata and compare native-origin and reverse-proxy browser environments.",
-  "permissions": ["storage", "tabs", "scripting", "webRequest"],
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "webRequest",
+    "activeTab"
+  ],
   "host_permissions": [
     "https://youtube.com/*",
     "https://*.youtube.com/*",
@@ -15,9 +21,19 @@
     "http://*.localhost:5000/*",
     "http://127.0.0.1:5000/*"
   ],
-  "background": {"scripts": ["background.js"]},
-  "action": {"default_title": "Intercept Native Origin", "default_popup": "popup.html"},
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "action": {
+    "default_title": "Intercept Native Origin",
+    "default_popup": "popup.html"
+  },
   "browser_specific_settings": {
-    "gecko": {"id": "intercept-native-origin@jordanlegare", "strict_min_version": "128.0"}
+    "gecko": {
+      "id": "intercept-native-origin@jordanlegare",
+      "strict_min_version": "128.0"
+    }
   }
 }
