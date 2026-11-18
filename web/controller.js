@@ -54,6 +54,7 @@
       || event.kind === "youtube_sabr_response_stream_complete"
       || event.kind === "youtube_sabr_attestation_context"
       || event.kind === "youtube_player_media_mutation"
+      || event.kind === "youtube_sabr_recovery"
     );
   }
 
@@ -77,7 +78,8 @@
   function record(kind, target, detail) {
     if (INTERNAL_AUTHORITY_EVENTS.has(kind)) return;
     const eventKind = String(kind).slice(0, 80);
-    const detailLimit = eventKind === "youtube_player_watchdog" || eventKind === "youtube_attestation_rpc" ? 1100
+    const detailLimit = eventKind === "youtube_player_watchdog" || eventKind === "youtube_attestation_rpc"
+      || eventKind === "youtube_sabr_recovery" ? 1100
       : eventKind === "youtube_player_state" || eventKind === "youtube_player_media_mutation" ? 900 : 300;
     eventBuffer.push({
       kind: eventKind,
@@ -724,6 +726,69 @@
       return (character === "x" ? random : (random & 3 | 8)).toString(16);
     });
   })();
+
+  // YouTube base.js calls this narrow telemetry bridge at protection-token
+  // recovery boundaries. Only whitelisted booleans/enums/counters are accepted;
+  // token strings, video IDs, request bodies, and arbitrary error text cannot
+  // enter the event stream through this interface.
+  const SABR_RECOVERY_PHASES = new Set([
+    "base_instrumentation_status",
+    "spsumpreject",
+    "content_token_recovery_requested",
+    "session_token_recovery_requested",
+    "session_token_recovery_waiting",
+    "session_token_generation_started",
+    "content_token_generation_started",
+    "token_provider_ready",
+    "token_generated",
+    "token_generation_error",
+    "token_result_empty",
+    "token_release_check",
+    "loader_release_requested",
+    "loader_gate"
+  ]);
+  const SABR_RECOVERY_BOOLEAN_FIELDS = new Set([
+    "spsumpreject_hook", "recovery_request_hook", "session_wait_hook",
+    "session_generate_hook", "content_generate_hook", "fallback_token_hook",
+    "webpo_token_hook", "k_t_release_hook", "l_t_release_hook",
+    "loader_gate_hook", "shared_provider_ready_hook", "provider_ready_hook",
+    "rejected", "retry_remaining", "video_data_present", "token_controller_active",
+    "token_generation_pending", "content_token_enabled", "session_token_enabled",
+    "provider_ready", "provider_present", "fallback_present", "living_room_mode",
+    "already_pending", "release_pending", "token_present", "eligible",
+    "previous", "next"
+  ]);
+  const SABR_RECOVERY_ENUM_FIELDS = {
+    token_source: new Set(["fallback", "webpo"]),
+    path: new Set(["kT", "lT"]),
+    provider_source: new Set(["shared", "webpo"])
+  };
+
+  function recordSabrRecovery(phase, values) {
+    if (!SABR_RECOVERY_PHASES.has(phase)) return;
+    const fields = ["observed_at_unix_ms=" + Date.now(), "phase=" + phase];
+    if (values && typeof values === "object") {
+      for (const [key, value] of Object.entries(values)) {
+        if (SABR_RECOVERY_BOOLEAN_FIELDS.has(key) && typeof value === "boolean") {
+          fields.push(key + "=" + value);
+        } else if (key === "patch_count" && Number.isSafeInteger(value) && value >= 0 && value <= 32) {
+          fields.push("patch_count=" + value);
+        } else if (SABR_RECOVERY_ENUM_FIELDS[key] && SABR_RECOVERY_ENUM_FIELDS[key].has(value)) {
+          fields.push(key + "=" + value);
+        }
+      }
+    }
+    record("youtube_sabr_recovery", "player base.js", fields.join(" "));
+  }
+
+  try {
+    Object.defineProperty(window, "__interceptRecordSabrRecovery", {
+      configurable: true,
+      enumerable: false,
+      writable: false,
+      value: recordSabrRecovery
+    });
+  } catch (_) {}
 
   function youtubeAttestationRpcInfo(source) {
     try {
