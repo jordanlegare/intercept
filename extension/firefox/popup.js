@@ -701,7 +701,7 @@ async function stopSession() {
   await apiRequest(session, "", {method: "DELETE"});
   await browser.storage.local.remove("nativeSession");
   activePanel.hidden = true; startButton.disabled = false;
-  message.textContent = "Observation stopped. The YouTube tab remains open and continues directly to YouTube.";
+  message.textContent = "The CONNECT tunnel stopped. The YouTube tab remains open and now connects directly to YouTube."
 }
 async function loadState() {
   const stored = await browser.storage.local.get(["nativeSession", "server"]);
@@ -709,7 +709,14 @@ async function loadState() {
   if (stored.nativeSession) {
     activePanel.hidden = false; startButton.disabled = true;
     byId("session-id").textContent = "SESSION " + stored.nativeSession.id + " · TAB " + stored.nativeSession.tabId;
-    try { await refreshEvents(); } catch (error) { message.textContent = error.message || String(error); }
+    try {
+      await browser.runtime.sendMessage({
+        type: "intercept-native:activate",
+        sessionId: stored.nativeSession.id,
+        tabId: stored.nativeSession.tabId
+      });
+      await refreshEvents();
+    } catch (error) { message.textContent = error.message || String(error); }
   }
   await renderComparison();
   try {
@@ -723,7 +730,7 @@ async function loadState() {
   } catch (_) {}
 }
 startButton.addEventListener("click", async () => {
-  startButton.disabled = true; message.textContent = "Creating native-origin observation session…";
+  startButton.disabled = true; message.textContent = "Creating native-origin CONNECT tunnel…";
   let blankTab = null;
   try {
     const server = normalizeServer(serverInput.value.trim()), target = normalizeYouTubeTarget(targetInput.value.trim());
@@ -743,14 +750,15 @@ startButton.addEventListener("click", async () => {
       throw new Error("Could not create native session (" + response.status + ")" + (text ? ": " + text.slice(0, 180) : ""));
     }
     const created = await response.json();
-    if (!created.native_token || !created.id) throw new Error("Backend did not return a native-session capability. Update and restart the Intercept server.");
-    const session = {id: created.id, token: created.native_token, server, target,
-      tabId: blankTab.id, createdAt: Date.now()};
+    if (!created.native_token || !created.id || !Number.isInteger(created.native_proxy_port)) throw new Error("Backend did not return a native-origin CONNECT listener. Update and restart the Intercept server.");
+    const session = {id: created.id, token: created.native_token, proxyPort: created.native_proxy_port,
+      server, target, tabId: blankTab.id, createdAt: Date.now()};
     await browser.storage.local.set({nativeSession: session, server});
+    await browser.runtime.sendMessage({type: "intercept-native:activate", sessionId: session.id, tabId: session.tabId});
     await browser.tabs.update(blankTab.id, {url: target});
     activePanel.hidden = false;
     byId("session-id").textContent = "SESSION " + session.id + " · TAB " + session.tabId;
-    message.textContent = "YouTube opened on its native origin. Intercept is observing metadata only.";
+    message.textContent = "YouTube is on its real HTTPS origin. Selected HTTPS connections pass through Intercept as TLS tunnels; request metadata remains observable."
     await refreshEvents();
   } catch (error) {
     if (blankTab && blankTab.id !== undefined) { try { await browser.tabs.remove(blankTab.id); } catch (_) {} }

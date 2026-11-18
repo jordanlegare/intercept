@@ -4,7 +4,16 @@
 const URL_FILTERS = [
   "https://youtube.com/*", "https://*.youtube.com/*",
   "https://googlevideo.com/*", "https://*.googlevideo.com/*",
-  "https://googleapis.com/*", "https://*.googleapis.com/*"
+  "https://googleapis.com/*", "https://*.googleapis.com/*",
+  "https://gstatic.com/*", "https://*.gstatic.com/*",
+  "https://ytimg.com/*", "https://*.ytimg.com/*"
+];
+const NATIVE_TUNNEL_URL_FILTERS = [
+  "https://youtube.com/*", "https://*.youtube.com/*",
+  "https://googlevideo.com/*", "https://*.googlevideo.com/*",
+  "https://googleapis.com/*", "https://*.googleapis.com/*",
+  "https://gstatic.com/*", "https://*.gstatic.com/*",
+  "https://ytimg.com/*", "https://*.ytimg.com/*"
 ];
 const inFlight = new Map();
 let pendingEvents = [];
@@ -52,6 +61,26 @@ function uuid() {
     });
 }
 function parseUrl(value) { try { return new URL(value); } catch (_) { return null; } }
+function nativeTunnelHostAllowed(host) {
+  host = String(host || "").toLowerCase().replace(/\.$/, "");
+  return ["youtube.com", "googlevideo.com", "googleapis.com", "gstatic.com", "ytimg.com"]
+    .some(domain => host === domain || host.endsWith("." + domain));
+}
+async function routeNativeOriginTraffic(details) {
+  await sessionReady;
+  const session = activeSession;
+  if (!session || details.tabId !== session.tabId
+      || !Number.isInteger(session.proxyPort) || session.proxyPort < 1 || session.proxyPort > 65535
+      || !session.token) return null;
+  const parsed = parseUrl(details.url);
+  if (!parsed || parsed.protocol !== "https:" || !nativeTunnelHostAllowed(parsed.hostname)) return null;
+  return [{
+    type: "http",
+    host: "127.0.0.1",
+    port: session.proxyPort,
+    proxyAuthorizationHeader: "Bearer " + session.token
+  }, null];
+}
 function hostOnly(value) {
   const parsed = parseUrl(value);
   return parsed ? parsed.hostname.toLowerCase() : "absent";
@@ -441,6 +470,14 @@ function recordMediaRequestError(details) {
   }).catch(() => {});
 }
 
+browser.proxy.onRequest.addListener(routeNativeOriginTraffic, {urls: NATIVE_TUNNEL_URL_FILTERS});
+browser.proxy.onError.addListener(error => {
+  const session = activeSession;
+  if (!session) return;
+  const message = String(error && error.message || "proxy_error").replace(/[\r\n]+/g, " ").slice(0, 180);
+  queueEvent(session, "native_proxy_error", "proxy", message);
+});
+
 browser.webRequest.onBeforeRequest.addListener(recordMediaRequestStart, {urls: MEDIA_TRACE_URL_FILTERS});
 browser.webRequest.onCompleted.addListener(recordMediaRequestComplete, {urls: MEDIA_TRACE_URL_FILTERS});
 browser.webRequest.onErrorOccurred.addListener(recordMediaRequestError, {urls: MEDIA_TRACE_URL_FILTERS});
@@ -476,6 +513,18 @@ browser.tabs.onRemoved.addListener(async tabId => {
 });
 browser.runtime.onMessage.addListener(async message => {
   if (!message || typeof message.type !== "string") return null;
+  if (message.type === "intercept-native:activate") {
+    const stored = await browser.storage.local.get("nativeSession");
+    const session = stored.nativeSession;
+    if (!session || session.id !== message.sessionId
+        || session.tabId !== message.tabId || !Number.isInteger(session.proxyPort)
+        || !session.token) {
+      throw new Error("The native-origin CONNECT session is incomplete or no longer active.");
+    }
+    activeSession = session;
+    sessionChangeRevision++;
+    return {ok: true, proxyPort: session.proxyPort};
+  }
   if (message.type === "intercept-native:flush") {
     await flushEvents();
     return {ok: true};

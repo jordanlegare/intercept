@@ -6,8 +6,8 @@
 </head>
 <body><main>
   <header><div class="eyebrow">INTERCEPT / FIREFOX</div><h1>NATIVE ORIGIN<span>_</span></h1>
-    <p>Keep YouTube on Firefox's native HTTPS path while Intercept observes request metadata.</p></header>
-  <div class="notice"><strong>OBSERVATION ONLY</strong><span>No requests are redirected or modified. Authorization timers, request holds, caching, and response rewriting are not active in this mode.</span></div>
+    <p>Keep YouTube on Firefox's real HTTPS origin while selected TLS connections pass through Intercept.</p></header>
+  <div class="notice"><strong>TLS PASSTHROUGH</strong><span>Selected YouTube and Google HTTPS connections use an authenticated local CONNECT tunnel. Firefox keeps the genuine YouTube origin and validates upstream TLS end-to-end. Intercept controls destination hosts and observes request metadata, but cannot inspect or modify encrypted HTTP paths, bodies, or responses; request holds, caching, and rewriting are disabled.</span></div>
   <label for="server">INTERCEPT SERVER</label><input id="server" type="url" value="http://127.0.0.1:5000" spellcheck="false">
   <label for="target">YOUTUBE URL</label><input id="target" type="url" value="https://www.youtube.com/" spellcheck="false">
   <button id="start" type="button">OPEN NATIVE-ORIGIN SESSION</button>

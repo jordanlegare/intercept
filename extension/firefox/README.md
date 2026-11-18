@@ -1,6 +1,6 @@
 # Intercept Firefox Native Origin
 
-This add-on opens YouTube directly in Firefox and observes selected request metadata through browser.webRequest. It does **not** redirect traffic through the reverse proxy. That preserves Firefox's real https://www.youtube.com execution origin, native cookies, worker origins, browser request context, and TLS connection.
+This add-on opens YouTube directly in Firefox, preserving the real `https://www.youtube.com` document origin, native cookies, worker origins, browser request context, and upstream TLS validation. In an active native-origin session it routes selected HTTPS connections through an authenticated, session-scoped HTTP CONNECT tunnel on the local Intercept server. TLS remains end-to-end between Firefox and each upstream host; the tunnel does not terminate or decrypt TLS.
 
 ## Requirements
 
@@ -16,7 +16,7 @@ This add-on opens YouTube directly in Firefox and observes selected request meta
 4. Pin **Intercept · Native Origin** from the Extensions menu if desired.
 5. Open the add-on popup, confirm the local server address, and choose **OPEN NATIVE-ORIGIN SESSION**.
 
-The popup opens an about:blank tab first, creates a native-origin session in the Rust server, stores its one-time capability in Firefox extension storage, and then navigates that tab directly to YouTube. The extension only observes requests from that tab. The popup can refresh the session event list, export the complete retained event log as a timestamped JSON file, or stop observation; stopping leaves the YouTube tab open. Export before stopping or closing the monitored tab, because deleting a session also deletes its in-memory event log.
+The popup opens an about:blank tab first, creates a native-origin session and a loopback CONNECT listener in the Rust server, stores the session capability and ephemeral proxy port in Firefox extension storage, activates the tab-scoped proxy policy, and then navigates that tab directly to YouTube. Only HTTPS requests from that tab to the fixed YouTube/Google host allowlist are routed through the session tunnel. Other tabs and unrelated destinations are not selected by this session's proxy policy. The popup can refresh the retained session event log, export it as timestamped JSON, or stop the session; stopping closes its tunnel and leaves the YouTube tab open to continue directly. Export before stopping or closing the monitored tab, because deleting a session also deletes its in-memory event log.
 
 ## Native/proxy environment comparison
 
@@ -56,11 +56,15 @@ The extension emits request-start, request-header-profile, response-header-profi
 
 It never stores full URLs, URL query strings, fragments, request or response bodies, cookies, Authorization values, PO tokens, API-key values, visitor IDs, or arbitrary error text. WAA RPCs and attestation resource requests are classified by path without recording query parameters.
 
-## Current limitation: observation-only
+## Native-origin CONNECT tunnel: capabilities and boundaries
 
-This initial native-origin mode does **not** enforce Standard, Strict, or Custom request authorization; hold/replay requests; rewrite request or response bodies; cache resources; or stream network bytes through Rust. These operations remain in reverse-proxy mode. It deliberately does not use blocking listeners or response stream filters in order to leave YouTube's native request path unmodified.
+The Firefox extension uses `browser.proxy.onRequest` for a narrowly scoped HTTP proxy policy. The Rust server accepts only HTTP CONNECT to port 443, requires the unguessable per-session bearer capability in `Proxy-Authorization`, and allows only YouTube/Google service domains used by the page and media stack. The server resolves the destination and refuses non-public IP addresses. Each native-origin session receives its own loopback listener; stopping or deleting the session closes its active tunnels.
 
-The Rust backend stores native-origin events in the same per-session event queue and includes the session in the active-session dashboard. Native sessions are labelled **NATIVE ORIGIN · OBSERVE ONLY** and are not routed through /p/{id}.
+The proxy is a byte-for-byte TCP tunnel. Firefox performs the TLS handshake with the actual upstream host and validates the upstream certificate. Intercept never presents a substitute certificate, terminates TLS, modifies BotGuard/WebPO data, or fabricates attestation tokens. This preserves the browser's real YouTube origin and cryptographic endpoint context while letting Intercept route and account for the selected upstream connections.
+
+Because TLS is end-to-end, the Rust tunnel cannot inspect HTTP paths, query parameters, headers, request/response bodies, response status codes, or media payloads. Firefox's `webRequest` observer can still report browser-visible request metadata for the selected tab, but those observations do not give Rust control over individual encrypted HTTP requests. Standard/Strict/Custom path-level holds, request replay, response rewriting, and the reverse-proxy cache are unavailable in native-origin mode. Those features remain in reverse-proxy mode.
+
+The Rust backend stores native-origin browser events and CONNECT lifecycle events in the per-session event queue and includes the session in the active-session dashboard. Native sessions are labelled **NATIVE ORIGIN · TLS PASSTHROUGH** and are not routed through `/p/{id}`.
 
 ## Development notes
 

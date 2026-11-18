@@ -4,7 +4,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, LazyLock, Mutex as StdMutex,
+        Arc, LazyLock, Mutex as StdMutex, Weak,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -28,7 +28,8 @@ use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use tokio::{
-    net::TcpListener,
+    io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional},
+    net::{TcpListener, TcpStream, lookup_host},
     sync::{watch, Mutex, RwLock, Semaphore},
     task::JoinSet,
     time::{sleep_until, Instant},
@@ -64,6 +65,9 @@ const DEFAULT_MAX_INFLIGHT_PER_SESSION: usize = 64;
 // In-flight requests keep their own Client clones and remain valid after cache eviction.
 const MAX_CACHED_UPSTREAM_ORIGINS_PER_SESSION: usize = 24;
 const MAX_CUSTOM_RULES: usize = 100;
+const MAX_NATIVE_CONNECT_HEADER_BYTES: usize = 8 * 1024;
+const NATIVE_CONNECT_DNS_TIMEOUT: Duration = Duration::from_secs(5);
+const NATIVE_CONNECT_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 
 static HTML_STYLE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?is)(<style\b[^>]*>)(.*?)(</style\s*>)")
@@ -141,6 +145,7 @@ struct Session {
     base_url: Url,
     native_origin: bool,
     native_token: Option<String>,
+    native_proxy_port: Option<u16>,
     clients: Mutex<UpstreamClientCache>,
     cache: Mutex<ResourceCache>,
     gate: Mutex<GateState>,
@@ -479,6 +484,8 @@ struct CreateSessionResponse {
     session_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     native_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_proxy_port: Option<u16>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1233,6 +1240,16 @@ async fn create_session(
 
     let id = Uuid::new_v4().simple().to_string();
     let native_token = input.native_origin.then(|| Uuid::new_v4().to_string());
+    let native_proxy_listener = if input.native_origin {
+        Some(TcpListener::bind("127.0.0.1:0").await.map_err(|error| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not bind native-origin CONNECT listener: {error}"))
+        })?)
+    } else {
+        None
+    };
+    let native_proxy_port = native_proxy_listener.as_ref()
+        .and_then(|listener| listener.local_addr().ok())
+        .map(|address| address.port());
     let mut clients = UpstreamClientCache::default();
     clients.insert_or_get(
         origin_key(&target),
@@ -1246,6 +1263,7 @@ async fn create_session(
         base_url: target,
         native_origin: input.native_origin,
         native_token: native_token.clone(),
+        native_proxy_port,
         clients: Mutex::new(clients),
         cache: Mutex::new(ResourceCache::default()),
         gate: Mutex::new(GateState::Waiting),
@@ -1278,13 +1296,372 @@ async fn create_session(
     if sessions.len() >= state.max_sessions {
         return Err((StatusCode::TOO_MANY_REQUESTS, "Maximum active session count reached; wait for an idle session to expire".into()));
     }
-    sessions.insert(id.clone(), session);
+    sessions.insert(id.clone(), Arc::clone(&session));
     drop(sessions);
+    if let Some(listener) = native_proxy_listener {
+        tokio::spawn(run_native_connect_proxy(listener, Arc::downgrade(&session)));
+    }
     Ok(Json(CreateSessionResponse {
         id: id.clone(),
         session_url,
         native_token,
+        native_proxy_port,
     }))
+}
+
+
+
+#[derive(Debug)]
+struct NativeConnectRequest {
+    host: String,
+    port: u16,
+    proxy_authorization: Option<String>,
+}
+
+fn parse_native_connect_request(header: &[u8]) -> Result<NativeConnectRequest, &'static str> {
+    let text = std::str::from_utf8(header).map_err(|_| "invalid_header_encoding")?;
+    if !text.ends_with("\r\n\r\n") {
+        return Err("incomplete_header");
+    }
+    let mut lines = text.split("\r\n");
+    let request_line = lines.next().ok_or("missing_request_line")?;
+    let mut parts = request_line.split_ascii_whitespace();
+    if parts.next() != Some("CONNECT") {
+        return Err("method_not_connect");
+    }
+    let authority = parts.next().ok_or("missing_connect_authority")?;
+    let version = parts.next().ok_or("missing_http_version")?;
+    if !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+        || parts.next().is_some()
+        || !authority.ends_with(":443")
+    {
+        return Err("invalid_request_line");
+    }
+
+    let target = Url::parse(&format!("https://{authority}/"))
+        .map_err(|_| "invalid_connect_authority")?;
+    if !target.username().is_empty()
+        || target.password().is_some()
+        || target.port_or_known_default() != Some(443)
+        || target.path() != "/"
+        || target.query().is_some()
+        || target.fragment().is_some()
+    {
+        return Err("connect_must_target_https_port_443");
+    }
+    let host = target.host_str()
+        .ok_or("missing_connect_host")?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host.is_empty() {
+        return Err("missing_connect_host");
+    }
+
+    let mut proxy_authorization = None;
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("proxy-authorization") {
+            if proxy_authorization.is_some() {
+                return Err("duplicate_proxy_authorization");
+            }
+            proxy_authorization = Some(value.trim().to_owned());
+        }
+    }
+
+    Ok(NativeConnectRequest {
+        host,
+        port: 443,
+        proxy_authorization,
+    })
+}
+
+fn is_native_tunnel_host(host: &str) -> bool {
+    const ALLOWED_DOMAINS: &[&str] = &[
+        "youtube.com",
+        "googlevideo.com",
+        "googleapis.com",
+        "gstatic.com",
+        "ytimg.com",
+    ];
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    ALLOWED_DOMAINS.iter().any(|domain| {
+        host == *domain || host.strip_suffix(domain)
+            .is_some_and(|prefix| prefix.ends_with('.') && prefix.len() > 1)
+    })
+}
+
+fn native_proxy_bearer_matches(provided: Option<&str>, expected: &str) -> bool {
+    let Some(provided) = provided.and_then(|value| value.strip_prefix("Bearer ")) else {
+        return false;
+    };
+    if provided.len() != expected.len() {
+        return false;
+    }
+    provided.bytes().zip(expected.bytes())
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right)) == 0
+}
+
+async fn read_native_connect_header(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+    let mut header = Vec::with_capacity(512);
+    let mut byte = [0u8; 1];
+    loop {
+        if header.len() >= MAX_NATIVE_CONNECT_HEADER_BYTES {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "CONNECT header too large"));
+        }
+        let count = stream.read(&mut byte).await?;
+        if count == 0 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "client closed before CONNECT headers"));
+        }
+        header.push(byte[0]);
+        if header.ends_with(b"\r\n\r\n") {
+            return Ok(header);
+        }
+    }
+}
+
+async fn write_native_connect_error(client: &mut TcpStream, status: &'static str) {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+    );
+    let _ = client.write_all(response.as_bytes()).await;
+}
+
+async fn run_native_connect_proxy(listener: TcpListener, session: Weak<Session>) {
+    let Some(active_session) = session.upgrade() else {
+        return;
+    };
+    let mut cancellation = active_session.cancel_tx.subscribe();
+    drop(active_session);
+
+    loop {
+        tokio::select! {
+            _ = wait_for_cancellation(&mut cancellation) => break,
+            accepted = listener.accept() => match accepted {
+                Ok((client, _peer)) => {
+                    let session = session.clone();
+                    tokio::spawn(async move {
+                        handle_native_connect(client, session).await;
+                    });
+                }
+                Err(error) => {
+                    if let Some(session) = session.upgrade() {
+                        push_event(
+                            &session,
+                            "native_connect_error",
+                            "listener".to_owned(),
+                            format!("stage=accept error={}", clean_field(error.to_string(), 120)),
+                        ).await;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn handle_native_connect(mut client: TcpStream, session: Weak<Session>) {
+    let Some(session) = session.upgrade() else {
+        write_native_connect_error(&mut client, "503 Service Unavailable").await;
+        return;
+    };
+    let permit = match session.inflight.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            write_native_connect_error(&mut client, "503 Service Unavailable").await;
+            push_event(
+                &session,
+                "native_connect_rejected",
+                "unknown:443".to_owned(),
+                "reason=session_connection_limit".to_owned(),
+            ).await;
+            return;
+        }
+    };
+
+    let header = match tokio::time::timeout(
+        NATIVE_CONNECT_HEADER_TIMEOUT,
+        read_native_connect_header(&mut client),
+    ).await {
+        Ok(Ok(header)) => header,
+        Ok(Err(error)) => {
+            write_native_connect_error(&mut client, "400 Bad Request").await;
+            push_event(
+                &session,
+                "native_connect_rejected",
+                "unknown:443".to_owned(),
+                format!("reason=invalid_connect_header error={}", clean_field(error.to_string(), 100)),
+            ).await;
+            return;
+        }
+        Err(_) => {
+            write_native_connect_error(&mut client, "408 Request Timeout").await;
+            push_event(
+                &session,
+                "native_connect_rejected",
+                "unknown:443".to_owned(),
+                "reason=connect_header_timeout".to_owned(),
+            ).await;
+            return;
+        }
+    };
+    let request = match parse_native_connect_request(&header) {
+        Ok(request) => request,
+        Err(reason) => {
+            write_native_connect_error(&mut client, "400 Bad Request").await;
+            push_event(
+                &session,
+                "native_connect_rejected",
+                "unknown:443".to_owned(),
+                format!("reason={reason}"),
+            ).await;
+            return;
+        }
+    };
+    let target = format!("{}:{}", request.host, request.port);
+    let expected_token = session.native_token.as_deref().unwrap_or_default();
+    if expected_token.is_empty()
+        || !native_proxy_bearer_matches(request.proxy_authorization.as_deref(), expected_token)
+    {
+        write_native_connect_error(&mut client, "407 Proxy Authentication Required").await;
+        push_event(
+            &session,
+            "native_connect_rejected",
+            target,
+            "reason=invalid_proxy_capability".to_owned(),
+        ).await;
+        return;
+    }
+    if !is_native_tunnel_host(&request.host) {
+        write_native_connect_error(&mut client, "403 Forbidden").await;
+        push_event(
+            &session,
+            "native_connect_rejected",
+            target,
+            "reason=destination_not_allowlisted".to_owned(),
+        ).await;
+        return;
+    }
+
+    let resolved = tokio::time::timeout(
+        NATIVE_CONNECT_DNS_TIMEOUT,
+        lookup_host((request.host.as_str(), request.port)),
+    ).await;
+    let addresses = match resolved {
+        Ok(Ok(addresses)) => addresses.collect::<Vec<SocketAddr>>(),
+        Ok(Err(error)) => {
+            write_native_connect_error(&mut client, "502 Bad Gateway").await;
+            push_event(
+                &session,
+                "native_connect_error",
+                target,
+                format!("stage=dns error={}", clean_field(error.to_string(), 120)),
+            ).await;
+            return;
+        }
+        Err(_) => {
+            write_native_connect_error(&mut client, "504 Gateway Timeout").await;
+            push_event(
+                &session,
+                "native_connect_error",
+                target,
+                "stage=dns error=timeout".to_owned(),
+            ).await;
+            return;
+        }
+    };
+    if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
+        write_native_connect_error(&mut client, "403 Forbidden").await;
+        push_event(
+            &session,
+            "native_connect_rejected",
+            target,
+            "reason=destination_resolved_to_non_public_address".to_owned(),
+        ).await;
+        return;
+    }
+
+    let mut upstream = None;
+    let mut last_error = None;
+    for address in addresses {
+        match TcpStream::connect(address).await {
+            Ok(stream) => {
+                upstream = Some(stream);
+                break;
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let Some(mut upstream) = upstream else {
+        write_native_connect_error(&mut client, "502 Bad Gateway").await;
+        push_event(
+            &session,
+            "native_connect_error",
+            target,
+            format!(
+                "stage=connect error={}",
+                clean_field(last_error.map(|error| error.to_string()).unwrap_or_else(|| "no_public_address".to_owned()), 120)
+            ),
+        ).await;
+        return;
+    };
+
+    if client.write_all(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: Intercept\r\n\r\n").await.is_err() {
+        return;
+    }
+    let started = Instant::now();
+    push_event(
+        &session,
+        "native_connect_open",
+        target.clone(),
+        "tls=passthrough destination_policy=allowlist".to_owned(),
+    ).await;
+
+    let mut cancellation = session.cancel_tx.subscribe();
+    let transfer = tokio::select! {
+        result = copy_bidirectional(&mut client, &mut upstream) => Some(result),
+        _ = wait_for_cancellation(&mut cancellation) => None,
+    };
+    let elapsed_ms = duration_millis(started.elapsed());
+    match transfer {
+        Some(Ok((client_to_upstream_bytes, upstream_to_client_bytes))) => {
+            push_event(
+                &session,
+                "native_connect_close",
+                target,
+                format!(
+                    "outcome=complete elapsed_ms={elapsed_ms} client_to_upstream_bytes={client_to_upstream_bytes} upstream_to_client_bytes={upstream_to_client_bytes}"
+                ),
+            ).await;
+        }
+        Some(Err(error)) => {
+            push_event(
+                &session,
+                "native_connect_close",
+                target,
+                format!(
+                    "outcome=io_error elapsed_ms={elapsed_ms} error={}",
+                    clean_field(error.to_string(), 120)
+                ),
+            ).await;
+        }
+        None => {
+            let _ = client.shutdown().await;
+            let _ = upstream.shutdown().await;
+            push_event(
+                &session,
+                "native_connect_close",
+                target,
+                format!("outcome=session_cancelled elapsed_ms={elapsed_ms}"),
+            ).await;
+        }
+    }
+    drop(permit);
 }
 
 
@@ -1752,6 +2129,7 @@ async fn native_record_events(
                 | "native_response_headers"
                 | "native_request_complete"
                 | "native_request_error"
+                | "native_proxy_error"
         ) {
             continue;
         }
@@ -7108,6 +7486,7 @@ mod tests {
             base_url: Url::parse("https://example.com/start").unwrap(),
             native_origin: false,
             native_token: None,
+            native_proxy_port: None,
             clients: Mutex::new(UpstreamClientCache::default()),
             cache: Mutex::new(ResourceCache::default()),
             gate: Mutex::new(GateState::Waiting),
@@ -9464,6 +9843,54 @@ mod ump_stream_diagnostics_tests {
         assert!(!is_firefox_extension_origin("https://www.youtube.com"));
         assert!(!is_firefox_extension_origin("moz-extension://"));
         assert!(!is_firefox_extension_origin("moz-extension://invalid-origin"));
+    }
+
+    #[test]
+    fn native_connect_proxy_allowlists_only_expected_service_domains() {
+        for host in [
+            "youtube.com",
+            "www.youtube.com",
+            "m.youtube.com",
+            "rr1---sn.googlevideo.com",
+            "jnn-pa.googleapis.com",
+            "fonts.gstatic.com",
+            "i.ytimg.com",
+        ] {
+            assert!(is_native_tunnel_host(host), "{host} should be tunnelable");
+        }
+        for host in [
+            "notyoutube.com",
+            "youtube.com.evil.test",
+            "example.com",
+            "localhost",
+            "127.0.0.1",
+            "google.com",
+        ] {
+            assert!(!is_native_tunnel_host(host), "{host} must not be tunnelable");
+        }
+    }
+
+    #[test]
+    fn native_connect_proxy_parses_authority_and_checks_capability() {
+        let request = parse_native_connect_request(
+            b"CONNECT www.youtube.com:443 HTTP/1.1\r\nHost: www.youtube.com:443\r\nProxy-Authorization: Bearer session-capability\r\n\r\n",
+        ).unwrap();
+        assert_eq!(request.host, "www.youtube.com");
+        assert_eq!(request.port, 443);
+        assert!(native_proxy_bearer_matches(
+            request.proxy_authorization.as_deref(),
+            "session-capability",
+        ));
+        assert!(!native_proxy_bearer_matches(
+            request.proxy_authorization.as_deref(),
+            "different-capability",
+        ));
+        assert!(parse_native_connect_request(
+            b"CONNECT www.youtube.com:8443 HTTP/1.1\r\nProxy-Authorization: Bearer x\r\n\r\n"
+        ).is_err());
+        assert!(parse_native_connect_request(
+            b"GET https://www.youtube.com/ HTTP/1.1\r\n\r\n"
+        ).is_err());
     }
 
     #[test]

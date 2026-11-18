@@ -106,8 +106,8 @@ The dashboard reports the active-session count against `INTERCEPT_MAX_SESSIONS` 
 
 ## Firefox native-origin mode (YouTube)
 
-Intercept also includes an optional Firefox extension mode for YouTube. Unlike the reverse-proxy mode, it leaves the browser connected directly to YouTube: the page, dedicated workers, service workers, cookies, media requests, and TLS connection retain their native browser context. The extension observes selected YouTube and Google request lifecycle metadata and forwards sanitized events to the local Rust event store.
+Intercept also includes an optional Firefox extension mode for YouTube. It leaves the page, workers, cookies, and TLS endpoints on their native browser context, while routing selected HTTPS connections for YouTube/Google service domains through a per-session authenticated HTTP CONNECT tunnel on the local Rust server. TLS is passed through end-to-end: Firefox validates the real upstream certificate, and Intercept does not decrypt or rewrite HTTP traffic.
 
-**Important:** this initial native-origin mode is observation-only. It does not route request or response bytes through Rust, enforce Standard/Strict/Custom authorization rules, hold and replay requests, rewrite payloads, or populate the reverse-proxy cache. Those controls remain available in reverse-proxy mode. No raw request-header values, cookies, tokens, request/response bodies, or URL query strings are captured by the extension. A small allowlist of safe header values (such as Fetch Metadata enums, media types, and numeric content length) and sensitive-header presence booleans is recorded.
+The tunnel restricts CONNECT to port 443, requires a session capability, enforces a host allowlist, and refuses destinations that resolve to non-public IP addresses. The Firefox extension also observes sanitized browser request metadata and the Rust backend records tunnel lifecycle events.
 
-See extension/firefox/README.md for installation and use.
+**Important limitation:** because TLS is not terminated by Intercept, native-origin mode cannot inspect HTTP paths, headers, bodies, responses, or media payloads at the server. It therefore cannot enforce per-request Standard/Strict/Custom holds, replay requests, rewrite HTTP content, or use the reverse-proxy cache. Those request-level controls remain in reverse-proxy mode.
