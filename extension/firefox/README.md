@@ -16,7 +16,7 @@ This add-on opens YouTube directly in Firefox and observes selected request meta
 4. Pin **Intercept · Native Origin** from the Extensions menu if desired.
 5. Open the add-on popup, confirm the local server address, and choose **OPEN NATIVE-ORIGIN SESSION**.
 
-The popup opens an about:blank tab first, creates a native-origin session in the Rust server, stores its one-time capability in Firefox extension storage, and then navigates that tab directly to YouTube. The extension only observes requests from that tab. The popup can refresh the session event list or stop observation; stopping leaves the YouTube tab open.
+The popup opens an about:blank tab first, creates a native-origin session in the Rust server, stores its one-time capability in Firefox extension storage, and then navigates that tab directly to YouTube. The extension only observes requests from that tab. The popup can refresh the session event list, export the complete retained event log as a timestamped JSON file, or stop observation; stopping leaves the YouTube tab open. Export before stopping or closing the monitored tab, because deleting a session also deletes its in-memory event log.
 
 ## What is observed
 
