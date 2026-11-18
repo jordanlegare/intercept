@@ -757,7 +757,7 @@
     "webpo_token_hook", "k_t_release_hook", "l_t_release_hook",
     "loader_gate_hook", "shared_provider_ready_hook", "provider_ready_hook",
     "controller_init_hook", "controller_start_hook", "controller_dispose_hook",
-    "controller_owner_present", "controller_active",
+    "handle_error_hook", "controller_owner_present", "controller_active",
     "rejected", "retry_remaining", "video_data_present", "token_controller_active",
     "token_generation_pending", "content_token_enabled", "session_token_enabled",
     "provider_ready", "provider_present", "fallback_present", "living_room_mode",
