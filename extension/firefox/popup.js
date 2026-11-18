@@ -148,10 +148,13 @@ async function capturePageEnvironment() {
     probe_present: !!workerProbe,
     probe_schema_version: workerProbe && Number.isFinite(workerProbe.schema_version) ? workerProbe.schema_version : null,
     installed_at_ms: workerProbe && Number.isFinite(workerProbe.installed_at_ms) ? workerProbe.installed_at_ms : null,
-    dropped_events: workerProbe && Number.isFinite(workerProbe.dropped_events) ? workerProbe.dropped_events : 0,
+    dropped_events: workerProbe && Number.isSafeInteger(workerProbe.dropped_events)
+      ? Math.max(0, Math.min(workerProbe.dropped_events, 1000000)) : 0,
     instrumentation: workerProbe && workerProbe.instrumentation ? {
-      Worker: workerProbe.instrumentation.Worker || "unknown",
-      SharedWorker: workerProbe.instrumentation.SharedWorker || "unknown"
+      Worker: ["installed", "unavailable", "failed"].includes(workerProbe.instrumentation.Worker)
+        ? workerProbe.instrumentation.Worker : "unknown",
+      SharedWorker: ["installed", "unavailable", "failed"].includes(workerProbe.instrumentation.SharedWorker)
+        ? workerProbe.instrumentation.SharedWorker : "unknown"
     } : {Worker: "missing", SharedWorker: "missing"},
     event_count: workerEvents.length,
     events: workerEvents
