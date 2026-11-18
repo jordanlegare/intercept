@@ -7479,7 +7479,6 @@ fn plain(status: StatusCode, message: &str) -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{is_native_tunnel_host, native_proxy_bearer_matches, parse_native_connect_request};
 
     fn policy_test_session(policy: AuthorizationPolicy, rules: Vec<AuthorizationRule>) -> Session {
         Session {
@@ -9347,7 +9346,9 @@ mod ump_stream_diagnostics_tests {
         YouTubeAttestationTiming, YouTubeAttestationResponseMetadata,
         YouTubeSabrAttestationRequestSnapshot, youtube_attestation_age_band,
         youtube_playback_context_id_from_value, UmpStreamDiagnostics, event_detail_limit, clean_field,
-        is_firefox_extension_origin, native_bearer_matches, HeaderMap, HeaderValue, header,
+        is_firefox_extension_origin, native_bearer_matches,
+        is_native_tunnel_host, native_proxy_bearer_matches, parse_native_connect_request,
+        HeaderMap, HeaderValue, header,
     };
 
     #[test]
