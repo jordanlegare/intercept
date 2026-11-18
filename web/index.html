@@ -333,11 +333,18 @@
       for (const session of data.sessions) {
         const item = document.createElement("li");
         const link = document.createElement("a");
-        link.href = session.session_url;
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
-        link.textContent = session.target_url;
-        link.title = "Open this active session in a new tab";
+        if (session.mode === "native-origin") {
+          link.textContent = session.target_url + " · manage in Firefox extension";
+          link.title = "Native-origin session is managed by the Firefox extension popup";
+          link.style.cursor = "default";
+          link.style.textDecoration = "none";
+        } else {
+          link.href = session.session_url;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.textContent = session.target_url;
+          link.title = "Open this active session in a new tab";
+        }
         const actions = document.createElement("div");
         actions.className = "session-actions";
         const meta = document.createElement("span");
@@ -345,6 +352,7 @@
         meta.textContent = session.mode === "native-origin"
           ? "NATIVE ORIGIN · OBSERVE ONLY · " + session.state
           : session.policy.toUpperCase() + " · " + session.state;
+        const sessionActions = [];
         if (session.mode !== "native-origin") {
           const browse = document.createElement("button");
           browse.type = "button";
@@ -353,6 +361,7 @@
           browse.title = "Browse this session's in-memory cache";
           browse.setAttribute("aria-label", "Browse cached files for " + session.target_url);
           browse.addEventListener("click", () => openCacheBrowser(session));
+          sessionActions.push(browse);
         }
 
         const terminate = document.createElement("button");
@@ -380,7 +389,7 @@
             message.textContent = error.message || String(error);
           }
         });
-        actions.append(meta, browse, terminate);
+        actions.append(meta, ...sessionActions, terminate);
         item.append(link, actions);
         sessionsList.append(item);
       }
