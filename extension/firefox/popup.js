@@ -250,6 +250,19 @@ async function captureEnvironment() {
   try {
     const [tab] = await browser.tabs.query({active: true, currentWindow: true});
     if (!tab || !Number.isInteger(tab.id)) throw new Error("Could not identify the active tab.");
+    if (!tab.url) throw new Error("Firefox did not provide the active tab URL.");
+    const activeUrl = new URL(tab.url);
+    if (!["http:", "https:"].includes(activeUrl.protocol)) {
+      throw new Error("Environment capture requires an HTTP or HTTPS page.");
+    }
+    const tabOriginPattern = activeUrl.origin + "/*";
+    const alreadyAllowed = await browser.permissions.contains({origins: [tabOriginPattern]});
+    if (!alreadyAllowed) {
+      const granted = await browser.permissions.request({origins: [tabOriginPattern]});
+      if (!granted) {
+        throw new Error("Firefox did not grant access to this tab's origin. Allow the requested site permission and try again.");
+      }
+    }
     const results = await browser.scripting.executeScript({
       target: {tabId: tab.id},
       world: "MAIN",
