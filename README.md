@@ -113,3 +113,6 @@ Intercept also includes an optional Firefox extension mode for YouTube. Unlike t
 The dashboard lists the extension-created session and now reports its live heartbeat state (**CONNECTED**, **STALE**, or **WAITING FOR EXTENSION**). The activity control opens the retained, sanitized browser-request event log. Native-origin traffic preserves end-to-end TLS, so its response bodies are not available to the Rust proxy cache; use the folder control on a reverse-proxy session to inspect cached files.
 
 See extension/firefox/README.md for installation and use.
+
+
+The Firefox native-origin extension also has an opt-in **DOWNLOAD WHEN VIDEO COMPLETES** control. It records the rendered player output to a temporary WebM capture and starts a download when playback ends. This is a re-encoded capture, not a dump of Firefox's internal HTTP cache or YouTube's original media bytes; DRM-protected media may not be capturable. See extension/firefox/README.md for details.
