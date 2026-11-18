@@ -12,7 +12,6 @@
     if (event.source !== window || event.origin !== location.origin
         || !data || data.type !== MESSAGE_TYPE
         || typeof data.request_id !== "string"
-        || typeof data.token !== "string" || !data.token
         || !data.blob || typeof data.blob.size !== "number"
         || typeof data.blob.slice !== "function"
         || typeof data.blob.type !== "string") return;
@@ -66,7 +65,6 @@
       port.postMessage({
         type: "start",
         request_id: data.request_id,
-        token: data.token,
         filename: data.filename,
         blob: data.blob
       });
