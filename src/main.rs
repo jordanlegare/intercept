@@ -8308,7 +8308,7 @@ mod ump_stream_diagnostics_tests {
         Duration, Instant, SabrBackoffWindow, SabrRequestParseState, SabrRequestTiming,
         YouTubeAttestationTiming, YouTubeAttestationResponseMetadata,
         YouTubeSabrAttestationRequestSnapshot, youtube_attestation_age_band,
-        UmpStreamDiagnostics, event_detail_limit, clean_field,
+        youtube_playback_context_id_from_value, UmpStreamDiagnostics, event_detail_limit, clean_field,
     };
 
     #[test]
