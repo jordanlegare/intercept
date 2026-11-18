@@ -1200,6 +1200,17 @@ async fn create_session(
     if !is_public_destination(&target) {
         return Err((StatusCode::FORBIDDEN, "Local, private, and link-local destinations are blocked".into()));
     }
+    if input.native_origin {
+        let host = target.host_str().unwrap_or_default().to_ascii_lowercase();
+        if target.scheme() != "https:"
+            || !(host == "youtube.com" || host.ends_with(".youtube.com"))
+        {
+            return Err((StatusCode::BAD_REQUEST, "Native-origin mode is limited to HTTPS YouTube URLs".into()));
+        }
+        target.set_path("/");
+        target.set_query(None);
+        target.set_fragment(None);
+    }
 
     let policy = input.policy.unwrap_or_else(|| {
         std::env::var("INTERCEPT_AUTH_POLICY")
