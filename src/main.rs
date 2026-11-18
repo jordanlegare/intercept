@@ -1721,7 +1721,7 @@ async fn native_get_events(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ActionEvent>>, (StatusCode, String)> {
-    find_native_session(&state, &id, &headers).await?;
+    let session = find_native_session(&state, &id, &headers).await?;
     let events = session.events.lock().await.iter().cloned().collect();
     Ok(Json(events))
 }
@@ -1759,7 +1759,7 @@ async fn native_delete_session(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let session = find_native_session(&state, &id, &headers).await?;
+    find_native_session(&state, &id, &headers).await?;
     let removed = state.sessions.write().await.remove(&id)
         .ok_or((StatusCode::NOT_FOUND, "Unknown or expired native session".into()))?;
     removed.cancelled.store(true, Ordering::Release);
