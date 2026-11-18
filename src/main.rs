@@ -5593,8 +5593,93 @@ fn replace_youtube_recovery_source_once(source: &mut String, needle: &str, repla
     true
 }
 
+fn inject_youtube_recovery_function_entry_at(
+    source: &mut String,
+    start: usize,
+    phase: &str,
+) -> bool {
+    let Some(open_paren_rel) = source[start..].find("(") else {
+        return false;
+    };
+    let open_paren = start + open_paren_rel;
+    let Some(close_paren_rel) = source[open_paren + 1..].find(")") else {
+        return false;
+    };
+    let close_paren = open_paren + 1 + close_paren_rel;
+    let Some(body_open_rel) = source[close_paren + 1..].find("{") else {
+        return false;
+    };
+    let body_open = close_paren + 1 + body_open_rel;
+    if body_open.saturating_sub(start) > 180 {
+        return false;
+    }
+
+    let first_parameter = source[open_paren + 1..close_paren]
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim();
+    let owner = if first_parameter.is_empty() {
+        "this"
+    } else {
+        first_parameter
+    };
+    let hook = format!(
+        r#"typeof window!=="undefined"&&window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("{phase}",{{controller_owner_present:!!({owner}&&typeof {owner}==="object"),controller_active:!!({owner}&&{owner}.K),token_generation_pending:!!({owner}&&{owner}.C),release_pending:!!({owner}&&{owner}.D)}});"#
+    );
+    source.insert_str(body_open + 1, &hook);
+    true
+}
+
+fn inject_youtube_recovery_function_entry(
+    source: &mut String,
+    marker: &str,
+    phase: &str,
+) -> bool {
+    let Some(start) = source.find(marker) else {
+        return false;
+    };
+    inject_youtube_recovery_function_entry_at(source, start, phase)
+}
+
+fn inject_youtube_recovery_class_method_entry(
+    source: &mut String,
+    class_marker: &str,
+    method_marker: &str,
+    phase: &str,
+) -> bool {
+    let Some(class_start) = source.find(class_marker) else {
+        return false;
+    };
+    let Some(method_rel) = source[class_start..].find(method_marker) else {
+        return false;
+    };
+    inject_youtube_recovery_function_entry_at(source, class_start + method_rel, phase)
+}
+
 fn instrument_youtube_sabr_recovery(source: &str) -> String {
     let mut instrumented = source.to_owned();
+
+    let controller_init_hook = inject_youtube_recovery_function_entry(
+        &mut instrumented,
+        "F0a=function",
+        "token_controller_init_enter",
+    );
+    let controller_start_hook = inject_youtube_recovery_function_entry(
+        &mut instrumented,
+        "iT=function",
+        "token_controller_start_enter",
+    );
+    let controller_dispose_hook = inject_youtube_recovery_function_entry(
+        &mut instrumented,
+        "Upb.prototype.ka=function",
+        "token_controller_dispose_enter",
+    ) || inject_youtube_recovery_class_method_entry(
+        &mut instrumented,
+        "Upb=class",
+        "ka()",
+        "token_controller_dispose_enter",
+    );
 
     let spsumpreject_hook = replace_youtube_recovery_source_once(
         &mut instrumented,
@@ -5658,6 +5743,9 @@ fn instrument_youtube_sabr_recovery(source: &str) -> String {
     );
 
     let patch_count = [
+        controller_init_hook,
+        controller_start_hook,
+        controller_dispose_hook,
         spsumpreject_hook,
         recovery_request_hook,
         session_wait_hook,
@@ -5673,7 +5761,7 @@ fn instrument_youtube_sabr_recovery(source: &str) -> String {
     ].into_iter().filter(|matched| *matched).count();
 
     let status = format!(
-        "try{{typeof window!==\"undefined\"&&window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery(\"base_instrumentation_status\",{{spsumpreject_hook:{},recovery_request_hook:{},session_wait_hook:{},session_generate_hook:{},content_generate_hook:{},fallback_token_hook:{},webpo_token_hook:{},k_t_release_hook:{},l_t_release_hook:{},loader_gate_hook:{},shared_provider_ready_hook:{},provider_ready_hook:{},patch_count:{patch_count}}})}}catch(_e){{}};\n",
+        "try{{typeof window!==\"undefined\"&&window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery(\"base_instrumentation_status\",{{spsumpreject_hook:{},recovery_request_hook:{},session_wait_hook:{},session_generate_hook:{},content_generate_hook:{},fallback_token_hook:{},webpo_token_hook:{},k_t_release_hook:{},l_t_release_hook:{},loader_gate_hook:{},shared_provider_ready_hook:{},provider_ready_hook:{},controller_init_hook:{},controller_start_hook:{},controller_dispose_hook:{},patch_count:{patch_count}}})}}catch(_e){{}};\n",
         spsumpreject_hook,
         recovery_request_hook,
         session_wait_hook,
@@ -5686,6 +5774,9 @@ fn instrument_youtube_sabr_recovery(source: &str) -> String {
         loader_gate_hook,
         token_provider_shared_ready_hook,
         token_provider_ready_hook,
+        controller_init_hook,
+        controller_start_hook,
+        controller_dispose_hook,
     );
     // Keep a top-level strict-mode directive first. Guard every injected hook
     // because the same JavaScript rewriter also handles worker scripts.
@@ -6883,6 +6974,49 @@ mod tests {
         assert!(output.contains("loader_release_requested"));
         assert!(output.contains("phase=loader_gate") || output.contains("loader_gate"));
         assert!(!output.contains("token="));
+    }
+
+    #[test]
+    fn youtube_base_bundle_reports_token_controller_lifecycle_entry_points() {
+        let base = Url::parse("https://www.youtube.com/s/player/test/base.js").unwrap();
+        let fixture = concat!(
+            r#"F0a=function(a){a.K=!1;};"#,
+            r#"iT=function(a){a.K=!0;a.C=null;};"#,
+            r#"Upb.prototype.ka=function(){this.K=!1;this.C=null;};"#,
+        );
+        let output = rewrite_javascript(
+            fixture,
+            &base,
+            &base,
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+
+        assert!(output.contains("token_controller_init_enter"));
+        assert!(output.contains("token_controller_start_enter"));
+        assert!(output.contains("token_controller_dispose_enter"));
+        assert!(output.contains("controller_init_hook:true"));
+        assert!(output.contains("controller_start_hook:true"));
+        assert!(output.contains("controller_dispose_hook:true"));
+        assert!(output.contains("controller_active:!!(a&&a.K)"));
+        assert!(output.contains("controller_active:!!(this&&this.K)"));
+    }
+
+    #[test]
+    fn youtube_base_class_method_disposal_hook_is_supported() {
+        let base = Url::parse("https://www.youtube.com/s/player/test/base.js").unwrap();
+        let fixture = r#"Upb=class{ka(){this.K=!1;this.C=null;}};"#;
+        let output = rewrite_javascript(
+            fixture,
+            &base,
+            &base,
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+
+        assert!(output.contains("token_controller_dispose_enter"));
+        assert!(output.contains("controller_dispose_hook:true"));
+        assert!(output.contains("controller_active:!!(this&&this.K)"));
     }
 
     #[test]

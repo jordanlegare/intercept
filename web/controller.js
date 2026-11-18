@@ -745,13 +745,18 @@
     "token_result_empty",
     "token_release_check",
     "loader_release_requested",
-    "loader_gate"
+    "loader_gate",
+    "token_controller_init_enter",
+    "token_controller_start_enter",
+    "token_controller_dispose_enter"
   ]);
   const SABR_RECOVERY_BOOLEAN_FIELDS = new Set([
     "spsumpreject_hook", "recovery_request_hook", "session_wait_hook",
     "session_generate_hook", "content_generate_hook", "fallback_token_hook",
     "webpo_token_hook", "k_t_release_hook", "l_t_release_hook",
     "loader_gate_hook", "shared_provider_ready_hook", "provider_ready_hook",
+    "controller_init_hook", "controller_start_hook", "controller_dispose_hook",
+    "controller_owner_present", "controller_active",
     "rejected", "retry_remaining", "video_data_present", "token_controller_active",
     "token_generation_pending", "content_token_enabled", "session_token_enabled",
     "provider_ready", "provider_present", "fallback_present", "living_room_mode",
