@@ -2,6 +2,9 @@
   "use strict";
 
   const KEY = "__interceptPlaybackDownloadV1";
+  const host = location.hostname.toLowerCase();
+  if (location.protocol !== "https:" || !(host === "youtube.com" || host.endsWith(".youtube.com"))
+      || (location.port && location.port !== "443")) return;
   if (globalThis[KEY]) return;
   const CACHE_DIRECTORY = "intercept-playback-downloads";
   const MAX_CAPTURE_BYTES = 2 * 1024 * 1024 * 1024;
