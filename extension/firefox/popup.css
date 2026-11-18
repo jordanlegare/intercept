@@ -17,3 +17,7 @@ button:disabled{opacity:.5;cursor:wait}#active{border-top:1px solid #2a3b51;marg
 .compare-actions{grid-template-columns:1fr 1fr}.compare-actions button{font-size:10px}
 #message{min-height:20px;padding-top:10px;color:#ffcf83;font-size:10px;overflow-wrap:anywhere}
 footer{border-top:1px solid #24354a;padding-top:12px;margin-top:15px;color:#758ba5;font:10px/1.5 system-ui,sans-serif}
+#media-trace{border-top:1px solid #2a3b51;margin-top:18px;padding-top:14px}
+.trace-actions{grid-template-columns:1fr 1fr}
+.trace-actions button{font-size:9px;min-height:34px}
+#media-trace-status{line-height:1.6;overflow-wrap:anywhere}
