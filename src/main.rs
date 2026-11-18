@@ -3005,19 +3005,21 @@ fn is_youtube_inner_tube_endpoint(url: &Url) -> bool {
             || host.to_ascii_lowercase().ends_with(".youtube.com")
     });
     let path = url.path().to_ascii_lowercase();
-    youtube_host && (
-        matches!(
-            path.as_str(),
-            "/youtubei/v1/search"
-                | "/youtubei/v1/player"
-                | "/youtubei/v1/get_watch"
-                | "/youtubei/v1/next"
-                | "/youtubei/v1/feedback"
-                | "/youtubei/v1/att/get"
-                | "/youtubei/v1/att/log"
-        )
-        || path.starts_with("/api/jnn/v1/")
-    )
+
+    // Every InnerTube RPC on a YouTube web origin shares the same browser
+    // session context. Keep endpoint-specific behavior (player fallback,
+    // search recovery, etc.) gated by its own exact path checks below, but do
+    // not make cookie lookup, SAPISID authorization, or Origin restoration
+    // depend on a partial list of RPC names. New endpoints such as browse,
+    // guide, and complete otherwise bypass that common authentication path.
+    let innertube_path = path
+        .strip_prefix("/youtubei/v1/")
+        .is_some_and(|rpc| !rpc.is_empty() && !rpc.starts_with("player/"));
+    let youtube_waa_path = path
+        .strip_prefix("/api/jnn/v1/")
+        .is_some_and(|rpc| !rpc.is_empty());
+
+    youtube_host && (innertube_path || youtube_waa_path)
 }
 
 fn youtube_attestation_rpc_operation(url: &Url) -> Option<&'static str> {
@@ -8346,6 +8348,45 @@ mod tests {
             sanitize_event_target("button.ytp-button.ytp-error-button".to_owned(), 240),
             "button.ytp-button.ytp-error-button"
         );
+    }
+
+    #[test]
+    fn recognizes_all_innertube_rpc_paths_for_shared_youtube_session_handling() {
+        for path in [
+            "/youtubei/v1/search",
+            "/youtubei/v1/player",
+            "/youtubei/v1/get_watch",
+            "/youtubei/v1/next",
+            "/youtubei/v1/feedback",
+            "/youtubei/v1/att/get",
+            "/youtubei/v1/att/log",
+            "/youtubei/v1/browse",
+            "/youtubei/v1/guide",
+            "/youtubei/v1/complete",
+            "/youtubei/v1/like",
+            "/youtubei/v1/comment/create",
+            "/api/jnn/v1/GenerateIT",
+        ] {
+            let url = Url::parse(&format!("https://www.youtube.com{path}")).unwrap();
+            assert!(
+                is_youtube_inner_tube_endpoint(&url),
+                "{path} should receive shared YouTube session handling"
+            );
+        }
+
+        for url in [
+            "https://youtube.com/youtubei/v1/",
+            "https://example.com/youtubei/v1/browse",
+            "https://youtubei.googleapis.com/youtubei/v1/browse",
+            "https://www.youtube.com/youtubei/v2/browse",
+            "https://www.youtube.com/api/jnn/",
+        ] {
+            let parsed = Url::parse(url).unwrap();
+            assert!(
+                !is_youtube_inner_tube_endpoint(&parsed),
+                "{url} must not be classified as a YouTube InnerTube RPC"
+            );
+        }
     }
 
     #[test]
