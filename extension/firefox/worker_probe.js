@@ -38,16 +38,19 @@
         const match = raw.match(/^blob:(https?:\/\/[^/]+)/i);
         origin = match ? match[1] : "null";
       }
-      let originClass = "opaque";
+      let originScheme = "opaque";
       let host = "other";
+      let originClass = "opaque";
       if (origin && origin !== "null") {
         const originUrl = new URL(origin);
+        originScheme = originUrl.protocol.replace(/:$/, "");
         host = hostClass(originUrl.hostname);
-        originClass = originUrl.protocol + "//" + host
+        originClass = originScheme + "://" + host
           + (originUrl.port ? ":" + originUrl.port : "");
       }
       return {
         scheme: parsed.protocol.replace(/:$/, ""),
+        origin_scheme: originScheme,
         host_class: host,
         origin_class: originClass,
         path_class: isBlob ? "blob_worker" : pathClass(parsed.pathname),
@@ -56,6 +59,7 @@
     } catch (_) {
       return {
         scheme: "unparseable",
+        origin_scheme: "opaque",
         host_class: "other",
         origin_class: "opaque",
         path_class: "other",
@@ -125,11 +129,17 @@
         }
       });
 
-      Object.defineProperty(globalThis, name, {
-        value: wrapped,
-        configurable: true,
-        writable: true
-      });
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+      if (descriptor && Object.prototype.hasOwnProperty.call(descriptor, "value")) {
+        Object.defineProperty(globalThis, name, {...descriptor, value: wrapped});
+      } else {
+        Object.defineProperty(globalThis, name, {
+          value: wrapped,
+          configurable: true,
+          enumerable: descriptor ? !!descriptor.enumerable : false,
+          writable: true
+        });
+      }
       state.instrumentation[name] = globalThis[name] === wrapped ? "installed" : "failed";
     } catch (_) {
       state.instrumentation[name] = "failed";
