@@ -10,6 +10,83 @@ const inFlight = new Map();
 let pendingEvents = [];
 let flushTimer = null;
 let flushActive = false;
+const playbackDownloadJobs = new Map();
+
+function safePlaybackFilename(value) {
+  let filename = String(value || "youtube-playback.webm")
+    .replace(/[<>:"/\\|?*\\u0000-\\u001f]/g, "_")
+    .replace(/[\\/]+/g, "_")
+    .trim()
+    .slice(0, 140);
+  if (!filename) filename = "youtube-playback";
+  return filename.toLowerCase().endsWith(".webm") ? filename : filename + ".webm";
+}
+
+browser.downloads.onChanged.addListener(delta => {
+  const job = playbackDownloadJobs.get(delta.id);
+  if (!job || !delta.state) return;
+  if (delta.state.current === "complete" || delta.state.current === "interrupted") {
+    playbackDownloadJobs.delete(delta.id);
+    try { URL.revokeObjectURL(job.objectUrl); } catch (_) {}
+    try { job.port.postMessage({type: "playback-download:finished", state: delta.state.current}); } catch (_) {}
+    try { job.port.disconnect(); } catch (_) {}
+  }
+});
+
+browser.runtime.onConnect.addListener(port => {
+  if (!port || port.name !== "intercept-playback-download") return;
+  const tabId = port.sender && port.sender.tab && port.sender.tab.id;
+  let accepted = false;
+  port.onMessage.addListener(async message => {
+    if (accepted || !message || message.type !== "start") return;
+    accepted = true;
+    try {
+      await sessionReady;
+      const session = activeSession;
+      if (!session || !Number.isInteger(tabId) || tabId !== session.tabId
+          || !session.downloadEnabled || !session.downloadToken
+          || message.token !== session.downloadToken) {
+        throw new Error("The active native session did not authorize this playback download.");
+      }
+      const blob = message.blob;
+      if (!blob || typeof blob.size !== "number" || typeof blob.slice !== "function"
+          || typeof blob.type !== "string" || !blob.type.toLowerCase().startsWith("video/webm")
+          || blob.size <= 0 || blob.size > 2 * 1024 * 1024 * 1024) {
+        throw new Error("The captured WebM file has an invalid type or size.");
+      }
+      const objectUrl = URL.createObjectURL(blob);
+      let downloadId;
+      try {
+        downloadId = await browser.downloads.download({
+          url: objectUrl,
+          filename: safePlaybackFilename(message.filename),
+          conflictAction: "uniquify"
+        });
+      } catch (error) {
+        URL.revokeObjectURL(objectUrl);
+        throw error;
+      }
+      playbackDownloadJobs.set(downloadId, {objectUrl, port});
+      port.postMessage({type: "playback-download:started", download_id: downloadId});
+      setTimeout(() => {
+        const job = playbackDownloadJobs.get(downloadId);
+        if (job && job.port === port) {
+          playbackDownloadJobs.delete(downloadId);
+          try { URL.revokeObjectURL(objectUrl); } catch (_) {}
+          try { port.disconnect(); } catch (_) {}
+        }
+      }, 60 * 60 * 1000);
+    } catch (error) {
+      try {
+        port.postMessage({
+          type: "playback-download:failed",
+          error: String(error && error.message || error || "Firefox could not start the playback download.")
+        });
+      } catch (_) {}
+      try { port.disconnect(); } catch (_) {}
+    }
+  });
+});
 let activeSession = null;
 
 const MEDIA_TRACE_URL_FILTERS = [
