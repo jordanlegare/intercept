@@ -55,6 +55,7 @@
       || event.kind === "youtube_sabr_attestation_context"
       || event.kind === "youtube_player_media_mutation"
       || event.kind === "youtube_sabr_recovery"
+      || event.kind === "youtube_player_error"
     );
   }
 
@@ -79,7 +80,7 @@
     if (INTERNAL_AUTHORITY_EVENTS.has(kind)) return;
     const eventKind = String(kind).slice(0, 80);
     const detailLimit = eventKind === "youtube_player_watchdog" || eventKind === "youtube_attestation_rpc"
-      || eventKind === "youtube_sabr_recovery" ? 1100
+      || eventKind === "youtube_sabr_recovery" || eventKind === "youtube_player_error" ? 1100
       : eventKind === "youtube_player_state" || eventKind === "youtube_player_media_mutation" ? 900 : 300;
     eventBuffer.push({
       kind: eventKind,
@@ -792,6 +793,114 @@
       enumerable: false,
       writable: false,
       value: recordSabrRecovery
+    });
+  } catch (_) {}
+
+  function sanitizedYouTubePlayerErrorCallers(stack) {
+    try {
+      const frames = String(stack || "").split("\n").slice(1);
+      const safeFrames = [];
+      for (const frame of frames) {
+        const match = frame.match(/https?:\/\/[^\s)]+/);
+        if (!match) continue;
+        const raw = match[0];
+        const position = raw.match(/:(\d+):(\d+)$/);
+        const address = position ? raw.slice(0, -position[0].length) : raw;
+        const parsed = new URL(address);
+        const segments = parsed.pathname.split("/").filter(Boolean);
+        const file = (segments.length ? segments[segments.length - 1] : "script")
+          .replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 32) || "script";
+        const functionName = frame.slice(0, match.index)
+          .replace(/^\s*at\s+/, "")
+          .replace(/[@\s(]+$/, "")
+          .trim()
+          .replace(/[^A-Za-z0-9_$.-]/g, "")
+          .slice(0, 28);
+        if (functionName === "handleError" || functionName === "recordYouTubePlayerError") continue;
+        safeFrames.push((functionName ? functionName + "@" : "") + file
+          + (position ? ":" + position[1] + ":" + position[2] : ""));
+        if (safeFrames.length >= 4) break;
+      }
+      return safeFrames.length ? safeFrames.join(">") : "unavailable";
+    } catch (_) {
+      return "unavailable";
+    }
+  }
+
+  function recordYouTubePlayerError(args, stack, receiver) {
+    const fields = [
+      "observed_at_unix_ms=" + Date.now(),
+      "phase=handle_error_enter",
+      "argument_count=" + (args && Number.isSafeInteger(args.length)
+        ? Math.max(0, Math.min(8, args.length)) : 0),
+      "receiver_present=" + (receiver !== null && receiver !== undefined),
+      "receiver_object=" + Boolean(receiver && (typeof receiver === "object" || typeof receiver === "function"))
+    ];
+    const values = [];
+    for (let index = 0; index < 3; index++) {
+      let value;
+      try { value = args && index < args.length ? args[index] : undefined; } catch (_) {}
+      const kind = value === undefined ? "undefined"
+        : value === null ? "null"
+        : typeof value === "number" ? "number"
+        : typeof value === "string" ? "string_redacted"
+        : typeof value === "boolean" ? "boolean"
+        : typeof value === "object" ? "object"
+        : typeof value === "function" ? "function"
+        : "other";
+      fields.push("arg" + index + "_kind=" + kind);
+      if (typeof value === "number" && Number.isSafeInteger(value)
+          && value >= -9999 && value <= 9999999) {
+        fields.push("arg" + index + "_numeric=" + value);
+      }
+      if (index === 0 && value && typeof value === "object") {
+        for (const key of ["code", "errorCode", "error_code", "status"]) {
+          try {
+            const descriptor = Object.getOwnPropertyDescriptor(value, key);
+            const code = descriptor && Object.prototype.hasOwnProperty.call(descriptor, "value")
+              ? descriptor.value : undefined;
+            if (typeof code === "number" && Number.isSafeInteger(code)
+                && code >= -9999 && code <= 9999999) {
+              fields.push("arg0_" + key.replace(/[^A-Za-z0-9_]/g, "") + "_numeric=" + code);
+            }
+          } catch (_) {}
+        }
+      }
+      values.push(kind);
+    }
+    fields.push("arg0_shape=" + (values[0] || "missing"));
+    try {
+      const video = document.querySelector("video");
+      fields.push("video_present=" + Boolean(video));
+      if (video) {
+        fields.push("video_paused=" + Boolean(video.paused));
+        fields.push("video_ended=" + Boolean(video.ended));
+        fields.push("video_src_attr=" + video.hasAttribute("src"));
+        fields.push("video_src_object=" + (video.srcObject !== null));
+        if (Number.isInteger(video.readyState) && video.readyState >= 0 && video.readyState <= 4) {
+          fields.push("ready_state=" + video.readyState);
+        }
+        if (Number.isInteger(video.networkState) && video.networkState >= 0 && video.networkState <= 3) {
+          fields.push("network_state=" + video.networkState);
+        }
+        const mediaErrorCode = video.error && video.error.code;
+        if (Number.isInteger(mediaErrorCode) && mediaErrorCode >= 1 && mediaErrorCode <= 4) {
+          fields.push("media_error_code=" + mediaErrorCode);
+        }
+      }
+    } catch (_) {
+      fields.push("video_state_unavailable=true");
+    }
+    fields.push("callers=" + sanitizedYouTubePlayerErrorCallers(stack));
+    record("youtube_player_error", "handleError", fields.join(" "));
+  }
+
+  try {
+    Object.defineProperty(window, "__interceptRecordYouTubePlayerError", {
+      configurable: true,
+      enumerable: false,
+      writable: false,
+      value: recordYouTubePlayerError
     });
   } catch (_) {}
 
