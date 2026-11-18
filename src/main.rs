@@ -5673,7 +5673,7 @@ fn instrument_youtube_sabr_recovery(source: &str) -> String {
     ].into_iter().filter(|matched| *matched).count();
 
     let status = format!(
-        "try{{window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery(\"base_instrumentation_status\",{{spsumpreject_hook:{},recovery_request_hook:{},session_wait_hook:{},session_generate_hook:{},content_generate_hook:{},fallback_token_hook:{},webpo_token_hook:{},k_t_release_hook:{},l_t_release_hook:{},loader_gate_hook:{},shared_provider_ready_hook:{},provider_ready_hook:{},patch_count:{patch_count}}})}}catch(_e){{}};\n",
+        "try{{typeof window!==\"undefined\"&&window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery(\"base_instrumentation_status\",{{spsumpreject_hook:{},recovery_request_hook:{},session_wait_hook:{},session_generate_hook:{},content_generate_hook:{},fallback_token_hook:{},webpo_token_hook:{},k_t_release_hook:{},l_t_release_hook:{},loader_gate_hook:{},shared_provider_ready_hook:{},provider_ready_hook:{},patch_count:{patch_count}}})}}catch(_e){{}};\n",
         spsumpreject_hook,
         recovery_request_hook,
         session_wait_hook,
@@ -5687,7 +5687,23 @@ fn instrument_youtube_sabr_recovery(source: &str) -> String {
         token_provider_shared_ready_hook,
         token_provider_ready_hook,
     );
-    format!("{status}{instrumented}")
+    // Keep a top-level strict-mode directive first. Guard every injected hook
+    // because the same JavaScript rewriter also handles worker scripts.
+    let mut instrumented = instrumented.replace(
+        "window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery",
+        "typeof window!==\"undefined\"&&window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery",
+    );
+    let leading_whitespace = instrumented.len() - instrumented.trim_start().len();
+    let rest = &instrumented[leading_whitespace..];
+    let directive_length = if rest.starts_with("\"use strict\";") {
+        "\"use strict\";".len()
+    } else if rest.starts_with("'use strict';") {
+        "'use strict';".len()
+    } else {
+        0
+    };
+    instrumented.insert_str(leading_whitespace + directive_length, &status);
+    instrumented
 }
 
 fn rewrite_worker_javascript(
