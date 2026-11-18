@@ -362,12 +362,12 @@ async function executePlaybackDownloadCommand(session, action, enabled) {
   const results = await browser.scripting.executeScript({
     target: {tabId: session.tabId},
     world: "MAIN",
-    func: function(command, value, token) {
+    func: function(command, value) {
       const api = globalThis.__interceptPlaybackDownloadV1;
       if (!api) return {state: "unavailable", error: "Playback capture is not installed in this YouTube document. Reload the YouTube tab and try again."};
-      return command === "set" ? api.setEnabled(value, token) : api.getStatus();
+      return command === "set" ? api.setEnabled(value) : api.getStatus();
     },
-    args: [action, enabled, session.downloadToken || ""]
+    args: [action, enabled]
   });
   const status = results && results[0] && results[0].result;
   if (!status) throw new Error("The YouTube tab did not return playback-download status.");
@@ -435,7 +435,6 @@ async function setPlaybackDownloadEnabled(enabled) {
   if (!session) throw new Error("Start a native-origin session before enabling downloads.");
   downloadToggle.disabled = true;
   try {
-    if (enabled && !session.downloadToken) session.downloadToken = crypto.randomUUID();
     const status = await executePlaybackDownloadCommand(session, "set", enabled);
     session.downloadEnabled = !!enabled;
     await browser.storage.local.set({nativeSession: session});
@@ -808,10 +807,6 @@ async function loadState() {
     byId("session-id").textContent = "SESSION " + stored.nativeSession.id + " · TAB " + stored.nativeSession.tabId;
     downloadToggle.disabled = false;
     downloadToggle.checked = stored.nativeSession.downloadEnabled === true;
-    if (downloadToggle.checked && !stored.nativeSession.downloadToken) {
-      stored.nativeSession.downloadToken = crypto.randomUUID();
-      await browser.storage.local.set({nativeSession: stored.nativeSession});
-    }
     try {
       const status = await executePlaybackDownloadCommand(stored.nativeSession, "set", downloadToggle.checked);
       renderPlaybackDownloadStatus(status);
@@ -856,7 +851,7 @@ startButton.addEventListener("click", async () => {
     const created = await response.json();
     if (!created.native_token || !created.id) throw new Error("Backend did not return a native-session capability. Update and restart the Intercept server.");
     const session = {id: created.id, token: created.native_token, server, target,
-      tabId: blankTab.id, createdAt: Date.now(), downloadEnabled: false, downloadToken: null};
+      tabId: blankTab.id, createdAt: Date.now(), downloadEnabled: false};
     await browser.storage.local.set({nativeSession: session, server});
     await browser.tabs.update(blankTab.id, {url: target});
     activePanel.hidden = false;
