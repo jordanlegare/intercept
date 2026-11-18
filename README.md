@@ -103,3 +103,11 @@ The dashboard reports the active-session count against `INTERCEPT_MAX_SESSIONS` 
     cargo fmt --all -- --check
     cargo test
     cargo clippy --all-targets -- -D warnings
+
+## Firefox native-origin mode (YouTube)
+
+Intercept also includes an optional Firefox extension mode for YouTube. Unlike the reverse-proxy mode, it leaves the browser connected directly to YouTube: the page, dedicated workers, service workers, cookies, media requests, and TLS connection retain their native browser context. The extension observes selected YouTube and Google request lifecycle metadata and forwards sanitized events to the local Rust event store.
+
+**Important:** this initial native-origin mode is observation-only. It does not route request or response bytes through Rust, enforce Standard/Strict/Custom authorization rules, hold and replay requests, rewrite payloads, or populate the reverse-proxy cache. Those controls remain available in reverse-proxy mode. No raw request-header values, cookies, tokens, request/response bodies, or URL query strings are captured by the extension. A small allowlist of safe header values (such as Fetch Metadata enums, media types, and numeric content length) and sensitive-header presence booleans is recorded.
+
+See extension/firefox/README.md for installation and use.

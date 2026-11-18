@@ -139,6 +139,8 @@ struct AppState {
 struct Session {
     id: String,
     base_url: Url,
+    native_origin: bool,
+    native_token: Option<String>,
     clients: Mutex<UpstreamClientCache>,
     cache: Mutex<ResourceCache>,
     gate: Mutex<GateState>,
@@ -391,6 +393,8 @@ struct CreateSession {
     url: String,
     policy: Option<AuthorizationPolicy>,
     #[serde(default)]
+    native_origin: bool,
+    #[serde(default)]
     rules: Vec<AuthorizationRule>,
 }
 
@@ -473,6 +477,8 @@ struct ProxyRequestContext {
 struct CreateSessionResponse {
     id: String,
     session_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -487,6 +493,7 @@ struct SessionSummary {
     id: String,
     target_url: String,
     session_url: String,
+    mode: &'static str,
     policy: &'static str,
     state: &'static str,
 }
@@ -587,7 +594,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/assets/authority.js", get(authority_js))
         .route("/_intercept/events", post(record_session_events))
         .route("/_intercept/cookies", get(cookie_bridge_get).post(cookie_bridge_set))
-        .route("/api/sessions", get(list_sessions).post(create_session))
+        .route("/api/sessions", get(list_sessions).post(create_session).options(api_preflight))
+        .route("/api/native/sessions/{id}/events", get(native_get_events).post(native_record_events).options(api_preflight))
+        .route("/api/native/sessions/{id}", delete(native_delete_session).options(api_preflight))
         .route("/api/sessions/{id}", delete(delete_session).options(api_preflight))
         .route("/api/sessions/{id}/start", post(start_timer).options(api_preflight))
         .route("/api/sessions/{id}/status", get(session_status).options(api_preflight))
@@ -960,22 +969,37 @@ async fn host_and_cors_guard(
     // Proxied pages continue to use their unique <session>.localhost origin.
     if (path == "/" && is_dashboard_host(host))
         || path == "/api/sessions"
-        || path.starts_with("/api/sessions/") {
+        || path.starts_with("/api/sessions/")
+        || path.starts_with("/api/native/") {
         if !is_dashboard_host(host) {
             return plain(
                 StatusCode::MISDIRECTED_REQUEST,
                 "Use http://127.0.0.1:5000 or http://localhost:5000",
             );
         }
+        let mut extension_origin = None;
         if let Some(origin_header) = request.headers().get(header::ORIGIN) {
             let Ok(origin) = origin_header.to_str() else {
                 return plain(StatusCode::FORBIDDEN, "Invalid Origin for the trusted control API");
             };
-            if !dashboard_origin_matches_host(host, origin) {
+            let native_api_path = path == "/api/sessions" || path.starts_with("/api/native/");
+            if native_api_path && is_firefox_extension_origin(origin) {
+                extension_origin = Some(origin.to_owned());
+            } else if !dashboard_origin_matches_host(host, origin) {
                 return plain(StatusCode::FORBIDDEN, "Cross-origin access to the trusted control API is denied");
             }
         }
-        return next.run(request).await;
+        let mut response = next.run(request).await;
+        if let Some(origin) = extension_origin {
+            if let Ok(value) = HeaderValue::from_str(&origin) {
+                response.headers_mut().insert("access-control-allow-origin", value);
+                response.headers_mut().insert("vary", HeaderValue::from_static("Origin"));
+                response.headers_mut().insert("access-control-allow-methods", HeaderValue::from_static("GET, POST, DELETE, OPTIONS"));
+                response.headers_mut().insert("access-control-allow-headers", HeaderValue::from_static("authorization, content-type"));
+                response.headers_mut().insert("access-control-max-age", HeaderValue::from_static("600"));
+            }
+        }
+        return response;
     }
 
     if let Some(rest) = path.strip_prefix("/p/") {
@@ -1109,7 +1133,12 @@ async fn list_sessions(State(state): State<AppState>) -> Json<SessionsResponse> 
         summaries.push(SessionSummary {
             id: session.id.clone(),
             target_url: session.base_url.to_string(),
-            session_url: local_url(&session.base_url, &session.id),
+            session_url: if session.native_origin {
+                session.base_url.to_string()
+            } else {
+                local_url(&session.base_url, &session.id)
+            },
+            mode: if session.native_origin { "native-origin" } else { "reverse-proxy" },
             policy: policy_label,
             state: state_label,
         });
@@ -1159,7 +1188,7 @@ async fn create_session(
     State(state): State<AppState>,
     Json(input): Json<CreateSession>,
 ) -> Result<Json<CreateSessionResponse>, (StatusCode, String)> {
-    let target = Url::parse(input.url.trim())
+    let mut target = Url::parse(input.url.trim())
         .map_err(|_| (StatusCode::BAD_REQUEST, "Enter a valid absolute http:// or https:// URL".into()))?;
 
     if !matches!(target.scheme(), "http" | "https") {
@@ -1170,6 +1199,17 @@ async fn create_session(
     }
     if !is_public_destination(&target) {
         return Err((StatusCode::FORBIDDEN, "Local, private, and link-local destinations are blocked".into()));
+    }
+    if input.native_origin {
+        let host = target.host_str().unwrap_or_default().to_ascii_lowercase();
+        if target.scheme() != "https:"
+            || !(host == "youtube.com" || host.ends_with(".youtube.com"))
+        {
+            return Err((StatusCode::BAD_REQUEST, "Native-origin mode is limited to HTTPS YouTube URLs".into()));
+        }
+        target.set_path("/");
+        target.set_query(None);
+        target.set_fragment(None);
     }
 
     let policy = input.policy.unwrap_or_else(|| {
@@ -1192,6 +1232,7 @@ async fn create_session(
     let client = build_pinned_client(&target, Arc::clone(&cookie_jar)).await?;
 
     let id = Uuid::new_v4().simple().to_string();
+    let native_token = input.native_origin.then(|| Uuid::new_v4().to_string());
     let mut clients = UpstreamClientCache::default();
     clients.insert_or_get(
         origin_key(&target),
@@ -1203,6 +1244,8 @@ async fn create_session(
     let session = Arc::new(Session {
         id: id.clone(),
         base_url: target,
+        native_origin: input.native_origin,
+        native_token: native_token.clone(),
         clients: Mutex::new(clients),
         cache: Mutex::new(ResourceCache::default()),
         gate: Mutex::new(GateState::Waiting),
@@ -1226,7 +1269,11 @@ async fn create_session(
 
     // Preserve the submitted destination path, query, and browser-side fragment
     // in the local session URL. The upstream origin remains pinned in base_url.
-    let session_url = local_url(&session.base_url, &id);
+    let session_url = if session.native_origin {
+        session.base_url.to_string()
+    } else {
+        local_url(&session.base_url, &id)
+    };
     let mut sessions = state.sessions.write().await;
     if sessions.len() >= state.max_sessions {
         return Err((StatusCode::TOO_MANY_REQUESTS, "Maximum active session count reached; wait for an idle session to expire".into()));
@@ -1236,6 +1283,7 @@ async fn create_session(
     Ok(Json(CreateSessionResponse {
         id: id.clone(),
         session_url,
+        native_token,
     }))
 }
 
@@ -1637,6 +1685,102 @@ fn cache_virtual_path(url: &Url) -> (String, String) {
     components.extend(parent_segments.iter().cloned());
     components.push(file_name.clone());
     (components.join("/"), file_name)
+}
+
+fn is_firefox_extension_origin(origin: &str) -> bool {
+    let Some(id) = origin.strip_prefix("moz-extension://") else {
+        return false;
+    };
+    !id.is_empty()
+        && id.len() <= 64
+        && id.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+}
+
+fn native_bearer_matches(headers: &HeaderMap, expected: &str) -> bool {
+    let Some(provided) = headers.get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        return false;
+    };
+    if provided.len() != expected.len() {
+        return false;
+    }
+    provided.bytes().zip(expected.bytes())
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right)) == 0
+}
+
+async fn find_native_session(
+    state: &AppState,
+    id: &str,
+    headers: &HeaderMap,
+) -> Result<Arc<Session>, (StatusCode, String)> {
+    let session = find_session(state, id).await?;
+    if !session.native_origin {
+        return Err((StatusCode::FORBIDDEN, "Session is not a native-origin session".into()));
+    }
+    let expected = session.native_token.as_deref()
+        .ok_or((StatusCode::FORBIDDEN, "Native session capability is unavailable".into()))?;
+    if !native_bearer_matches(headers, expected) {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid native-session capability".into()));
+    }
+    Ok(session)
+}
+
+async fn native_get_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ActionEvent>>, (StatusCode, String)> {
+    let session = find_native_session(&state, &id, &headers).await?;
+    let events = session.events.lock().await.iter().cloned().collect();
+    Ok(Json(events))
+}
+
+async fn native_record_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(inputs): Json<Vec<EventInput>>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let session = find_native_session(&state, &id, &headers).await?;
+    for input in inputs.into_iter().take(100) {
+        if !matches!(
+            input.kind.as_str(),
+            "native_request_start"
+                | "native_request_headers"
+                | "native_response_headers"
+                | "native_request_complete"
+                | "native_request_error"
+        ) {
+            continue;
+        }
+        push_event(
+            &session,
+            &input.kind,
+            input.target.unwrap_or_default(),
+            input.detail.unwrap_or_default(),
+        ).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn native_delete_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, (StatusCode, String)> {
+    find_native_session(&state, &id, &headers).await?;
+    let removed = state.sessions.write().await.remove(&id)
+        .ok_or((StatusCode::NOT_FOUND, "Unknown or expired native session".into()))?;
+    removed.cancelled.store(true, Ordering::Release);
+    removed.cancel_tx.send_replace(true);
+    removed.clients.lock().await.clear();
+    let mut cache = removed.cache.lock().await;
+    cache.entries.clear();
+    cache.bytes = 0;
+    drop(cache);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn get_events(
@@ -4397,6 +4541,13 @@ async fn proxy(
         Err((status, message)) => return plain(status, &message),
     };
 
+    if session.native_origin {
+        return plain(
+            StatusCode::CONFLICT,
+            "This is a native-origin session. Open the upstream URL directly in Firefox with the Intercept extension enabled.",
+        );
+    }
+
     let request_permit = match session.inflight.clone().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => return plain(StatusCode::TOO_MANY_REQUESTS, "Session request concurrency limit reached"),
@@ -6953,6 +7104,8 @@ mod tests {
         Session {
             id: "0123456789abcdef0123456789abcdef".to_owned(),
             base_url: Url::parse("https://example.com/start").unwrap(),
+            native_origin: false,
+            native_token: None,
             clients: Mutex::new(UpstreamClientCache::default()),
             cache: Mutex::new(ResourceCache::default()),
             gate: Mutex::new(GateState::Waiting),
@@ -8095,6 +8248,8 @@ mod tests {
         let session = Session {
             id: "session1234567890abcdef1234567890".to_owned(),
             base_url: Url::parse("https://example.com/start").unwrap(),
+            native_origin: false,
+            native_token: None,
             clients: Mutex::new(UpstreamClientCache::default()),
             cache: Mutex::new(ResourceCache::default()),
             gate: Mutex::new(GateState::Waiting),
@@ -8129,6 +8284,8 @@ mod tests {
         let session = Session {
             id: "session1234567890abcdef1234567890".to_owned(),
             base_url: Url::parse("https://www.youtube.com/start").unwrap(),
+            native_origin: false,
+            native_token: None,
             clients: Mutex::new(UpstreamClientCache::default()),
             cache: Mutex::new(ResourceCache::default()),
             gate: Mutex::new(GateState::Waiting),
@@ -8767,6 +8924,7 @@ mod ump_stream_diagnostics_tests {
         YouTubeAttestationTiming, YouTubeAttestationResponseMetadata,
         YouTubeSabrAttestationRequestSnapshot, youtube_attestation_age_band,
         youtube_playback_context_id_from_value, UmpStreamDiagnostics, event_detail_limit, clean_field,
+        is_firefox_extension_origin, native_bearer_matches, HeaderMap, HeaderValue, header,
     };
 
     #[test]
@@ -9259,4 +9417,23 @@ mod ump_stream_diagnostics_tests {
         assert!(summary.contains("frame_complete=false"));
         assert!(summary.contains("payload_remaining=3"));
     }
+    #[test]
+    fn accepts_firefox_extension_origins_but_not_web_origins() {
+        assert!(is_firefox_extension_origin("moz-extension://12345678-abcd-1234-abcd-1234567890ab"));
+        assert!(!is_firefox_extension_origin("https://www.youtube.com"));
+        assert!(!is_firefox_extension_origin("moz-extension://"));
+        assert!(!is_firefox_extension_origin("moz-extension://invalid-origin"));
+    }
+
+    #[test]
+    fn native_session_bearer_requires_an_exact_capability() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer test-capability"));
+        assert!(native_bearer_matches(&headers, "test-capability"));
+        assert!(!native_bearer_matches(&headers, "test-capabilitY"));
+        assert!(!native_bearer_matches(&headers, "test-capability-extra"));
+        headers.remove(header::AUTHORIZATION);
+        assert!(!native_bearer_matches(&headers, "test-capability"));
+    }
+
 }
