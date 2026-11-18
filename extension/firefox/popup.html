@@ -16,6 +16,16 @@
     <div class="actions"><button id="refresh" type="button" class="secondary">REFRESH EVENTS</button><button id="export" type="button" class="secondary">EXPORT JSON</button><button id="stop" type="button" class="danger">STOP SESSION</button></div>
     <div id="event-count" class="muted"></div><ol id="events" aria-live="polite"></ol>
   </section>
+  <section id="comparison">
+    <div class="section-title">ENVIRONMENT COMPARISON</div>
+    <p class="section-copy">Capture the active tab in each mode. The latest native and proxy snapshots are compared locally.</p>
+    <div class="actions compare-actions">
+      <button id="capture-env" type="button" class="secondary">CAPTURE ACTIVE TAB</button>
+      <button id="export-comparison" type="button" class="secondary">EXPORT COMPARISON</button>
+    </div>
+    <div id="compare-status" class="muted">No environment snapshots captured yet.</div>
+    <ol id="differences" aria-live="polite"></ol>
+  </section>
   <div id="message" role="status" aria-live="polite"></div>
-  <footer>Page origin, workers, cookies, and media requests remain native. Queries, cookies, tokens, and bodies are never logged.</footer>
+  <footer>Environment capture executes in the page's main world. Only sanitized capability and resource metadata is saved; no cookies, tokens, query strings, or request bodies.</footer>
 </main></body></html>
