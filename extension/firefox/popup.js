@@ -707,16 +707,24 @@ async function loadState() {
   const stored = await browser.storage.local.get(["nativeSession", "server"]);
   if (stored.server) serverInput.value = stored.server;
   if (stored.nativeSession) {
-    activePanel.hidden = false; startButton.disabled = true;
-    byId("session-id").textContent = "SESSION " + stored.nativeSession.id + " · TAB " + stored.nativeSession.tabId;
-    try {
-      await browser.runtime.sendMessage({
-        type: "intercept-native:activate",
-        sessionId: stored.nativeSession.id,
-        tabId: stored.nativeSession.tabId
-      });
-      await refreshEvents();
-    } catch (error) { message.textContent = error.message || String(error); }
+    if (!Number.isInteger(stored.nativeSession.proxyPort)) {
+      try { await apiRequest(stored.nativeSession, "", {method: "DELETE"}); } catch (_) {}
+      await browser.storage.local.remove("nativeSession");
+      activePanel.hidden = true;
+      startButton.disabled = false;
+      message.textContent = "Cleared the previous observation-only session. Start a new native-origin CONNECT session.";
+    } else {
+      activePanel.hidden = false; startButton.disabled = true;
+      byId("session-id").textContent = "SESSION " + stored.nativeSession.id + " · TAB " + stored.nativeSession.tabId;
+      try {
+        await browser.runtime.sendMessage({
+          type: "intercept-native:activate",
+          sessionId: stored.nativeSession.id,
+          tabId: stored.nativeSession.tabId
+        });
+        await refreshEvents();
+      } catch (error) { message.textContent = error.message || String(error); }
+    }
   }
   await renderComparison();
   try {
