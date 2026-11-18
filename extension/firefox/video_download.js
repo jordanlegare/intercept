@@ -1,0 +1,377 @@
+(() => {
+  "use strict";
+
+  const KEY = "__interceptPlaybackDownloadV1";
+  if (globalThis[KEY]) return;
+  const CACHE_DIRECTORY = "intercept-playback-downloads";
+  const MAX_CAPTURE_BYTES = 2 * 1024 * 1024 * 1024;
+  const status = {
+    enabled: false,
+    state: "disabled",
+    bytes_written: 0,
+    filename: null,
+    error: null,
+    mime_type: null,
+    started_at_ms: null,
+    completed_at_ms: null
+  };
+  let activeCapture = null;
+  const watchedVideos = new WeakSet();
+
+  function statusSnapshot() {
+    return {...status};
+  }
+
+  function isPlayerVideo(video) {
+    return video instanceof HTMLVideoElement
+      && (video.matches("#movie_player video, video.html5-main-video")
+        || !!video.closest("ytd-reel-video-renderer"));
+  }
+
+  function isAdvertisement(video) {
+    const player = video.closest("#movie_player");
+    return !!(player && (
+      player.classList.contains("ad-showing")
+      || player.classList.contains("ad-interrupting")
+      || player.querySelector(".ytp-ad-player-overlay")
+    ));
+  }
+
+  function safeFilename(value) {
+    return String(value || "youtube-playback")
+      .replace(/\s+-\s+YouTube\s*$/i, "")
+      .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 110) || "youtube-playback";
+  }
+
+  function currentFilename() {
+    const heading = document.querySelector("h1.ytd-watch-metadata, ytd-watch-metadata h1");
+    const title = heading && heading.textContent ? heading.textContent : document.title;
+    const videoId = (() => {
+      try { return new URL(location.href).searchParams.get("v") || ""; }
+      catch (_) { return ""; }
+    })();
+    const suffix = videoId && /^[A-Za-z0-9_-]{1,24}$/.test(videoId) ? "-" + videoId : "";
+    return safeFilename(title) + suffix + "-" + new Date().toISOString().replace(/[:.]/g, "-") + ".webm";
+  }
+
+  async function openCaptureFile(filename) {
+    if (!navigator.storage || typeof navigator.storage.getDirectory !== "function") {
+      throw new Error("Firefox temporary file storage is unavailable for playback capture.");
+    }
+    const root = await navigator.storage.getDirectory();
+    const directory = await root.getDirectoryHandle(CACHE_DIRECTORY, {create: true});
+    const fileHandle = await directory.getFileHandle(filename, {create: true});
+    const writable = await fileHandle.createWritable({keepExistingData: false});
+    return {directory, fileHandle, writer: writable.getWriter()};
+  }
+
+  async function pruneOldCaptureFiles() {
+    try {
+      const root = await navigator.storage.getDirectory();
+      const directory = await root.getDirectoryHandle(CACHE_DIRECTORY, {create: true});
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      for await (const [name, handle] of directory.entries()) {
+        if (!name.endsWith(".webm") || handle.kind !== "file") continue;
+        const file = await handle.getFile();
+        if (file.lastModified < cutoff) await directory.removeEntry(name);
+      }
+    } catch (_) {}
+  }
+  void pruneOldCaptureFiles();
+
+  function supportedMimeType() {
+    if (typeof MediaRecorder === "undefined") return null;
+    const candidates = [
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/webm"
+    ];
+    return candidates.find(type => MediaRecorder.isTypeSupported(type)) || null;
+  }
+
+  function stopCapture(capture, reason) {
+    if (!capture || capture.stopRequested) return;
+    capture.stopRequested = true;
+    capture.stopReason = reason;
+    if (capture.recorder && capture.recorder.state !== "inactive") {
+      try { capture.recorder.stop(); }
+      catch (error) {
+        capture.writeError = capture.writeError || String(error && error.message || error);
+        void finalizeCapture(capture);
+      }
+    } else if (!capture.recorder) {
+      void finalizeCapture(capture);
+    } else {
+      void finalizeCapture(capture);
+    }
+  }
+
+  function queueChunk(capture, blob) {
+    if (!blob || blob.size === 0 || capture.finalized) return;
+    if (capture.bytesWritten + blob.size > capture.maxBytes) {
+      capture.writeError = "The temporary playback capture reached its available-storage safety limit.";
+      stopCapture(capture, "error");
+      return;
+    }
+    capture.bytesWritten += blob.size;
+    status.bytes_written = capture.bytesWritten;
+    capture.writeQueue = capture.writeQueue.then(() => capture.writer.write(blob)).catch(error => {
+      capture.writeError = String(error && error.message || error || "Could not write playback cache.");
+      stopCapture(capture, "error");
+    });
+  }
+
+  async function finalizeCapture(capture) {
+    if (!capture || capture.finalized) return;
+    capture.finalized = true;
+    status.state = "finalizing";
+    status.bytes_written = capture.bytesWritten;
+    try {
+      await capture.writeQueue;
+      if (capture.writer) {
+        if (capture.writeError || capture.stopReason !== "complete") {
+          try { await capture.writer.abort(capture.writeError || "Playback capture discarded."); } catch (_) {}
+        } else {
+          await capture.writer.close();
+        }
+      }
+      if (capture.stream) {
+        for (const track of capture.stream.getTracks()) {
+          try { track.stop(); } catch (_) {}
+        }
+      }
+
+      if (capture.writeError || capture.stopReason !== "complete") {
+        if (capture.directory && capture.filename) {
+          try { await capture.directory.removeEntry(capture.filename); } catch (_) {}
+        }
+        status.state = status.enabled ? "armed" : "disabled";
+        status.error = capture.writeError || null;
+        status.filename = null;
+        return;
+      }
+
+      const file = await capture.fileHandle.getFile();
+      if (file.size === 0) throw new Error("The completed playback capture is empty.");
+      const objectUrl = URL.createObjectURL(file);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = capture.filename;
+      link.rel = "noopener";
+      link.hidden = true;
+      (document.body || document.documentElement).append(link);
+      link.click();
+      link.remove();
+
+      status.state = "download_started";
+      status.bytes_written = file.size;
+      status.filename = capture.filename;
+      status.error = null;
+      status.completed_at_ms = Date.now();
+
+      // Keep the origin-private copy briefly for the browser's download handoff.
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 120_000);
+      setTimeout(() => {
+        if (capture.directory) void capture.directory.removeEntry(capture.filename).catch(() => {});
+      }, 60 * 60 * 1000);
+    } catch (error) {
+      if (capture.directory && capture.filename) {
+        try { await capture.directory.removeEntry(capture.filename); } catch (_) {}
+      }
+      status.state = "error";
+      status.error = String(error && error.message || error || "Playback download failed.");
+      status.filename = null;
+    } finally {
+      if (activeCapture === capture) activeCapture = null;
+      if (capture.resolveFinished) capture.resolveFinished();
+    }
+  }
+
+  async function startCapture(video) {
+    if (!status.enabled || activeCapture || !video || !video.isConnected || video.ended || isAdvertisement(video)) return;
+    const captureMethod = typeof video.captureStream === "function"
+      ? video.captureStream.bind(video)
+      : typeof video.mozCaptureStream === "function" ? video.mozCaptureStream.bind(video) : null;
+    if (!captureMethod) {
+      status.state = "error";
+      status.error = "This Firefox build does not expose media-element capture.";
+      return;
+    }
+    const mimeType = supportedMimeType();
+    if (!mimeType) {
+      status.state = "error";
+      status.error = "Firefox MediaRecorder has no supported WebM recording type.";
+      return;
+    }
+
+    const capture = {
+      video,
+      recorder: null,
+      stream: null,
+      writer: null,
+      fileHandle: null,
+      directory: null,
+      filename: currentFilename(),
+      mimeType,
+      bytesWritten: 0,
+      maxBytes: MAX_CAPTURE_BYTES,
+      writeQueue: Promise.resolve(),
+      writeError: null,
+      stopReason: null,
+      stopRequested: false,
+      finalized: false,
+      resolveFinished: null
+    };
+    capture.finished = new Promise(resolve => { capture.resolveFinished = resolve; });
+    activeCapture = capture;
+    status.state = "preparing";
+    status.bytes_written = 0;
+    status.filename = null;
+    status.error = null;
+    status.started_at_ms = Date.now();
+    status.completed_at_ms = null;
+
+    try {
+      const estimate = await navigator.storage.estimate();
+      if (Number.isFinite(estimate.quota) && Number.isFinite(estimate.usage)) {
+        const available = Math.max(0, estimate.quota - estimate.usage);
+        capture.maxBytes = Math.min(MAX_CAPTURE_BYTES, Math.floor(available * 0.8));
+        if (capture.maxBytes < 16 * 1024 * 1024) {
+          throw new Error("Not enough available browser storage for a video capture.");
+        }
+      }
+      const opened = await openCaptureFile(capture.filename);
+      capture.directory = opened.directory;
+      capture.fileHandle = opened.fileHandle;
+      capture.writer = opened.writer;
+      if (!status.enabled || activeCapture !== capture || capture.stopRequested || video.ended || !video.isConnected) {
+        stopCapture(capture, "disabled");
+        return;
+      }
+
+      capture.stream = captureMethod();
+      if (!capture.stream.getVideoTracks().length) {
+        throw new Error("The player did not expose a capturable video track.");
+      }
+      capture.recorder = new MediaRecorder(capture.stream, {
+        mimeType: capture.mimeType,
+        videoBitsPerSecond: 8_000_000,
+        audioBitsPerSecond: 160_000
+      });
+      capture.recorder.addEventListener("dataavailable", event => queueChunk(capture, event.data));
+      capture.recorder.addEventListener("error", event => {
+        capture.writeError = String(event.error && event.error.message || "MediaRecorder failed.");
+        stopCapture(capture, "error");
+      });
+      capture.recorder.addEventListener("stop", () => {
+        void finalizeCapture(capture);
+      }, {once: true});
+      capture.recorder.start(1000);
+      status.state = "recording";
+      status.mime_type = capture.mimeType;
+      status.bytes_written = 0;
+    } catch (error) {
+      capture.writeError = String(error && error.message || error || "Could not start playback capture.");
+      stopCapture(capture, "error");
+    }
+  }
+
+  function onPlaying(video) {
+    if (!isPlayerVideo(video) || isAdvertisement(video) || !status.enabled) return;
+    if (activeCapture && activeCapture.video === video && activeCapture.recorder) {
+      if (activeCapture.recorder.state === "paused") {
+        try { activeCapture.recorder.resume(); } catch (_) {}
+      }
+      return;
+    }
+    if (activeCapture) {
+      const previous = activeCapture;
+      stopCapture(previous, "source_changed");
+      void previous.finished.then(() => {
+        if (status.enabled && !video.paused && video.isConnected) void startCapture(video);
+      });
+      return;
+    }
+    void startCapture(video);
+  }
+
+  function watchVideo(video) {
+    if (!isPlayerVideo(video) || watchedVideos.has(video)) return;
+    watchedVideos.add(video);
+    video.addEventListener("play", () => onPlaying(video));
+    video.addEventListener("playing", () => onPlaying(video));
+    video.addEventListener("pause", () => {
+      if (activeCapture && activeCapture.video === video && !video.ended
+          && activeCapture.recorder && activeCapture.recorder.state === "recording") {
+        try { activeCapture.recorder.pause(); } catch (_) {}
+      }
+    });
+    video.addEventListener("ended", () => {
+      if (activeCapture && activeCapture.video === video) {
+        stopCapture(activeCapture, isAdvertisement(video) ? "ad" : "complete");
+      }
+    });
+    video.addEventListener("emptied", () => {
+      if (activeCapture && activeCapture.video === video && !video.ended) {
+        stopCapture(activeCapture, "source_changed");
+      }
+    });
+    video.addEventListener("error", () => {
+      if (activeCapture && activeCapture.video === video) stopCapture(activeCapture, "error");
+    });
+    if (!video.paused) onPlaying(video);
+  }
+
+  function scanVideos(root = document) {
+    const videos = new Set();
+    if (root instanceof HTMLVideoElement) videos.add(root);
+    if (root.querySelectorAll) {
+      for (const video of root.querySelectorAll("#movie_player video, video.html5-main-video, ytd-reel-video-renderer video")) {
+        videos.add(video);
+      }
+    }
+    for (const video of videos) watchVideo(video);
+  }
+
+  function setEnabled(enabled) {
+    status.enabled = !!enabled;
+    if (!status.enabled) {
+      if (activeCapture) stopCapture(activeCapture, "disabled");
+      status.state = "disabled";
+      status.error = null;
+    } else {
+      status.state = activeCapture ? status.state : "armed";
+      status.error = null;
+      scanVideos();
+    }
+    return statusSnapshot();
+  }
+
+  function getStatus() {
+    return statusSnapshot();
+  }
+
+  try {
+    Object.defineProperty(globalThis, KEY, {
+      value: Object.freeze({setEnabled, getStatus}),
+      configurable: false,
+      enumerable: false,
+      writable: false
+    });
+  } catch (_) {}
+
+  scanVideos();
+  if (typeof MutationObserver === "function" && document.documentElement) {
+    const observer = new MutationObserver(records => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (node.nodeType === Node.ELEMENT_NODE) scanVideos(node);
+        }
+      }
+    });
+    observer.observe(document.documentElement, {childList: true, subtree: true});
+  }
+})();
