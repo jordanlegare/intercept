@@ -870,12 +870,58 @@ async fn record_session_events(
     let id = host.strip_suffix(&suffix)
         .ok_or((StatusCode::MISDIRECTED_REQUEST, "Event telemetry requires the session origin".into()))?;
     let session = find_session(&state, id).await?;
+
+    // The page's playback-context header lets us annotate its player lifecycle
+    // telemetry with the latest status-3 observed by the proxy for that page.
+    let playback_context_id = headers.get("x-intercept-playback-context-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| youtube_playback_context_id_from_value(value))
+        .map(str::to_owned);
+    let status3_observation = playback_context_id.as_deref().and_then(|context_id| {
+        let contexts = session.youtube_attestation_timing.lock()
+            .unwrap_or_else(|error| error.into_inner());
+        contexts.get(context_id)
+            .and_then(|timing| timing.last_status3_observation.clone())
+    });
+
     for input in inputs.into_iter().take(100) {
+        let mut detail = input.detail.unwrap_or_default();
+        if matches!(
+            input.kind.as_str(),
+            "youtube_player_state" | "youtube_player_watchdog" | "youtube_player_media_mutation"
+        ) {
+            let event_at_unix_ms = detail.split_ascii_whitespace()
+                .find_map(|field| field.strip_prefix("observed_at_unix_ms="))
+                .and_then(|value| value.parse::<u128>().ok());
+            let correlation = match (playback_context_id.as_deref(), status3_observation.as_ref()) {
+                (Some(context_id), Some(status3)) => {
+                    let relation = match event_at_unix_ms {
+                        Some(event_at) if event_at >= status3.observed_at_unix_ms => "after",
+                        Some(_) => "before",
+                        None => "unobserved",
+                    };
+                    let elapsed = event_at_unix_ms
+                        .filter(|event_at| *event_at >= status3.observed_at_unix_ms)
+                        .map(|event_at| event_at.saturating_sub(status3.observed_at_unix_ms).to_string())
+                        .unwrap_or_else(|| "not_applicable".to_owned());
+                    format!(
+                        " playback_context={context_id} status3_relation={relation} status3_rid={} status3_waa_id={} elapsed_since_status3_ms={elapsed}",
+                        status3.request_id,
+                        status3.waa_id.as_deref().unwrap_or("unmatched"),
+                    )
+                }
+                (Some(context_id), None) => {
+                    format!(" playback_context={context_id} status3_relation=none")
+                }
+                (None, _) => " playback_context=unscoped status3_relation=unscoped".to_owned(),
+            };
+            detail.push_str(&correlation);
+        }
         push_event(
             &session,
             &input.kind,
             input.target.unwrap_or_default(),
-            input.detail.unwrap_or_default(),
+            detail,
         ).await;
     }
     Ok(StatusCode::NO_CONTENT)
@@ -2066,6 +2112,7 @@ struct YouTubeStatus3Observation {
     waa_id: Option<String>,
     waa_age_ms: Option<u64>,
     observed_at: Instant,
+    observed_at_unix_ms: u128,
 }
 
 #[derive(Clone)]
@@ -2263,6 +2310,7 @@ impl YouTubeAttestationTiming {
             waa_id: request.correlation_id.clone(),
             waa_age_ms: request.response_age_ms,
             observed_at,
+            observed_at_unix_ms: now_ms(),
         });
         // A later status-3 starts a new observation cycle.
         self.last_generate_it_after_status3 = None;
@@ -2889,6 +2937,17 @@ fn youtube_playback_context_id(headers: &HeaderMap) -> Option<&str> {
 
 fn youtube_attestation_context_key(headers: &HeaderMap) -> String {
     youtube_playback_context_id(headers).unwrap_or("unscoped").to_owned()
+}
+
+fn youtube_playback_context_id_from_value(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if [8, 13, 18, 23].contains(&index) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
 }
 
 fn youtube_attestation_context_mut<'a>(
@@ -6508,8 +6567,7 @@ fn event_detail_limit(kind: &str) -> usize {
     // conservative default for ordinary events.
     match kind {
         "youtube_sabr_response_stream_complete" => 1024,
-        "youtube_player_watchdog" => 900,
-        "youtube_player_state" => 640,
+        "youtube_player_watchdog" | "youtube_player_state" | "youtube_player_media_mutation" => 1100,
         "youtube_attestation_freshness" => 900,
         "youtube_sabr_attestation_context"
         | "youtube_sabr_request_metadata"
