@@ -26,6 +26,17 @@
     <div id="compare-status" class="muted">No environment snapshots captured yet.</div>
     <ol id="differences" aria-live="polite"></ol>
   </section>
+  <section id="media-trace">
+    <div class="section-title">PLAYBACK / REQUEST DIAGNOSTICS</div>
+    <p class="section-copy">Arm a trace on the active tab before reloading or playing. The trace counts browser-observed requests independently of document Resource Timing.</p>
+    <div class="actions trace-actions">
+      <button id="start-media-trace" type="button" class="secondary">START / RESET TRACE</button>
+      <button id="refresh-media-trace" type="button" class="secondary">REFRESH TRACE</button>
+      <button id="stop-media-trace" type="button" class="danger">STOP TRACE</button>
+      <button id="export-media-trace" type="button" class="secondary">EXPORT TRACE JSON</button>
+    </div>
+    <div id="media-trace-status" class="muted" aria-live="polite">No media trace is armed for this tab.</div>
+  </section>
   <div id="message" role="status" aria-live="polite"></div>
   <footer>Environment capture executes in the page's main world. Only sanitized capability and resource metadata is saved; no cookies, tokens, query strings, or request bodies.</footer>
 </main></body></html>
