@@ -50,6 +50,50 @@ async function refreshEvents() {
   renderEvents(await apiRequest(session, "/events"));
   byId("session-id").textContent = "SESSION " + session.id + " · TAB " + session.tabId;
 }
+async function exportObservations() {
+  const button = byId("export");
+  button.disabled = true;
+  message.textContent = "Collecting the complete session event log…";
+  try {
+    const stored = await browser.storage.local.get("nativeSession"), session = stored.nativeSession;
+    if (!session) throw new Error("There is no active native-origin session to export.");
+    // Flush events still queued in the extension before requesting the backend's full session log.
+    await browser.runtime.sendMessage({type: "intercept-native:flush"});
+    const events = await apiRequest(session, "/events");
+    renderEvents(events);
+    const exportedAt = new Date();
+    const payload = {
+      format: "intercept-native-observations",
+      format_version: 1,
+      exported_at: exportedAt.toISOString(),
+      session: {
+        id: session.id,
+        tab_id: session.tabId,
+        created_at: session.createdAt ? new Date(session.createdAt).toISOString() : null
+      },
+      event_count: events.length,
+      events
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2) + "\\n"], {
+      type: "application/json;charset=utf-8"
+    });
+    const objectUrl = URL.createObjectURL(blob);
+    const stamp = exportedAt.toISOString().replace(/[:.]/g, "-");
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = "intercept-native-observations-" + stamp + ".json";
+    link.hidden = true;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+    message.textContent = "Exported " + events.length + " events as JSON.";
+  } catch (error) {
+    message.textContent = error.message || String(error);
+  } finally {
+    button.disabled = false;
+  }
+}
 async function stopSession() {
   const stored = await browser.storage.local.get("nativeSession"), session = stored.nativeSession;
   if (!session) return;
@@ -106,7 +150,7 @@ byId("refresh").addEventListener("click", async () => {
   try { await refreshEvents(); message.textContent = ""; }
   catch (error) { message.textContent = error.message || String(error); }
 });
-byId("stop").addEventListener("click", async () => {
+byId("export").addEventListener("click", exportObservations);\nbyId("stop").addEventListener("click", async () => {
   try { await stopSession(); } catch (error) { message.textContent = error.message || String(error); }
 });
 serverInput.addEventListener("change", async () => {
