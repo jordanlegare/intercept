@@ -68,3 +68,10 @@ The Rust backend stores native-origin events in the same per-session event queue
 - The extension uses webRequest observation only. It does not request webRequestBlocking, modify headers, redirect requests, or call filterResponseData.
 - A per-session bearer capability protects native event retrieval, ingestion, and session deletion. It is returned only when native_origin: true is used at session creation and is stored in extension-local storage.
 - Environment capture uses browser.scripting.executeScript with world: MAIN and therefore requires Firefox 128 or newer. The activeTab permission grants temporary access when the user invokes the extension; no permanent site-wide host permission is requested for page capture.
+
+
+## Dashboard session status and activity
+
+The local Intercept dashboard lists the native-origin session created by this extension. The background script reports a one-minute heartbeat while the monitored tab remains available, so the dashboard can distinguish **CONNECTED**, **STALE**, and **WAITING FOR EXTENSION** instead of displaying the reverse-proxy authorization gate as the native session's status. The activity control opens the retained sanitized browser request observations.
+
+Native-origin mode keeps TLS end-to-end between Firefox and YouTube. Intercept therefore cannot inspect response bodies or populate the server-side HTTP asset cache for this session. Use the dashboard folder control on a reverse-proxy session to inspect files actually retained in the proxy cache.
