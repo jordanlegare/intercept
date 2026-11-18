@@ -16,7 +16,44 @@
     completed_at_ms: null
   };
   let activeCapture = null;
+  let downloadToken = "";
+  const pendingDownloads = new Map();
   const watchedVideos = new WeakSet();
+
+  function requestBrowserDownload(file, filename) {
+    if (!downloadToken) return Promise.reject(new Error("The extension download capability is missing."));
+    const requestId = (globalThis.crypto && typeof crypto.randomUUID === "function")
+      ? crypto.randomUUID()
+      : String(Date.now()) + "-" + Math.random().toString(16).slice(2);
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        pendingDownloads.delete(requestId);
+        reject(new Error("The extension download service did not acknowledge the completed file."));
+      }, 20_000);
+      pendingDownloads.set(requestId, result => {
+        clearTimeout(timeout);
+        pendingDownloads.delete(requestId);
+        if (result && result.ok) resolve(result);
+        else reject(new Error(result && result.error || "Firefox could not start the download."));
+      });
+      window.postMessage({
+        type: "intercept-playback-download:request",
+        request_id: requestId,
+        token: downloadToken,
+        filename,
+        blob: file
+      }, location.origin);
+    });
+  }
+
+  window.addEventListener("message", event => {
+    const data = event.data;
+    if (event.source !== window || event.origin !== location.origin
+        || !data || data.type !== "intercept-playback-download:result"
+        || typeof data.request_id !== "string") return;
+    const resolve = pendingDownloads.get(data.request_id);
+    if (resolve) resolve(data);
+  });
 
   function statusSnapshot() {
     return {...status};
@@ -156,24 +193,14 @@
 
       const file = await capture.fileHandle.getFile();
       if (file.size === 0) throw new Error("The completed playback capture is empty.");
-      const objectUrl = URL.createObjectURL(file);
-      const link = document.createElement("a");
-      link.href = objectUrl;
-      link.download = capture.filename;
-      link.rel = "noopener";
-      link.hidden = true;
-      (document.body || document.documentElement).append(link);
-      link.click();
-      link.remove();
-
+      await requestBrowserDownload(file, capture.filename);
       status.state = "download_started";
       status.bytes_written = file.size;
       status.filename = capture.filename;
       status.error = null;
       status.completed_at_ms = Date.now();
 
-      // Keep the origin-private copy briefly for the browser's download handoff.
-      setTimeout(() => URL.revokeObjectURL(objectUrl), 120_000);
+      // Keep the origin-private copy briefly after the browser confirms its download job.
       setTimeout(() => {
         if (capture.directory) void capture.directory.removeEntry(capture.filename).catch(() => {});
       }, 60 * 60 * 1000);
@@ -336,8 +363,9 @@
     for (const video of videos) watchVideo(video);
   }
 
-  function setEnabled(enabled) {
+  function setEnabled(enabled, token) {
     status.enabled = !!enabled;
+    if (typeof token === "string" && token.length >= 24 && token.length <= 128) downloadToken = token;
     if (!status.enabled) {
       if (activeCapture) stopCapture(activeCapture, "disabled");
       status.state = "disabled";
