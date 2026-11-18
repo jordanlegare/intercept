@@ -53,6 +53,7 @@
       || event.kind === "youtube_sabr_request_gap"
       || event.kind === "youtube_sabr_response_stream_complete"
       || event.kind === "youtube_sabr_attestation_context"
+      || event.kind === "youtube_player_media_mutation"
     );
   }
 
@@ -76,8 +77,8 @@
   function record(kind, target, detail) {
     if (INTERNAL_AUTHORITY_EVENTS.has(kind)) return;
     const eventKind = String(kind).slice(0, 80);
-    const detailLimit = eventKind === "youtube_player_watchdog" || eventKind === "youtube_attestation_rpc" ? 900
-      : eventKind === "youtube_player_state" ? 640 : 300;
+    const detailLimit = eventKind === "youtube_player_watchdog" || eventKind === "youtube_attestation_rpc" ? 1100
+      : eventKind === "youtube_player_state" || eventKind === "youtube_player_media_mutation" ? 900 : 300;
     eventBuffer.push({
       kind: eventKind,
       target: sanitizeEventTarget(target).slice(0, 240),
@@ -318,7 +319,10 @@
     try {
       const response = await rawFetch("/_intercept/events", {
         method: "POST",
-        headers: {"content-type": "application/json"},
+        headers: {
+          "content-type": "application/json",
+          "X-Intercept-Playback-Context-Id": playbackContextId
+        },
         body: JSON.stringify(batch),
         keepalive: true
       });
@@ -1077,6 +1081,221 @@
     const sampledEvents = new Set(["timeupdate", "progress"]);
     const sampleIntervalMs = 4000;
 
+    // Record only source-state transitions and sanitized callsites. Never log
+    // media URLs, source values, MediaSource contents, or media payloads.
+    function installYouTubeMediaMutationDiagnostics() {
+      if (!window.HTMLMediaElement || !window.HTMLSourceElement || !window.Node) return;
+
+      const mediaIds = new WeakMap();
+      const sourceIds = new WeakMap();
+      let mediaSequence = 0;
+      let sourceSequence = 0;
+
+      function mediaId(video) {
+        if (!mediaIds.has(video)) mediaIds.set(video, "video#" + (++mediaSequence));
+        return mediaIds.get(video);
+      }
+
+      function sourceId(source) {
+        if (!sourceIds.has(source)) sourceIds.set(source, "source#" + (++sourceSequence));
+        return sourceIds.get(source);
+      }
+
+      function snapshot(video) {
+        let sourceCount = 0;
+        let sourceObject = false;
+        let currentSource = false;
+        try { sourceCount = video.querySelectorAll("source").length; } catch (_) {}
+        try { sourceObject = video.srcObject !== null; } catch (_) {}
+        try { currentSource = Boolean(video.currentSrc); } catch (_) {}
+        let sourceAttribute = false;
+        let connected = false;
+        try { sourceAttribute = video.hasAttribute("src"); } catch (_) {}
+        try { connected = Boolean(video.isConnected); } catch (_) {}
+        return {
+          src_attr: sourceAttribute,
+          current_src: currentSource,
+          src_object: sourceObject,
+          source_count: sourceCount,
+          connected
+        };
+      }
+
+      function snapshotFields(prefix, state) {
+        return prefix + "_src_attr=" + state.src_attr
+          + " " + prefix + "_current_src=" + state.current_src
+          + " " + prefix + "_src_object=" + state.src_object
+          + " " + prefix + "_source_count=" + state.source_count
+          + " " + prefix + "_connected=" + state.connected;
+      }
+
+      function report(operation, video, source, before, after, callsite, extra = "") {
+        const fields = [
+          "operation=" + operation,
+          "media_element=" + (video ? mediaId(video) : "unattached"),
+          source ? "source_element=" + sourceId(source) : "",
+          before ? snapshotFields("before", before) : "",
+          after ? snapshotFields("after", after) : "",
+          extra,
+          "callsite=" + (callsite || "unavailable")
+        ].filter(Boolean).join(" ");
+        record("youtube_player_media_mutation", video ? "video" : "source", fields);
+      }
+
+      function videoForSource(source) {
+        try {
+          const parent = source && source.parentElement;
+          return parent instanceof HTMLVideoElement ? parent : null;
+        } catch (_) {
+          return null;
+        }
+      }
+
+      function isSourceTree(node) {
+        if (!(node instanceof Node)) return false;
+        if (node instanceof HTMLSourceElement) return true;
+        try {
+          return typeof node.querySelector === "function" && Boolean(node.querySelector("source"));
+        } catch (_) {
+          return false;
+        }
+      }
+
+      function wrapAccessor(proto, property, applies, operation, sourceTarget = false) {
+        try {
+          const descriptor = Object.getOwnPropertyDescriptor(proto, property);
+          if (!descriptor || typeof descriptor.set !== "function" || !descriptor.configurable) return;
+          Object.defineProperty(proto, property, {
+            ...descriptor,
+            set: function(value) {
+              if (!applies(this)) return descriptor.set.call(this, value);
+              const callsite = sanitizedYouTubeFetchCallsite(2);
+              const source = sourceTarget ? this : null;
+              const video = this instanceof HTMLVideoElement ? this : videoForSource(this);
+              const before = video ? snapshot(video) : null;
+              const result = descriptor.set.call(this, value);
+              const after = video ? snapshot(video) : null;
+              report(operation, video, source, before, after, callsite,
+                "value_present=" + (value !== null && value !== undefined && String(value).length > 0));
+              return result;
+            }
+          });
+        } catch (_) {
+          // Optional diagnostics must never interfere with native media APIs.
+        }
+      }
+
+      wrapAccessor(HTMLMediaElement.prototype, "src",
+        element => element instanceof HTMLVideoElement, "src_property_set");
+      wrapAccessor(HTMLMediaElement.prototype, "srcObject",
+        element => element instanceof HTMLVideoElement, "src_object_set");
+
+      if (window.HTMLSourceElement) {
+        wrapAccessor(HTMLSourceElement.prototype, "src",
+          element => element instanceof HTMLSourceElement, "source_src_property_set", true);
+      }
+
+      function wrapSrcAttributeMethod(proto, name) {
+        try {
+          const descriptor = Object.getOwnPropertyDescriptor(proto, name);
+          if (!descriptor || typeof descriptor.value !== "function" || !descriptor.configurable) return;
+          const original = descriptor.value;
+          Object.defineProperty(proto, name, {
+            ...descriptor,
+            value: function(attributeName, ...args) {
+              const attribute = String(attributeName || "").toLowerCase();
+              const isVideo = this instanceof HTMLVideoElement;
+              const isSource = this instanceof HTMLSourceElement;
+              if (attribute !== "src" || (!isVideo && !isSource)) {
+                return original.call(this, attributeName, ...args);
+              }
+              const callsite = sanitizedYouTubeFetchCallsite(2);
+              const video = isVideo ? this : videoForSource(this);
+              const source = isSource ? this : null;
+              const before = video ? snapshot(video) : null;
+              const result = original.call(this, attributeName, ...args);
+              const after = video ? snapshot(video) : null;
+              const valuePresent = name === "removeAttribute" ? false
+                : name === "toggleAttribute" && args.length > 0 && args[0] === false ? false
+                : true;
+              report("src_attribute_" + name, video, source, before, after, callsite,
+                "value_present=" + valuePresent);
+              return result;
+            }
+          });
+        } catch (_) {
+          // Preserve the native method if it cannot be wrapped.
+        }
+      }
+
+      for (const method of ["setAttribute", "removeAttribute", "toggleAttribute"]) {
+        wrapSrcAttributeMethod(Element.prototype, method);
+      }
+
+      function wrapChildMutation(proto, name, replaceChildren = false) {
+        try {
+          const descriptor = Object.getOwnPropertyDescriptor(proto, name);
+          if (!descriptor || typeof descriptor.value !== "function" || !descriptor.configurable) return;
+          const original = descriptor.value;
+          Object.defineProperty(proto, name, {
+            ...descriptor,
+            value: function(...args) {
+              const isVideoParent = this instanceof HTMLVideoElement;
+              const videoNode = args.find(node => node instanceof HTMLVideoElement) || null;
+              const sourceNode = args.find(isSourceTree) || null;
+              const sourceParent = sourceNode instanceof HTMLSourceElement ? videoForSource(sourceNode) : null;
+              const video = isVideoParent ? this : (videoNode || sourceParent);
+              const before = video ? snapshot(video) : null;
+              const relevant = Boolean(video) && (
+                Boolean(videoNode)
+                || (isVideoParent && (Boolean(sourceNode) || (replaceChildren && before.source_count > 0)))
+                || Boolean(sourceParent)
+              );
+              if (!relevant) return original.apply(this, args);
+              const callsite = sanitizedYouTubeFetchCallsite(2);
+              const result = original.apply(this, args);
+              const after = snapshot(video);
+              let operation = "video_node_" + name;
+              if (isVideoParent || sourceParent) operation = "source_children_" + name;
+              report(operation, video, sourceNode instanceof HTMLSourceElement ? sourceNode : null,
+                before, after, callsite,
+                "nodes_with_source=" + args.filter(isSourceTree).length);
+              return result;
+            }
+          });
+        } catch (_) {
+          // A missing wrapper only reduces diagnostics; it does not affect playback.
+        }
+      }
+
+      for (const method of ["appendChild", "insertBefore", "removeChild", "replaceChild"]) {
+        wrapChildMutation(Node.prototype, method);
+      }
+      if (window.Element && Element.prototype) {
+        wrapChildMutation(Element.prototype, "replaceChildren", true);
+      }
+
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "load");
+        if (descriptor && typeof descriptor.value === "function" && descriptor.configurable) {
+          const original = descriptor.value;
+          Object.defineProperty(HTMLMediaElement.prototype, "load", {
+            ...descriptor,
+            value: function(...args) {
+              if (!(this instanceof HTMLVideoElement)) return original.apply(this, args);
+              const callsite = sanitizedYouTubeFetchCallsite(2);
+              const before = snapshot(this);
+              const result = original.apply(this, args);
+              report("load_call", this, null, before, snapshot(this), callsite);
+              return result;
+            }
+          });
+        }
+      } catch (_) {
+        // Preserve native load() behavior on unsupported browser implementations.
+      }
+    }
+
     function metric(value, digits = 1) {
       const number = Number(value);
       return Number.isFinite(number) ? String(Number(number.toFixed(digits))) : "unknown";
@@ -1421,6 +1640,7 @@
       }
     }
 
+    installYouTubeMediaMutationDiagnostics();
     observeTree(document);
     window.setInterval(pollPlaybackClock, WATCHDOG_INTERVAL_MS);
     try {
