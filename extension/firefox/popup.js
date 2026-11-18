@@ -3,7 +3,7 @@ const byId = id => document.getElementById(id);
 const serverInput = byId("server"), targetInput = byId("target");
 const startButton = byId("start"), activePanel = byId("active"), message = byId("message");
 
-function capturePageEnvironment() {
+async function capturePageEnvironment() {
   const safe = fn => { try { return fn(); } catch (_) { return "unavailable"; } };
   const hostClass = host => {
     host = String(host || "").toLowerCase();
@@ -29,33 +29,175 @@ function capturePageEnvironment() {
     const parsed = new URL(value);
     return parsed.protocol + "//" + hostClass(parsed.hostname) + (parsed.port ? ":" + parsed.port : "");
   };
+  const describeURL = value => {
+    try {
+      const parsed = new URL(value, location.href);
+      const isBlob = parsed.protocol === "blob:";
+      let origin = parsed.origin;
+      if (isBlob && origin === "null") {
+        const match = String(value).match(/^blob:(https?:\/\/[^/]+)/i);
+        origin = match ? match[1] : "null";
+      }
+      if (!origin || origin === "null") {
+        return {scheme: parsed.protocol.replace(/:$/, ""), host_class: "other", origin_class: "opaque",
+          path_class: isBlob ? "blob_worker" : pathClass(parsed.pathname), port: "unknown"};
+      }
+      const originUrl = new URL(origin);
+      const host = hostClass(originUrl.hostname);
+      return {
+        scheme: parsed.protocol.replace(/:$/, ""),
+        host_class: host,
+        origin_class: originUrl.protocol + "//" + host + (originUrl.port ? ":" + originUrl.port : ""),
+        path_class: isBlob ? "blob_worker" : pathClass(parsed.pathname),
+        port: originUrl.port || "default"
+      };
+    } catch (_) {
+      return {scheme: "unparseable", host_class: "other", origin_class: "opaque", path_class: "other", port: "unknown"};
+    }
+  };
   const host = location.hostname.toLowerCase();
-  const mode = hostClass(host) === "localhost" || hostClass(host) === "loopback"
-    ? "reverse_proxy"
-    : hostClass(host) === "youtube" ? "native_youtube" : "unclassified";
-  const resources = {total: 0, initiators: {}, hosts: {}, paths: {}};
-  safe(() => performance.getEntriesByType("resource").slice(-1000).forEach(entry => {
-    const url = new URL(entry.name, location.href);
-    const h = hostClass(url.hostname), p = pathClass(url.pathname);
-    const initiator = String(entry.initiatorType || "other").slice(0, 32);
-    resources.total++;
-    resources.initiators[initiator] = (resources.initiators[initiator] || 0) + 1;
-    resources.hosts[h] = (resources.hosts[h] || 0) + 1;
-    resources.paths[p] = (resources.paths[p] || 0) + 1;
-  }));
+  const hostKind = hostClass(host);
+  const mode = hostKind === "localhost" || hostKind === "loopback"
+    ? "reverse_proxy" : hostKind === "youtube" ? "native_youtube" : "unclassified";
+
+  const resources = {
+    scope: "document_performance_resource_entries",
+    total: 0,
+    initiators: {},
+    hosts: {},
+    paths: {},
+    timing: {
+      duration_ms_total: 0,
+      duration_ms_max: 0,
+      transfer_size_bytes_total: 0,
+      encoded_body_size_bytes_total: 0,
+      decoded_body_size_bytes_total: 0,
+      entries_with_timing: 0
+    },
+    window: {document_age_ms: Math.max(0, Math.round(performance.now())), oldest_start_ms: null, newest_response_end_ms: null}
+  };
+  const resourceEntries = safe(() => performance.getEntriesByType("resource").slice(-1000));
+  if (Array.isArray(resourceEntries)) {
+    for (const entry of resourceEntries) {
+      const resource = describeURL(entry.name);
+      const initiator = String(entry.initiatorType || "other").slice(0, 32);
+      resources.total++;
+      resources.initiators[initiator] = (resources.initiators[initiator] || 0) + 1;
+      resources.hosts[resource.host_class] = (resources.hosts[resource.host_class] || 0) + 1;
+      resources.paths[resource.path_class] = (resources.paths[resource.path_class] || 0) + 1;
+      const duration = Number(entry.duration);
+      if (Number.isFinite(duration) && duration >= 0) {
+        resources.timing.duration_ms_total += duration;
+        resources.timing.duration_ms_max = Math.max(resources.timing.duration_ms_max, duration);
+        resources.timing.entries_with_timing++;
+      }
+      for (const [key, field] of [
+        ["transfer_size_bytes_total", "transferSize"],
+        ["encoded_body_size_bytes_total", "encodedBodySize"],
+        ["decoded_body_size_bytes_total", "decodedBodySize"]
+      ]) {
+        const amount = Number(entry[field]);
+        if (Number.isFinite(amount) && amount >= 0) resources.timing[key] += amount;
+      }
+      const startTime = Number(entry.startTime);
+      const responseEnd = Number(entry.responseEnd);
+      if (Number.isFinite(startTime)) {
+        resources.window.oldest_start_ms = resources.window.oldest_start_ms === null
+          ? startTime : Math.min(resources.window.oldest_start_ms, startTime);
+      }
+      if (Number.isFinite(responseEnd)) {
+        resources.window.newest_response_end_ms = resources.window.newest_response_end_ms === null
+          ? responseEnd : Math.max(resources.window.newest_response_end_ms, responseEnd);
+      }
+    }
+  }
+  resources.timing.duration_ms_total = Math.round(resources.timing.duration_ms_total * 100) / 100;
+  resources.timing.duration_ms_max = Math.round(resources.timing.duration_ms_max * 100) / 100;
+
+  const workerProbe = safe(() => globalThis.__interceptWorkerProbeV1);
+  const workerEvents = workerProbe && Array.isArray(workerProbe.events)
+    ? workerProbe.events.slice(-200).map(event => ({
+        at_ms: Number.isFinite(event.at_ms) ? event.at_ms : null,
+        constructor: event.constructor === "shared" ? "shared" : "dedicated",
+        script: event.script && typeof event.script === "object" ? {
+          scheme: String(event.script.scheme || "unknown").slice(0, 16),
+          host_class: ["youtube", "googlevideo", "googleapis", "localhost", "loopback", "other"].includes(event.script.host_class)
+            ? event.script.host_class : "other",
+          origin_class: String(event.script.origin_class || "opaque").slice(0, 64),
+          path_class: String(event.script.path_class || "other").slice(0, 32),
+          port: String(event.script.port || "unknown").slice(0, 8)
+        } : {scheme: "unknown", host_class: "other", origin_class: "opaque", path_class: "other", port: "unknown"},
+        options: {
+          type: event.options && (event.options.type === "module" || event.options.type === "classic")
+            ? event.options.type : "default",
+          credentials: event.options && ["omit", "same-origin", "include"].includes(event.options.credentials)
+            ? event.options.credentials : "default",
+          name_present: !!(event.options && event.options.name_present)
+        },
+        outcome: event.outcome === "constructed" ? "constructed" : "constructor_threw"
+      }))
+    : [];
+  const workerConstruction = {
+    probe_present: !!workerProbe,
+    probe_schema_version: workerProbe && Number.isFinite(workerProbe.schema_version) ? workerProbe.schema_version : null,
+    installed_at_ms: workerProbe && Number.isFinite(workerProbe.installed_at_ms) ? workerProbe.installed_at_ms : null,
+    dropped_events: workerProbe && Number.isFinite(workerProbe.dropped_events) ? workerProbe.dropped_events : 0,
+    instrumentation: workerProbe && workerProbe.instrumentation ? {
+      Worker: workerProbe.instrumentation.Worker || "unknown",
+      SharedWorker: workerProbe.instrumentation.SharedWorker || "unknown"
+    } : {Worker: "missing", SharedWorker: "missing"},
+    event_count: workerEvents.length,
+    events: workerEvents
+  };
+
+  const serviceWorkers = {
+    api_available: !!navigator.serviceWorker,
+    controller_present: !!(navigator.serviceWorker && navigator.serviceWorker.controller),
+    controller: null,
+    registration_count: null,
+    registrations: [],
+    registrations_status: "not_checked"
+  };
+  const summarizeServiceWorker = worker => {
+    if (!worker) return null;
+    return {
+      state: ["installing", "installed", "activating", "activated", "redundant"].includes(worker.state)
+        ? worker.state : "unknown",
+      script: describeURL(worker.scriptURL)
+    };
+  };
+  if (navigator.serviceWorker) {
+    serviceWorkers.controller = summarizeServiceWorker(navigator.serviceWorker.controller);
+    try {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      serviceWorkers.registration_count = registrations.length;
+      serviceWorkers.registrations_status = "available";
+      serviceWorkers.registrations = registrations.slice(0, 100).map(registration => ({
+        scope: describeURL(registration.scope),
+        update_via_cache: ["imports", "all", "none"].includes(registration.updateViaCache)
+          ? registration.updateViaCache : "unknown",
+        active: summarizeServiceWorker(registration.active),
+        installing: summarizeServiceWorker(registration.installing),
+        waiting: summarizeServiceWorker(registration.waiting)
+      }));
+    } catch (_) {
+      serviceWorkers.registrations_status = "unavailable";
+    }
+  }
+
   const storage = {
-    local_storage_accessible: safe(() => { const value = localStorage.getItem("__intercept_probe__"); return true; }) === true,
-    session_storage_accessible: safe(() => { const value = sessionStorage.getItem("__intercept_probe__"); return true; }) === true,
+    local_storage_accessible: safe(() => { localStorage.getItem("__intercept_probe__"); return true; }) === true,
+    session_storage_accessible: safe(() => { sessionStorage.getItem("__intercept_probe__"); return true; }) === true,
     indexed_db_available: typeof indexedDB !== "undefined",
     storage_manager_available: !!(navigator.storage && navigator.storage.estimate)
   };
   return {
     schema: "intercept-page-environment",
-    schema_version: 1,
+    schema_version: 2,
     mode,
     location: {
       protocol: location.protocol,
-      hostname_class: hostClass(host),
+      hostname_class: hostKind,
       port: location.port || "default",
       path_class: pathClass(location.pathname),
       window_origin_class: safe(() => originClass(window.origin)),
@@ -74,9 +216,15 @@ function capturePageEnvironment() {
       worker_constructor: typeof Worker === "function",
       shared_worker_constructor: typeof SharedWorker === "function",
       service_worker_api: !!navigator.serviceWorker,
-      service_worker_controller_present: !!(navigator.serviceWorker && navigator.serviceWorker.controller),
+      service_worker_controller_present: serviceWorkers.controller_present,
       service_worker_container_constructor: typeof ServiceWorkerContainer === "function",
       worklet_api: typeof Worklet === "function",
+      dedicated_shared_worker_construction: workerConstruction,
+      service_workers: serviceWorkers,
+      worker_resource_timing: {
+        observable_from_document: false,
+        explanation: "The document Performance timeline does not expose entries from inside dedicated or shared worker execution contexts."
+      }
     },
     network: {
       fetch: typeof fetch === "function",
@@ -102,7 +250,6 @@ function capturePageEnvironment() {
     resources
   };
 }
-
 function normalizeServer(value) {
   const url = new URL(value);
   if (!["http:", "https:"].includes(url.protocol)
