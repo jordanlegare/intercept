@@ -6873,7 +6873,7 @@ mod tests {
             r#"z0a(b.sR()).then(()=>{a.j=!0;a.L.resolve();jT(a,"swpo_re")});"#,
             r#"z0a(f.sR()).then(()=>{a.j=!0;a.L.resolve()});"#,
         );
-        let output = rewrite_javascript(&fixture, &base, &base, "0123456789abcdef0123456789abcdef").unwrap();
+        let output = rewrite_javascript(fixture, &base, &base, "0123456789abcdef0123456789abcdef").unwrap();
 
         assert!(output.contains("base_instrumentation_status"));
         assert!(output.contains("spsumpreject_hook:true"));
