@@ -777,8 +777,9 @@
       for (const [key, value] of Object.entries(values)) {
         if (SABR_RECOVERY_BOOLEAN_FIELDS.has(key) && typeof value === "boolean") {
           fields.push(key + "=" + value);
-        } else if (key === "patch_count" && Number.isSafeInteger(value) && value >= 0 && value <= 32) {
-          fields.push("patch_count=" + value);
+        } else if ((key === "patch_count" || key === "handle_error_hook_count")
+            && Number.isSafeInteger(value) && value >= 0 && value <= 32) {
+          fields.push(key + "=" + value);
         } else if (SABR_RECOVERY_ENUM_FIELDS[key] && SABR_RECOVERY_ENUM_FIELDS[key].has(value)) {
           fields.push(key + "=" + value);
         }
