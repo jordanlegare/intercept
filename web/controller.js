@@ -1468,12 +1468,12 @@
 
   function youtubePlayerTimerContext() {
     const now = performance.now();
+    const activeTimer = activeYouTubePlayerTimer;
     const recent = recentYouTubePlayerTimerFires
       .filter(entry => now - entry.firedAt <= 15000)
       .slice(-3);
-    if (activeYouTubePlayerTimer
-        && (!recent.length || recent[recent.length - 1].timer !== activeYouTubePlayerTimer)) {
-      recent.push({timer: activeYouTubePlayerTimer, firedAt: activeYouTubePlayerTimer.lastFiredAt});
+    if (activeTimer && !recent.some(entry => entry.timer === activeTimer)) {
+      recent.push({timer: activeTimer, firedAt: activeTimer.lastFiredAt});
     }
     const selected = recent.slice(-3);
     if (!selected.length) return null;
@@ -1484,12 +1484,13 @@
         : "unknown";
       const scheduledAgo = Math.max(0, Math.round(now - timer.scheduledAt));
       return timer.kind + "#" + timer.id
+        + ":relation=" + (timer === activeTimer ? "active" : "recent")
         + ":scheduled_by=" + timer.callsite
         + ":delay_ms=" + timer.delayMs
         + ":fires=" + timer.fireCount
         + ":fired_ago_ms=" + firedAgo
         + ":scheduled_ago_ms=" + scheduledAgo;
-    }).join("|").slice(0, 360);
+    }).join("|").slice(0, 520);
   }
 
   function instrumentYouTubePlayerTimer(kind, nativeTimer) {
