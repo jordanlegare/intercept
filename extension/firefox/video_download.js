@@ -16,12 +16,10 @@
     completed_at_ms: null
   };
   let activeCapture = null;
-  let downloadToken = "";
   const pendingDownloads = new Map();
   const watchedVideos = new WeakSet();
 
   function requestBrowserDownload(file, filename) {
-    if (!downloadToken) return Promise.reject(new Error("The extension download capability is missing."));
     const requestId = (globalThis.crypto && typeof crypto.randomUUID === "function")
       ? crypto.randomUUID()
       : String(Date.now()) + "-" + Math.random().toString(16).slice(2);
@@ -39,7 +37,6 @@
       window.postMessage({
         type: "intercept-playback-download:request",
         request_id: requestId,
-        token: downloadToken,
         filename,
         blob: file
       }, location.origin);
@@ -139,11 +136,11 @@
         capture.writeError = capture.writeError || String(error && error.message || error);
         void finalizeCapture(capture);
       }
-    } else if (!capture.recorder) {
-      void finalizeCapture(capture);
-    } else {
+    } else if (capture.preparationFinished) {
       void finalizeCapture(capture);
     }
+    // If OPFS is still opening, startCapture observes stopRequested and
+    // finalizes the temporary file after asynchronous setup completes.
   }
 
   function queueChunk(capture, blob) {
@@ -250,6 +247,7 @@
       stopReason: null,
       stopRequested: false,
       finalized: false,
+      preparationFinished: false,
       resolveFinished: null
     };
     capture.finished = new Promise(resolve => { capture.resolveFinished = resolve; });
@@ -270,12 +268,26 @@
           throw new Error("Not enough available browser storage for a video capture.");
         }
       }
+      if (!status.enabled || activeCapture !== capture || capture.stopRequested || video.ended || !video.isConnected) {
+        capture.preparationFinished = true;
+        if (!capture.stopRequested) {
+          capture.stopRequested = true;
+          capture.stopReason = "disabled";
+        }
+        void finalizeCapture(capture);
+        return;
+      }
       const opened = await openCaptureFile(capture.filename);
       capture.directory = opened.directory;
       capture.fileHandle = opened.fileHandle;
       capture.writer = opened.writer;
       if (!status.enabled || activeCapture !== capture || capture.stopRequested || video.ended || !video.isConnected) {
-        stopCapture(capture, "disabled");
+        capture.preparationFinished = true;
+        if (!capture.stopRequested) {
+          capture.stopRequested = true;
+          capture.stopReason = "disabled";
+        }
+        void finalizeCapture(capture);
         return;
       }
 
@@ -296,20 +308,26 @@
       capture.recorder.addEventListener("stop", () => {
         void finalizeCapture(capture);
       }, {once: true});
+      capture.preparationFinished = true;
       capture.recorder.start(1000);
       status.state = "recording";
       status.mime_type = capture.mimeType;
       status.bytes_written = 0;
     } catch (error) {
       capture.writeError = String(error && error.message || error || "Could not start playback capture.");
-      stopCapture(capture, "error");
+      capture.preparationFinished = true;
+      if (!capture.stopRequested) {
+        capture.stopRequested = true;
+        capture.stopReason = "error";
+      }
+      void finalizeCapture(capture);
     }
   }
 
   function onPlaying(video) {
     if (!isPlayerVideo(video) || isAdvertisement(video) || !status.enabled) return;
-    if (activeCapture && activeCapture.video === video && activeCapture.recorder) {
-      if (activeCapture.recorder.state === "paused") {
+    if (activeCapture && activeCapture.video === video) {
+      if (activeCapture.recorder && activeCapture.recorder.state === "paused") {
         try { activeCapture.recorder.resume(); } catch (_) {}
       }
       return;
@@ -363,9 +381,8 @@
     for (const video of videos) watchVideo(video);
   }
 
-  function setEnabled(enabled, token) {
+  function setEnabled(enabled) {
     status.enabled = !!enabled;
-    if (typeof token === "string" && token.length >= 24 && token.length <= 128) downloadToken = token;
     if (!status.enabled) {
       if (activeCapture) stopCapture(activeCapture, "disabled");
       status.state = "disabled";
