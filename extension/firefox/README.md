@@ -24,6 +24,9 @@ The **ENVIRONMENT COMPARISON** panel captures the currently active tab in the pa
 
 The comparison includes:
 
+- Top-level video-element snapshots: count, paused/ended/seeking state, current time/duration, playback rate, ready/network state, dimensions, source-presence booleans, MediaSource/MediaStream attachment class, buffered ranges, decoded/dropped/corrupted frame counters where available, and media error code. At most eight elements are recorded; source URLs are never captured.
+- A count of Resource Timing entries with a nonzero `workerStart` value. This is only a timing-exposure indicator; zero does not prove a service worker was unused.
+
 - Page origin characteristics: protocol, sanitized host/origin classes, port, path class, and sanitized document-domain class.
 - Security context: secure-context status, cross-origin isolation, top-level-frame status, document visibility/readiness, and cookie-enabled boolean.
 - Worker capabilities: Worker, SharedWorker, ServiceWorker API/controller, and Worklet availability; sanitized ServiceWorker registration scopes and script URLs; controller/registration states; and early document-created Worker/SharedWorker constructor observations.
@@ -31,12 +34,21 @@ The comparison includes:
 - Media capabilities: MediaSource, EME, MediaCapabilities, WebCodecs, video canPlayType, and Media Session availability.
 - Storage capabilities: local/session storage access, IndexedDB, and StorageManager availability.
 - Document Resource Timing aggregates grouped by initiator type, sanitized host class, and sanitized path class, with duration/transfer-size totals and a timing window. Worker-constructor observations are reported separately so they are not misrepresented as worker-internal Resource Timing.
+- Proxy Resource Timing routes are classified against their embedded upstream host/path envelope (for example, an Intercept `/_/https/` route is categorized as Googlevideo media without retaining the route or query string).
 
 After capturing both modes, choose **EXPORT COMPARISON**. The timestamped JSON contains the snapshots and a field-by-field comparison of the latest native and proxy captures. The popup also shows a short list of differences. Capture both modes at comparable points in page load/playback for more useful resource-timing comparisons.
 
 This is a diagnostic comparison, not a complete browser fingerprint or a proof of causation. A document-start MAIN-world probe records sanitized dedicated/shared Worker constructor calls; page scripts can detect or interfere with MAIN-world instrumentation. Its localhost host match is narrowed at runtime to port 5000, because Firefox does not support port numbers in extension match patterns. It does not instrument worker globals, inspect worker memory, or read worker-local Performance timelines. The document Resource Timing snapshot describes only the document's timeline. API availability does not prove that a particular API was used successfully.
 
-The snapshot deliberately excludes full URLs, query strings, fragments, page text, video identifiers, cookies, tokens, request/response bodies, arbitrary header values, and SharedWorker names. Resource entries are reduced to sanitized host/path classes and aggregate timing/size values; no resource URL or worker script URL is exported. Snapshots stay in Firefox extension storage until cleared through Firefox's extension storage controls or replaced by later captures (five per mode are retained).
+The snapshots and media trace deliberately exclude full URLs, query strings, fragments, page text, video identifiers, cookies, tokens, request/response bodies, arbitrary header values, and SharedWorker names. Resource entries are reduced to sanitized host/path classes and aggregate timing/size values; no resource URL or worker script URL is exported. Snapshots stay in Firefox extension storage until cleared through Firefox's extension storage controls or replaced by later captures (five per mode are retained).
+
+## Playback and browser media-request trace
+
+The **PLAYBACK / REQUEST DIAGNOSTICS** panel can arm a trace for the currently active native YouTube or Intercept localhost:5000 tab. Start/reset the trace before reloading the page or starting playback. The trace follows that tab ID across reloads. After playback or a failure, choose **REFRESH TRACE** or **CAPTURE ACTIVE TAB**; the environment snapshot includes the trace counters. **STOP TRACE** freezes collection, and **EXPORT TRACE JSON** downloads the complete bounded event sample and aggregate counters.
+
+The observer uses Firefox `webRequest` events independently from page Resource Timing. Native requests are classified by their YouTube/Google host and path. Proxy requests are classified by unwrapping only the fixed `/_/https/<host>/<path>` route envelope; session IDs, original URLs, and query values are never exported. It records category, sanitized host class, method, request type, lifecycle event, HTTP status, elapsed time, cache boolean, and an allowlisted network-error code. Events are bounded to 500 per trace; aggregate counters continue increasing. It does not measure actual response-body bytes, inspect request/response bodies, or capture headers.
+
+The video snapshot examines up to eight `video` elements in the top-level document at capture time. It is a point-in-time state read, not a continuous player event recorder. Video elements hidden inside closed shadow roots or separate frames may not be visible to this snapshot.
 
 ## What is observed
 
