@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Intercept Native Origin</title><link rel="stylesheet" href="popup.css"><script src="popup.js" defer></script>
+</head>
+<body><main>
+  <header><div class="eyebrow">INTERCEPT / FIREFOX</div><h1>NATIVE ORIGIN<span>_</span></h1>
+    <p>Keep YouTube on Firefox's native HTTPS path while Intercept observes request metadata.</p></header>
+  <div class="notice"><strong>OBSERVATION ONLY</strong><span>No requests are redirected or modified. Authorization timers, request holds, caching, and response rewriting are not active in this mode.</span></div>
+  <label for="server">INTERCEPT SERVER</label><input id="server" type="url" value="http://127.0.0.1:5000" spellcheck="false">
+  <label for="target">YOUTUBE URL</label><input id="target" type="url" value="https://www.youtube.com/" spellcheck="false">
+  <button id="start" type="button">OPEN NATIVE-ORIGIN SESSION</button>
+  <section id="active" hidden><div class="status"><span class="dot"></span><strong>SESSION ACTIVE</strong></div>
+    <div id="session-id" class="session-id"></div>
+    <div class="actions"><button id="refresh" type="button" class="secondary">REFRESH EVENTS</button><button id="stop" type="button" class="danger">STOP SESSION</button></div>
+    <div id="event-count" class="muted"></div><ol id="events" aria-live="polite"></ol>
+  </section>
+  <div id="message" role="status" aria-live="polite"></div>
+  <footer>Page origin, workers, cookies, and media requests remain native. Queries, cookies, tokens, and bodies are never logged.</footer>
+</main></body></html>
