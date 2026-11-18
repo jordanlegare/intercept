@@ -4,6 +4,10 @@
   const KEY = "__interceptWorkerProbeV1";
   if (globalThis[KEY]) return;
 
+  const host = location.hostname.toLowerCase();
+  const isInterceptHost = host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1";
+  if (location.protocol !== "http:" || location.port !== "5000" || !isInterceptHost) return;
+
   const MAX_EVENTS = 200;
 
   function hostClass(host) {
