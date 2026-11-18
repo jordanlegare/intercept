@@ -1101,7 +1101,7 @@
         return sourceIds.get(source);
       }
 
-      function snapshot(video) {
+      function mediaSnapshot(video) {
         let sourceCount = 0;
         let sourceObject = false;
         let currentSource = false;
@@ -1173,9 +1173,9 @@
               const callsite = sanitizedYouTubeFetchCallsite(2);
               const source = sourceTarget ? this : null;
               const video = this instanceof HTMLVideoElement ? this : videoForSource(this);
-              const before = video ? snapshot(video) : null;
+              const before = video ? mediaSnapshot(video) : null;
               const result = descriptor.set.call(this, value);
-              const after = video ? snapshot(video) : null;
+              const after = video ? mediaSnapshot(video) : null;
               report(operation, video, source, before, after, callsite,
                 "value_present=" + (value !== null && value !== undefined && value !== ""));
               return result;
@@ -1213,9 +1213,9 @@
               const callsite = sanitizedYouTubeFetchCallsite(2);
               const video = isVideo ? this : videoForSource(this);
               const source = isSource ? this : null;
-              const before = video ? snapshot(video) : null;
+              const before = video ? mediaSnapshot(video) : null;
               const result = original.call(this, attributeName, ...args);
-              const after = video ? snapshot(video) : null;
+              const after = video ? mediaSnapshot(video) : null;
               const valuePresent = name === "removeAttribute" ? false
                 : name === "toggleAttribute" && args.length > 0 && args[0] === false ? false
                 : true;
@@ -1246,7 +1246,7 @@
               const sourceNode = args.find(isSourceTree) || null;
               const sourceParent = sourceNode instanceof HTMLSourceElement ? videoForSource(sourceNode) : null;
               const video = isVideoParent ? this : (videoNode || sourceParent);
-              const before = video ? snapshot(video) : null;
+              const before = video ? mediaSnapshot(video) : null;
               const relevant = Boolean(video) && (
                 Boolean(videoNode)
                 || (isVideoParent && (Boolean(sourceNode) || (replaceChildren && before.source_count > 0)))
@@ -1255,7 +1255,7 @@
               if (!relevant) return original.apply(this, args);
               const callsite = sanitizedYouTubeFetchCallsite(2);
               const result = original.apply(this, args);
-              const after = snapshot(video);
+              const after = mediaSnapshot(video);
               let operation = "video_node_" + name;
               if (isVideoParent || sourceParent) operation = "source_children_" + name;
               report(operation, video, sourceNode instanceof HTMLSourceElement ? sourceNode : null,
@@ -1285,9 +1285,9 @@
             value: function(...args) {
               if (!(this instanceof HTMLVideoElement)) return original.apply(this, args);
               const callsite = sanitizedYouTubeFetchCallsite(2);
-              const before = snapshot(this);
+              const before = mediaSnapshot(this);
               const result = original.apply(this, args);
-              report("load_call", this, null, before, snapshot(this), callsite);
+              report("load_call", this, null, before, mediaSnapshot(this), callsite);
               return result;
             }
           });
