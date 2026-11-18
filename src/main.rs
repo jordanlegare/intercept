@@ -1721,7 +1721,7 @@ async fn native_get_events(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ActionEvent>>, (StatusCode, String)> {
-    let session = find_native_session(&state, &id, &headers).await?;
+    find_native_session(&state, &id, &headers).await?;
     let events = session.events.lock().await.iter().cloned().collect();
     Ok(Json(events))
 }
