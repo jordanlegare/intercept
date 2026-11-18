@@ -1170,7 +1170,7 @@
             ...descriptor,
             set: function(value) {
               if (!applies(this)) return descriptor.set.call(this, value);
-              const callsite = sanitizedYouTubeFetchCallsite(2);
+              const callsite = sanitizedYouTubeFetchCallsite(6);
               const source = sourceTarget ? this : null;
               const video = this instanceof HTMLVideoElement ? this : videoForSource(this);
               const before = video ? mediaSnapshot(video) : null;
@@ -1210,7 +1210,7 @@
               if (attribute !== "src" || (!isVideo && !isSource)) {
                 return original.call(this, attributeName, ...args);
               }
-              const callsite = sanitizedYouTubeFetchCallsite(2);
+              const callsite = sanitizedYouTubeFetchCallsite(6);
               const video = isVideo ? this : videoForSource(this);
               const source = isSource ? this : null;
               const before = video ? mediaSnapshot(video) : null;
@@ -1253,7 +1253,7 @@
                 || Boolean(sourceParent)
               );
               if (!relevant) return original.apply(this, args);
-              const callsite = sanitizedYouTubeFetchCallsite(2);
+              const callsite = sanitizedYouTubeFetchCallsite(6);
               const result = original.apply(this, args);
               const after = mediaSnapshot(video);
               let operation = "video_node_" + name;
@@ -1284,7 +1284,7 @@
             ...descriptor,
             value: function(...args) {
               if (!(this instanceof HTMLVideoElement)) return original.apply(this, args);
-              const callsite = sanitizedYouTubeFetchCallsite(2);
+              const callsite = sanitizedYouTubeFetchCallsite(6);
               const before = mediaSnapshot(this);
               const result = original.apply(this, args);
               report("load_call", this, null, before, mediaSnapshot(this), callsite);
