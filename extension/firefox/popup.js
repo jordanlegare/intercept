@@ -120,12 +120,19 @@ async function capturePageEnvironment() {
         at_ms: Number.isFinite(event.at_ms) ? event.at_ms : null,
         constructor: event.constructor === "shared" ? "shared" : "dedicated",
         script: event.script && typeof event.script === "object" ? {
-          scheme: String(event.script.scheme || "unknown").slice(0, 16),
+          scheme: ["http", "https", "blob", "data", "file", "filesystem", "ftp", "ws", "wss", "unparseable"].includes(event.script.scheme)
+            ? event.script.scheme : "unknown",
+          origin_scheme: ["http", "https", "file", "ftp", "ws", "wss"].includes(event.script.origin_scheme)
+            ? event.script.origin_scheme : "opaque",
           host_class: ["youtube", "googlevideo", "googleapis", "localhost", "loopback", "other"].includes(event.script.host_class)
             ? event.script.host_class : "other",
-          origin_class: String(event.script.origin_class || "opaque").slice(0, 64),
-          path_class: String(event.script.path_class || "other").slice(0, 32),
-          port: String(event.script.port || "unknown").slice(0, 8)
+          origin_class: ["http", "https", "file", "ftp", "ws", "wss"].includes(event.script.origin_scheme)
+            ? event.script.origin_scheme + "://" + (["youtube", "googlevideo", "googleapis", "localhost", "loopback", "other"].includes(event.script.host_class) ? event.script.host_class : "other")
+              + (/^\d{1,5}$/.test(String(event.script.port || "")) ? ":" + String(event.script.port) : "")
+            : "opaque",
+          path_class: ["root", "watch", "embed", "shorts", "player_bundle", "media", "innertube_player", "innertube", "blob_worker", "other"].includes(event.script.path_class)
+            ? event.script.path_class : "other",
+          port: /^\d{1,5}$/.test(String(event.script.port || "")) ? String(event.script.port) : "default"
         } : {scheme: "unknown", host_class: "other", origin_class: "opaque", path_class: "other", port: "unknown"},
         options: {
           type: event.options && (event.options.type === "module" || event.options.type === "classic")
