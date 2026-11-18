@@ -20,7 +20,7 @@ The popup opens an about:blank tab first, creates a native-origin session in the
 
 ## Native/proxy environment comparison
 
-The **ENVIRONMENT COMPARISON** panel captures the currently active tab in the page's main JavaScript world. Capture once while viewing YouTube directly (native mode), then again while viewing the same site through an Intercept synthetic localhost origin (proxy mode). The add-on classifies youtube.com as native and localhost origins as reverse proxy. It uses Firefox's activeTab permission, granted temporarily when the user invokes the extension, to inspect the current tab without requesting permanent access to the site. It retains up to five snapshots per mode in extension-local storage.
+The **ENVIRONMENT COMPARISON** panel captures the currently active tab in the page's main JavaScript world. Capture once while viewing YouTube directly (native mode), then again while viewing the same site through an Intercept synthetic localhost origin (proxy mode). The add-on classifies youtube.com as native and localhost origins as reverse proxy. It uses Firefox's activeTab permission, granted temporarily when the user invokes the extension, to inspect the current tab without requesting permanent access to the site. It retains up to five snapshots per mode in extension-local storage. Firefox match patterns do not support port restrictions, so the manifest matches the localhost hostnames and the probe itself exits unless the document is HTTP on port 5000.
 
 The comparison includes:
 
@@ -34,7 +34,7 @@ The comparison includes:
 
 After capturing both modes, choose **EXPORT COMPARISON**. The timestamped JSON contains the snapshots and a field-by-field comparison of the latest native and proxy captures. The popup also shows a short list of differences. Capture both modes at comparable points in page load/playback for more useful resource-timing comparisons.
 
-This is a diagnostic comparison, not a complete browser fingerprint or a proof of causation. A document-start MAIN-world probe records sanitized dedicated/shared Worker constructor calls; page scripts can detect or interfere with MAIN-world instrumentation. It does not instrument worker globals, inspect worker memory, or read worker-local Performance timelines. The document Resource Timing snapshot describes only the document's timeline. API availability does not prove that a particular API was used successfully.
+This is a diagnostic comparison, not a complete browser fingerprint or a proof of causation. A document-start MAIN-world probe records sanitized dedicated/shared Worker constructor calls; page scripts can detect or interfere with MAIN-world instrumentation. Its localhost host match is narrowed at runtime to port 5000, because Firefox does not support port numbers in extension match patterns. It does not instrument worker globals, inspect worker memory, or read worker-local Performance timelines. The document Resource Timing snapshot describes only the document's timeline. API availability does not prove that a particular API was used successfully.
 
 The snapshot deliberately excludes full URLs, query strings, fragments, page text, video identifiers, cookies, tokens, request/response bodies, arbitrary header values, and SharedWorker names. Resource entries are reduced to sanitized host/path classes and aggregate timing/size values; no resource URL or worker script URL is exported. Snapshots stay in Firefox extension storage until cleared through Firefox's extension storage controls or replaced by later captures (five per mode are retained).
 
