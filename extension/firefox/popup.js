@@ -55,6 +55,28 @@ async function capturePageEnvironment() {
       return {scheme: "unparseable", host_class: "other", origin_class: "opaque", path_class: "other", port: "unknown"};
     }
   };
+
+  function describeResourceURL(value) {
+    const result = describeURL(value);
+    try {
+      const parsed = new URL(value, location.href);
+      const sourceHostClass = hostClass(parsed.hostname);
+      if (sourceHostClass === "localhost" || sourceHostClass === "loopback") {
+        const marker = "/_/https/";
+        const markerIndex = parsed.pathname.indexOf(marker);
+        if (markerIndex >= 0) {
+          const routedTarget = parsed.pathname.slice(markerIndex + marker.length);
+          const slash = routedTarget.indexOf("/");
+          if (slash > 0) {
+            result.host_class = hostClass(routedTarget.slice(0, slash));
+            result.path_class = pathClass(routedTarget.slice(slash));
+          }
+        }
+      }
+    } catch (_) {}
+    return result;
+  }
+
   const host = location.hostname.toLowerCase();
   const hostKind = hostClass(host);
   const mode = hostKind === "localhost" || hostKind === "loopback"
@@ -72,19 +94,21 @@ async function capturePageEnvironment() {
       transfer_size_bytes_total: 0,
       encoded_body_size_bytes_total: 0,
       decoded_body_size_bytes_total: 0,
-      entries_with_timing: 0
+      entries_with_timing: 0,
+      worker_start_nonzero_entries: 0
     },
     window: {document_age_ms: Math.max(0, Math.round(performance.now())), oldest_start_ms: null, newest_response_end_ms: null}
   };
   const resourceEntries = safe(() => performance.getEntriesByType("resource").slice(-1000));
   if (Array.isArray(resourceEntries)) {
     for (const entry of resourceEntries) {
-      const resource = describeURL(entry.name);
+      const resource = describeResourceURL(entry.name);
       const initiator = String(entry.initiatorType || "other").slice(0, 32);
       resources.total++;
       resources.initiators[initiator] = (resources.initiators[initiator] || 0) + 1;
       resources.hosts[resource.host_class] = (resources.hosts[resource.host_class] || 0) + 1;
       resources.paths[resource.path_class] = (resources.paths[resource.path_class] || 0) + 1;
+      if (Number(entry.workerStart) > 0) resources.timing.worker_start_nonzero_entries++;
       const duration = Number(entry.duration);
       if (Number.isFinite(duration) && duration >= 0) {
         resources.timing.duration_ms_total += duration;
@@ -195,6 +219,77 @@ async function capturePageEnvironment() {
     }
   }
 
+
+  const videoDiagnostics = (() => {
+    const readyStateNames = ["HAVE_NOTHING", "HAVE_METADATA", "HAVE_CURRENT_DATA", "HAVE_FUTURE_DATA", "HAVE_ENOUGH_DATA"];
+    const networkStateNames = ["NETWORK_EMPTY", "NETWORK_IDLE", "NETWORK_LOADING", "NETWORK_NO_SOURCE"];
+    const metric = value => Number.isFinite(Number(value)) ? Math.round(Number(value) * 100) / 100 : null;
+    let elements = [];
+    try { elements = Array.from(document.querySelectorAll("video")); } catch (_) {}
+    const items = elements.slice(0, 8).map((video, index) => {
+      const readyState = Number(video.readyState) || 0;
+      const networkState = Number(video.networkState) || 0;
+      const sourceObject = video.srcObject;
+      let sourceObjectKind = "none";
+      try {
+        if (sourceObject) {
+          if (typeof MediaSource === "function" && sourceObject instanceof MediaSource) sourceObjectKind = "media_source";
+          else if (typeof MediaStream === "function" && sourceObject instanceof MediaStream) sourceObjectKind = "media_stream";
+          else sourceObjectKind = "other";
+        }
+      } catch (_) { sourceObjectKind = "unavailable"; }
+      const bufferedRanges = [];
+      try {
+        const ranges = video.buffered;
+        for (let i = 0; i < Math.min(Number(ranges.length) || 0, 32); i++) {
+          bufferedRanges.push({start_s: metric(ranges.start(i)), end_s: metric(ranges.end(i))});
+        }
+      } catch (_) {}
+      let playbackQuality = null;
+      try {
+        if (typeof video.getVideoPlaybackQuality === "function") {
+          const quality = video.getVideoPlaybackQuality();
+          if (quality) playbackQuality = {
+            total_frames: metric(quality.totalVideoFrames),
+            dropped_frames: metric(quality.droppedVideoFrames),
+            corrupted_frames: metric(quality.corruptedVideoFrames)
+          };
+        }
+      } catch (_) {}
+      const errorCode = video.error && Number(video.error.code);
+      return {
+        index,
+        paused: !!video.paused,
+        ended: !!video.ended,
+        seeking: !!video.seeking,
+        current_time_s: metric(video.currentTime),
+        duration_s: metric(video.duration),
+        playback_rate: metric(video.playbackRate),
+        ready_state: readyState,
+        ready_state_name: readyStateNames[readyState] || "unknown",
+        network_state: networkState,
+        network_state_name: networkStateNames[networkState] || "unknown",
+        video_width: Number(video.videoWidth) || 0,
+        video_height: Number(video.videoHeight) || 0,
+        source_attribute_present: video.hasAttribute("src"),
+        current_source_present: !!video.currentSrc,
+        source_object_kind: sourceObjectKind,
+        child_source_count: video.querySelectorAll("source").length,
+        media_keys_present: !!video.mediaKeys,
+        buffered_ranges: bufferedRanges,
+        playback_quality: playbackQuality,
+        media_error_code: Number.isFinite(errorCode) && errorCode > 0 ? errorCode : null
+      };
+    });
+    return {
+      scope: "top_level_document_video_elements",
+      video_element_count: elements.length,
+      captured_video_count: items.length,
+      truncated: elements.length > items.length,
+      items
+    };
+  })();
+
   const storage = {
     local_storage_accessible: safe(() => { localStorage.getItem("__intercept_probe__"); return true; }) === true,
     session_storage_accessible: safe(() => { sessionStorage.getItem("__intercept_probe__"); return true; }) === true,
@@ -203,7 +298,7 @@ async function capturePageEnvironment() {
   };
   return {
     schema: "intercept-page-environment",
-    schema_version: 2,
+    schema_version: 3,
     mode,
     location: {
       protocol: location.protocol,
@@ -257,7 +352,8 @@ async function capturePageEnvironment() {
       media_session: !!navigator.mediaSession
     },
     storage,
-    resources
+    resources,
+    video: videoDiagnostics
   };
 }
 function normalizeServer(value) {
@@ -335,7 +431,7 @@ async function exportObservations() {
     const exportedAt = new Date();
     const payload = {
       format: "intercept-native-observations",
-      format_version: 1,
+      format_version: 2,
       exported_at: exportedAt.toISOString(),
       session: {
         id: session.id,
@@ -426,6 +522,13 @@ async function captureEnvironment() {
     if (page.mode === "unclassified") {
       throw new Error("Active tab is neither a recognized YouTube origin nor a localhost Intercept proxy session.");
     }
+    const mediaTrace = await browser.runtime.sendMessage({
+      type: "intercept-media-trace:snapshot", tabId: tab.id
+    }).catch(() => null);
+    if (mediaTrace && mediaTrace.status !== "not_started") {
+      page.media_request_observation = mediaTrace;
+      renderMediaTraceStatus(mediaTrace);
+    }
     const snapshot = {...page, captured_at: new Date().toISOString()};
     const stored = await browser.storage.local.get("environmentSnapshots");
     const snapshots = stored.environmentSnapshots || {native_youtube: [], reverse_proxy: [], unclassified: []};
@@ -441,6 +544,120 @@ async function captureEnvironment() {
     button.disabled = false;
   }
 }
+
+function classifyActiveTabMode(tab) {
+  try {
+    const url = new URL(tab && tab.url);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol === "https:" && (host === "youtube.com" || host.endsWith(".youtube.com"))) {
+      return "native_youtube";
+    }
+    if (url.protocol === "http:" && url.port === "5000"
+        && (host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1")) {
+      return "reverse_proxy";
+    }
+  } catch (_) {}
+  return null;
+}
+function renderMediaTraceStatus(trace) {
+  const status = byId("media-trace-status");
+  if (!trace || trace.status === "not_started") {
+    status.textContent = "No media trace is armed for this tab. Start one before reloading or playing the video.";
+    return;
+  }
+  const totals = trace.totals || {};
+  const mode = trace.mode === "native_youtube" ? "NATIVE" : "PROXY";
+  const state = trace.status === "active" ? "RECORDING" : "STOPPED";
+  status.textContent = mode + " · " + state
+    + " · requests " + (totals.requests_started || 0)
+    + " · media " + (totals.media_requests_started || 0)
+    + " · media completed " + (totals.media_requests_completed || 0)
+    + " · media failed " + (totals.media_requests_failed || 0)
+    + " · HTTP errors " + (totals.http_error_responses || 0)
+    + " · in flight " + (trace.in_flight_requests || 0)
+    + " · events " + (trace.event_count || 0);
+}
+async function activeTabForMediaTrace() {
+  const [tab] = await browser.tabs.query({active: true, currentWindow: true});
+  if (!tab || !Number.isInteger(tab.id)) throw new Error("Could not identify the active tab.");
+  const mode = classifyActiveTabMode(tab);
+  if (!mode) throw new Error("Open a native HTTPS YouTube tab or an Intercept localhost:5000 proxy tab first.");
+  return {tab, mode};
+}
+async function startMediaTrace() {
+  const button = byId("start-media-trace");
+  button.disabled = true;
+  try {
+    const {tab, mode} = await activeTabForMediaTrace();
+    const trace = await browser.runtime.sendMessage({
+      type: "intercept-media-trace:start", tabId: tab.id, mode
+    });
+    renderMediaTraceStatus(trace);
+    message.textContent = "Media trace armed for this tab. Reload the page, play or attempt the video, then capture the environment.";
+  } catch (error) {
+    message.textContent = error.message || String(error);
+  } finally {
+    button.disabled = false;
+  }
+}
+async function refreshMediaTrace() {
+  try {
+    const [tab] = await browser.tabs.query({active: true, currentWindow: true});
+    if (!tab || !Number.isInteger(tab.id)) throw new Error("Could not identify the active tab.");
+    const trace = await browser.runtime.sendMessage({
+      type: "intercept-media-trace:snapshot", tabId: tab.id
+    });
+    renderMediaTraceStatus(trace);
+    message.textContent = trace.status === "not_started" ? "No trace is armed for the active tab." : "Media trace refreshed.";
+  } catch (error) {
+    message.textContent = error.message || String(error);
+  }
+}
+async function stopMediaTrace() {
+  try {
+    const [tab] = await browser.tabs.query({active: true, currentWindow: true});
+    if (!tab || !Number.isInteger(tab.id)) throw new Error("Could not identify the active tab.");
+    const trace = await browser.runtime.sendMessage({
+      type: "intercept-media-trace:stop", tabId: tab.id
+    });
+    renderMediaTraceStatus(trace);
+    message.textContent = "Media trace stopped. Its sanitized event history remains available for export.";
+  } catch (error) {
+    message.textContent = error.message || String(error);
+  }
+}
+async function exportMediaTrace() {
+  const button = byId("export-media-trace");
+  button.disabled = true;
+  try {
+    const [tab] = await browser.tabs.query({active: true, currentWindow: true});
+    if (!tab || !Number.isInteger(tab.id)) throw new Error("Could not identify the active tab.");
+    const trace = await browser.runtime.sendMessage({
+      type: "intercept-media-trace:export", tabId: tab.id
+    });
+    if (!trace || trace.status === "not_started") throw new Error("No media trace is available for the active tab.");
+    const exportedAt = new Date();
+    downloadJson("intercept-media-trace-" + exportedAt.toISOString().replace(/[:.]/g, "-") + ".json", {
+      format: "intercept-media-request-trace",
+      format_version: 1,
+      exported_at: exportedAt.toISOString(),
+      trace,
+      notes: [
+        "Trace is scoped to one explicitly selected browser tab.",
+        "Events contain sanitized request categories, host classes, methods, request types, status codes, elapsed times, cache booleans, and allowlisted network error codes.",
+        "No full URLs, query strings, cookies, authorization values, arbitrary headers, request bodies, or response bodies are recorded.",
+        "The trace counts request lifecycle events; it does not measure transferred response bytes."
+      ]
+    });
+    renderMediaTraceStatus(trace);
+    message.textContent = "Exported " + (trace.event_count || 0) + " sanitized media-trace events.";
+  } catch (error) {
+    message.textContent = error.message || String(error);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function exportComparison() {
   const button = byId("export-comparison");
   button.disabled = true;
@@ -460,6 +677,10 @@ async function exportComparison() {
       latest_comparison: comparison.differences,
       notes: [
         "Snapshots execute in the page MAIN world.",
+        "Video diagnostics inspect at most eight video elements in the top-level document and never record source URLs.",
+        "Browser webRequest media tracing is scoped to one explicitly selected tab and records sanitized request lifecycle metadata, not URLs, query strings, headers, or bodies.",
+        "Browser-observed request counts and document Resource Timing are independent measurements and may differ.",
+        "A nonzero Resource Timing workerStart value indicates service-worker timing was exposed for that entry; zero does not prove the service worker was unused.",
         "Dedicated/shared Worker constructor calls are observed by an early MAIN-world probe; page scripts can interfere with this instrumentation.",
         "Resource entries are document Performance timeline aggregates; worker-local Performance timelines are not exposed.",
         "Resource entries are aggregated by initiator type, sanitized host class, and sanitized path class.",
@@ -536,6 +757,10 @@ byId("stop").addEventListener("click", async () => {
   try { await stopSession(); } catch (error) { message.textContent = error.message || String(error); }
 });
 byId("capture-env").addEventListener("click", captureEnvironment);
+byId("start-media-trace").addEventListener("click", startMediaTrace);
+byId("refresh-media-trace").addEventListener("click", refreshMediaTrace);
+byId("stop-media-trace").addEventListener("click", stopMediaTrace);
+byId("export-media-trace").addEventListener("click", exportMediaTrace);
 byId("export-comparison").addEventListener("click", exportComparison);
 serverInput.addEventListener("change", async () => {
   try {
