@@ -3682,6 +3682,9 @@
       + "if(typeof WorkerGlobalScope==='undefined'||!(self instanceof WorkerGlobalScope))return;"
       + "const prefix=" + prefixLiteral + ",primaryOrigin=" + primaryOriginLiteral + ";"
       + "const rawFetch=typeof self.fetch==='function'?self.fetch.bind(self):null;"
+      + "let playbackContextId='';"
+      + "function acceptPlaybackContext(event){const value=event&&event.data;if(!value||value.__interceptPlaybackContext!==true||typeof value.id!=='string'||!/^[a-z0-9-]{1,64}$/.test(value.id))return;playbackContextId=value.id;try{event.stopImmediatePropagation();}catch(_e){}}"
+      + "self.addEventListener('message',acceptPlaybackContext,true);"
       + "let attestationSequence=0;function nextAttestationId(){attestationSequence=(attestationSequence%999999)+1;return Date.now().toString(36)+'-'+attestationSequence+'-'+Math.random().toString(36).slice(2,8);}"
       + "function route(value){"
       + "const raw=value instanceof Request?value.url:value instanceof URL?value.href:String(value);"
@@ -3718,7 +3721,7 @@
       + "if(input instanceof Request&&init)request=new Request(request,init);"
       + "const headers=new Headers(request.headers);headers.set('X-Intercept-Proxy-Mode','ajax');"
       + "headers.set('X-Intercept-Transport-Diagnostic','worker-fetch');"
-      + "if(attestationId)headers.set('X-Intercept-Attestation-Id',attestationId);"
+      + "if(attestationId){headers.set('X-Intercept-Attestation-Id',attestationId);if(playbackContextId)headers.set('X-Intercept-Playback-Context-Id',playbackContextId);}"
       + "const marked=new Request(request,{headers});"
       + "if(info)report(info,'rpc='+attestationId+' phase=blob_worker_dispatch operation='+info.operation+' method='+marked.method+' transport=worker-fetch');"
       + "return rawFetch(marked).then(response=>{if(info)report(info,'rpc='+attestationId+' phase=blob_worker_response operation='+info.operation+' status='+response.status);return response;});"
@@ -3730,7 +3733,7 @@
       + "const attestationId=call.info?nextAttestationId():null;"
       + "try{this.setRequestHeader('X-Intercept-Proxy-Mode','ajax');"
       + "this.setRequestHeader('X-Intercept-Transport-Diagnostic','worker-xhr');"
-      + "if(attestationId)this.setRequestHeader('X-Intercept-Attestation-Id',attestationId);}catch(_e){}"
+      + "if(attestationId){this.setRequestHeader('X-Intercept-Attestation-Id',attestationId);if(playbackContextId)this.setRequestHeader('X-Intercept-Playback-Context-Id',playbackContextId);}}catch(_e){}"
       + "if(call.info)report(call.info,'rpc='+attestationId+' phase=blob_worker_dispatch operation='+call.info.operation+' method='+call.method+' transport=worker-xhr');"
       + "this.addEventListener('load',()=>{if(call.info)report(call.info,'rpc='+attestationId+' phase=blob_worker_response operation='+call.info.operation+' status='+this.status);},{once:true});"
       + "this.addEventListener('error',()=>{if(call.info)report(call.info,'rpc='+attestationId+' phase=blob_worker_error operation='+call.info.operation+' error=network');},{once:true});"
@@ -3832,6 +3835,14 @@
     const target = info.target;
     record("youtube_player_worker", target,
       "phase=construct candidate=" + info.candidate + " transport=" + transport);
+    try {
+      worker.postMessage({__interceptPlaybackContext: true, id: playbackContextId});
+      record("youtube_player_worker", target,
+        "phase=playback_context_handoff sent=true scope=dedicated");
+    } catch (_) {
+      record("youtube_player_worker", target,
+        "phase=playback_context_handoff sent=false scope=dedicated");
+    }
     nativeAdd.call(worker, "error", event => {
       const errorName = String(event && event.error && event.error.name || "WorkerError")
         .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "WorkerError";
