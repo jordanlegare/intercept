@@ -20,7 +20,7 @@ The popup opens an about:blank tab first, creates a native-origin session in the
 
 ## Native/proxy environment comparison
 
-The **ENVIRONMENT COMPARISON** panel captures the currently active tab in the page's main JavaScript world. Capture once while viewing YouTube directly (native mode), then again while viewing the same site through an Intercept synthetic localhost origin (proxy mode). The add-on classifies youtube.com as native and localhost origins as reverse proxy. It retains up to five snapshots per mode in extension-local storage.
+The **ENVIRONMENT COMPARISON** panel captures the currently active tab in the page's main JavaScript world. Capture once while viewing YouTube directly (native mode), then again while viewing the same site through an Intercept synthetic localhost origin (proxy mode). The add-on classifies youtube.com as native and localhost origins as reverse proxy. It uses Firefox's activeTab permission, granted temporarily when the user invokes the extension, to inspect the current tab without requesting permanent access to the site. It retains up to five snapshots per mode in extension-local storage.
 
 The comparison includes:
 
@@ -55,4 +55,4 @@ The Rust backend stores native-origin events in the same per-session event queue
 - Manifest V3 uses Firefox's non-persistent background scripts (event page); event listeners are registered at top level.
 - The extension uses webRequest observation only. It does not request webRequestBlocking, modify headers, redirect requests, or call filterResponseData.
 - A per-session bearer capability protects native event retrieval, ingestion, and session deletion. It is returned only when native_origin: true is used at session creation and is stored in extension-local storage.
-- Environment capture uses browser.scripting.executeScript with world: MAIN and therefore requires Firefox 128 or newer.
+- Environment capture uses browser.scripting.executeScript with world: MAIN and therefore requires Firefox 128 or newer. The activeTab permission grants temporary access when the user invokes the extension; no permanent site-wide host permission is requested for page capture.
