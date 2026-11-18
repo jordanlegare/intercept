@@ -7479,6 +7479,7 @@ fn plain(status: StatusCode, message: &str) -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{is_native_tunnel_host, native_proxy_bearer_matches, parse_native_connect_request};
 
     fn policy_test_session(policy: AuthorizationPolicy, rules: Vec<AuthorizationRule>) -> Session {
         Session {
@@ -8631,6 +8632,7 @@ mod tests {
             base_url: Url::parse("https://example.com/start").unwrap(),
             native_origin: false,
             native_token: None,
+            native_proxy_port: None,
             clients: Mutex::new(UpstreamClientCache::default()),
             cache: Mutex::new(ResourceCache::default()),
             gate: Mutex::new(GateState::Waiting),
@@ -8667,6 +8669,7 @@ mod tests {
             base_url: Url::parse("https://www.youtube.com/start").unwrap(),
             native_origin: false,
             native_token: None,
+            native_proxy_port: None,
             clients: Mutex::new(UpstreamClientCache::default()),
             cache: Mutex::new(ResourceCache::default()),
             gate: Mutex::new(GateState::Waiting),
