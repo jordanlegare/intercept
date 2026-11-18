@@ -25,6 +25,10 @@ function capturePageEnvironment() {
     if (/^\/youtubei\/v1\//.test(path)) return "innertube";
     return "other";
   };
+  const originClass = value => {
+    const parsed = new URL(value);
+    return parsed.protocol + "//" + hostClass(parsed.hostname) + (parsed.port ? ":" + parsed.port : "");
+  };
   const host = location.hostname.toLowerCase();
   const mode = hostClass(host) === "localhost" || hostClass(host) === "loopback"
     ? "reverse_proxy"
@@ -54,9 +58,9 @@ function capturePageEnvironment() {
       hostname_class: hostClass(host),
       port: location.port || "default",
       path_class: pathClass(location.pathname),
-      window_origin: safe(() => window.origin || "undefined"),
-      self_origin: safe(() => self.origin || "undefined"),
-      document_domain: safe(() => document.domain)
+      window_origin_class: safe(() => originClass(window.origin)),
+      self_origin_class: safe(() => originClass(self.origin)),
+      document_domain_class: safe(() => hostClass(document.domain))
     },
     security: {
       is_secure_context: !!globalThis.isSecureContext,
