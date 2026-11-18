@@ -75,3 +75,12 @@ The Rust backend stores native-origin events in the same per-session event queue
 The local Intercept dashboard lists the native-origin session created by this extension. The background script reports a one-minute heartbeat while the monitored tab remains available, so the dashboard can distinguish **CONNECTED**, **STALE**, and **WAITING FOR EXTENSION** instead of displaying the reverse-proxy authorization gate as the native session's status. The activity control opens the retained sanitized browser request observations.
 
 Native-origin mode keeps TLS end-to-end between Firefox and YouTube. Intercept therefore cannot inspect response bodies or populate the server-side HTTP asset cache for this session. Use the dashboard folder control on a reverse-proxy session to inspect files actually retained in the proxy cache.
+
+ 
+## Download completed native-origin playback
+
+The session panel includes **DOWNLOAD WHEN VIDEO COMPLETES**. Enable it before starting the video. The MAIN-world playback hook captures the rendered YouTube player through Firefox's media-element capture stream and MediaRecorder, writes bounded chunks to a temporary file in the origin-private file system, and starts a .webm download when the player fires its ended event. Pauses suspend the recorder; recording resumes with playback. Disabling the toggle discards an in-progress capture.
+
+This is intentionally not described as an export of Firefox's internal HTTP cache. WebExtensions do not receive an API to enumerate and export the browser's HTTP cache as a video file. The feature captures the decoded playback output in real time and re-encodes it as WebM; it is not the original YouTube media stream and may differ in quality, size, or codec from the source. Enable it before playback to capture from the beginning. Enabling it mid-playback only captures from the point at which recording starts. Live streams do not produce an automatic download until the player emits ended. DRM/EME-protected playback may not expose capturable audio/video tracks; this feature does not bypass DRM.
+
+Temporary capture data is stored under the YouTube origin's Origin Private File System in the intercept-playback-downloads directory, with a 2 GiB per-video safety cap. The completed file is handed to the browser's download flow and the temporary copy is removed after one hour. Browser download preferences and player behavior may affect automatic download initiation.
