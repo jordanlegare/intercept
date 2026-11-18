@@ -1470,29 +1470,56 @@
     const now = performance.now();
     const activeTimer = activeYouTubePlayerTimer;
     const recent = recentYouTubePlayerTimerFires
-      .filter(entry => now - entry.firedAt <= 15000)
-      .slice(-3);
+      .filter(entry => now - entry.firedAt <= 15000);
     if (activeTimer && !recent.some(entry => entry.timer === activeTimer)) {
       recent.push({timer: activeTimer, firedAt: activeTimer.lastFiredAt});
     }
-    const selected = recent.slice(-3);
-    if (!selected.length) return null;
-    return selected.map(entry => {
+
+    // Very short intervals fire continuously and otherwise dominate this
+    // correlation window. Keep them visible, but separate them from slower
+    // one-shot/periodic timers that are more discriminating candidates.
+    const lastByTimer = new Map();
+    for (const entry of recent) lastByTimer.set(entry.timer, entry);
+    const entries = Array.from(lastByTimer.values());
+    const activeEntry = activeTimer
+      ? (lastByTimer.get(activeTimer) || {timer: activeTimer, firedAt: activeTimer.lastFiredAt})
+      : null;
+    const slower = entries
+      .filter(entry => entry.timer.delayMs > 100 && entry.timer !== activeTimer)
+      .slice(-2);
+    const selected = activeEntry ? [activeEntry, ...slower] : slower.slice(-3);
+
+    function summarize(entry) {
       const timer = entry.timer;
       const firedAgo = Number.isFinite(entry.firedAt)
         ? Math.max(0, Math.round(now - entry.firedAt))
-        : "unknown";
-      const scheduledAgo = Math.max(0, Math.round(now - timer.scheduledAt));
+        : -1;
       return timer.kind + "#" + timer.id
-        + ":relation=" + (timer === activeTimer ? "active" : "recent")
-        + ":scheduled_by=" + timer.callsite
-        + ":delay_ms=" + timer.delayMs
-        + ":fires=" + timer.fireCount
-        + ":fired_ago_ms=" + firedAgo
-        + ":scheduled_ago_ms=" + scheduledAgo;
-    }).join("|").slice(0, 520);
-  }
+        + ":" + (timer === activeTimer ? "active" : "recent")
+        + ":" + timer.delayMs + "ms"
+        + ":" + timer.fireCount + "fires"
+        + ":" + firedAgo + "msAgo";
+    }
 
+    const highFrequency = entries
+      .filter(entry => entry.timer.delayMs <= 100)
+      .slice(-2)
+      .map(entry => {
+        const timer = entry.timer;
+        const firedAgo = Number.isFinite(entry.firedAt)
+          ? Math.max(0, Math.round(now - entry.firedAt))
+          : -1;
+        return timer.kind + "#" + timer.id
+          + ":" + timer.delayMs + "ms"
+          + ":" + timer.fireCount + "fires"
+          + ":" + firedAgo + "msAgo";
+      });
+
+    const fields = [];
+    if (selected.length) fields.push("timers=" + selected.map(summarize).join(","));
+    if (highFrequency.length) fields.push("pollers=" + highFrequency.join(","));
+    return fields.length ? fields.join(";").slice(0, 360) : null;
+  }
   function instrumentYouTubePlayerTimer(kind, nativeTimer) {
     if (typeof nativeTimer !== "function") return nativeTimer;
     return function(handler, delay, ...args) {
