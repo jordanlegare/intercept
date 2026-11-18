@@ -33,7 +33,13 @@
     .terminate-session:disabled{opacity:.5;cursor:wait}
     .empty{font-size:11px;color:#8192a9}
     #cache-dialog{width:min(1060px,calc(100vw - 28px));max-width:none;max-height:min(820px,calc(100vh - 28px));padding:0;border:1px solid #38506c;background:#0d141e;color:#e9eef7;box-shadow:0 28px 90px #000b}
-    #cache-dialog::backdrop{background:#03070dcc;backdrop-filter:blur(4px)}
+    #cache-dialog::backdrop,#activity-dialog::backdrop{background:#03070dcc;backdrop-filter:blur(4px)}
+    #activity-dialog{width:min(1060px,calc(100vw - 28px));max-width:none;max-height:min(820px,calc(100vh - 28px));padding:0;border:1px solid #38506c;background:#0d141e;color:#e9eef7;box-shadow:0 28px 90px #000b}
+    .activity-events{list-style:none;margin:0;padding:8px 14px;overflow:auto;min-height:0;flex:1}
+    .activity-event{display:grid;grid-template-columns:92px minmax(0,1fr);gap:10px;padding:10px 4px;border-bottom:1px solid #243348;font-size:10px;line-height:1.55}
+    .activity-event time{color:#8298b2;white-space:nowrap}
+    .activity-event strong{color:#b8e7ff}
+    .activity-detail{color:#cbd7e5;overflow-wrap:anywhere;white-space:pre-wrap}
     .cache-window{display:flex;flex-direction:column;min-height:540px;max-height:min(820px,calc(100vh - 28px))}
     .cache-header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 20px;border-bottom:1px solid #29384e;background:#111c2a}
     .cache-title{font-size:14px;letter-spacing:.14em;color:#b8e7ff}
@@ -117,6 +123,31 @@
     </div>
   </dialog>
 
+  <dialog id="activity-dialog" aria-labelledby="activity-dialog-title">
+    <div class="cache-window">
+      <header class="cache-header">
+        <div>
+          <div class="cache-title" id="activity-dialog-title">NATIVE SESSION ACTIVITY</div>
+          <div class="cache-subtitle" id="activity-session-label">Sanitized browser request observations</div>
+        </div>
+        <div class="session-actions">
+          <button id="activity-refresh" type="button">REFRESH</button>
+          <button id="activity-close" type="button" aria-label="Close session activity">×</button>
+        </div>
+      </header>
+      <div class="cache-toolbar">
+        <span id="activity-summary">Loading session activity…</span>
+        <span>METADATA ONLY · NO RESPONSE BODIES</span>
+      </div>
+      <div class="cache-toolbar">
+        Native-origin traffic preserves end-to-end TLS. The proxy cannot populate its HTTP asset cache from this session; use the folder control on a reverse-proxy session to inspect cached files.
+      </div>
+      <ol class="activity-events" id="activity-events" aria-live="polite">
+        <li class="cache-empty">Loading session activity…</li>
+      </ol>
+    </div>
+  </dialog>
+
   <div class="rule"></div>
   <p class="small">Standard holds state-changing methods. Strict permits the first document bootstrap and then holds all upstream requests. Custom applies host/path/method rules and defaults unmatched requests to Standard. Rust enforces each policy independently for every session.</p>
   <p class="small">The browser talks HTTP to this loopback app; Rust makes verified HTTPS connections upstream. Each session has a distinct <code>session-id.localhost</code> origin, separate from the dashboard and authority API. This is not transparent interception of arbitrary HTTPS tabs and requires no browser CA.</p>
@@ -140,6 +171,13 @@
   const cachePreviewTitle = document.querySelector("#cache-preview-title");
   const cachePreviewContent = document.querySelector("#cache-preview-content");
   const cacheDownload = document.querySelector("#cache-download");
+  const activityDialog = document.querySelector("#activity-dialog");
+  const activityClose = document.querySelector("#activity-close");
+  const activityRefresh = document.querySelector("#activity-refresh");
+  const activitySummary = document.querySelector("#activity-summary");
+  const activitySessionLabel = document.querySelector("#activity-session-label");
+  const activityEvents = document.querySelector("#activity-events");
+  let activeActivitySession = null;
   let activeCacheSession = null;
   let activeCacheEntries = [];
   let activeCacheDirectory = "";
@@ -316,6 +354,76 @@
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
   });
 
+  function formatAge(milliseconds) {
+    const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+    if (seconds < 60) return seconds + "s ago";
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return minutes + "m ago";
+    return Math.floor(minutes / 60) + "h ago";
+  }
+
+  async function refreshNativeActivity() {
+    if (!activeActivitySession) return;
+    activitySummary.textContent = "Loading session activity…";
+    try {
+      const response = await fetch(
+        "/api/sessions/" + encodeURIComponent(activeActivitySession.id) + "/events",
+        {cache:"no-store"}
+      );
+      if (!response.ok) throw new Error(await response.text() || "Could not load native session activity");
+      const events = await response.json();
+      const visible = events.filter(event => event.kind !== "native_session_heartbeat");
+      const starts = visible.filter(event => event.kind === "native_request_start").length;
+      const completed = visible.filter(event => event.kind === "native_request_complete").length;
+      const errors = visible.filter(event => event.kind === "native_request_error").length;
+      activitySummary.textContent = visible.length + " retained events · " + starts +
+        " requests started · " + completed + " completed · " + errors + " errors";
+      activityEvents.replaceChildren();
+      const latest = visible.slice(-150).reverse();
+      if (!latest.length) {
+        const empty = document.createElement("li");
+        empty.className = "cache-empty";
+        empty.textContent = "No browser request observations have arrived yet. The extension heartbeat still appears in the session status.";
+        activityEvents.append(empty);
+        return;
+      }
+      for (const event of latest) {
+        const item = document.createElement("li");
+        item.className = "activity-event";
+        const time = document.createElement("time");
+        time.textContent = new Date(Number(event.at_unix_ms)).toLocaleTimeString();
+        const body = document.createElement("div");
+        const title = document.createElement("strong");
+        title.textContent = event.kind;
+        const detail = document.createElement("div");
+        detail.className = "activity-detail";
+        detail.textContent = (event.target || "") + (event.detail ? " · " + event.detail : "");
+        body.append(title, detail);
+        item.append(time, body);
+        activityEvents.append(item);
+      }
+    } catch (error) {
+      activitySummary.textContent = "Activity unavailable";
+      activityEvents.replaceChildren();
+      const item = document.createElement("li");
+      item.className = "cache-empty";
+      item.textContent = error.message || String(error);
+      activityEvents.append(item);
+    }
+  }
+
+  function openNativeActivity(session) {
+    activeActivitySession = session;
+    activitySessionLabel.textContent = session.target_url + " · " + session.id;
+    activityEvents.replaceChildren();
+    activitySummary.textContent = "Loading session activity…";
+    if (!activityDialog.open) activityDialog.showModal();
+    void refreshNativeActivity();
+  }
+
+  activityClose.addEventListener("click", () => activityDialog.close());
+  activityRefresh.addEventListener("click", refreshNativeActivity);
+
   async function refreshSessions() {
     try {
       const response = await fetch("/api/sessions", {cache: "no-store"});
@@ -350,10 +458,21 @@
         const meta = document.createElement("span");
         meta.className = "session-meta";
         meta.textContent = session.mode === "native-origin"
-          ? "NATIVE ORIGIN · OBSERVE ONLY · " + session.state
+          ? "NATIVE ORIGIN · " + session.state +
+            (Number.isFinite(session.native_last_seen_ago_ms) ? " · SEEN " + formatAge(session.native_last_seen_ago_ms) : "") +
+            " · HTTP CACHE N/A (TLS PASSTHROUGH)"
           : session.policy.toUpperCase() + " · " + session.state;
         const sessionActions = [];
-        if (session.mode !== "native-origin") {
+        if (session.mode === "native-origin") {
+          const activity = document.createElement("button");
+          activity.type = "button";
+          activity.className = "browse-cache";
+          activity.textContent = "≋";
+          activity.title = "Explore sanitized browser request activity for this extension session";
+          activity.setAttribute("aria-label", "Browse activity for " + session.target_url);
+          activity.addEventListener("click", () => openNativeActivity(session));
+          sessionActions.push(activity);
+        } else {
           const browse = document.createElement("button");
           browse.type = "button";
           browse.className = "browse-cache";
@@ -404,6 +523,7 @@
   }
 
   refreshButton.addEventListener("click", refreshSessions);
+  window.setInterval(() => { void refreshSessions(); }, 10000);
   form.addEventListener("submit", async event => {
     event.preventDefault();
     let rules;

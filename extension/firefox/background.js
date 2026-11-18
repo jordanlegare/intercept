@@ -29,9 +29,46 @@ const mediaTraceReady = browser.storage.local.get("mediaTrace").then(stored => {
 }).catch(() => {});
 
 let sessionChangeRevision = 0;
+const NATIVE_HEARTBEAT_ALARM = "intercept-native-session-heartbeat";
 const sessionReady = browser.storage.local.get("nativeSession").then(stored => {
   if (sessionChangeRevision === 0) activeSession = stored.nativeSession || null;
 }).catch(() => {});
+
+async function reportNativeHeartbeat() {
+  await sessionReady;
+  const session = activeSession;
+  if (!session || !session.id || !session.tabId) return;
+  let state = "connected";
+  let tabStatus = "unknown";
+  let tabActive = false;
+  try {
+    const tab = await browser.tabs.get(session.tabId);
+    tabStatus = tab.status === "complete" || tab.status === "loading" ? tab.status : "unknown";
+    tabActive = !!tab.active;
+  } catch (_) {
+    state = "tab_unavailable";
+  }
+  queueEvent(session, "native_session_heartbeat", "extension",
+    "state=" + state + " tab_status=" + tabStatus + " tab_active=" + (tabActive ? "true" : "false"));
+  void flushEvents(session);
+}
+
+async function configureNativeHeartbeat(session) {
+  try {
+    if (!browser.alarms) return;
+    await browser.alarms.clear(NATIVE_HEARTBEAT_ALARM);
+    if (!session || !session.id) return;
+    await browser.alarms.create(NATIVE_HEARTBEAT_ALARM, {periodInMinutes: 1});
+    await reportNativeHeartbeat();
+  } catch (_) {}
+}
+
+void sessionReady.then(() => configureNativeHeartbeat(activeSession));
+if (browser.alarms && browser.alarms.onAlarm) {
+  browser.alarms.onAlarm.addListener(alarm => {
+    if (alarm && alarm.name === NATIVE_HEARTBEAT_ALARM) void reportNativeHeartbeat();
+  });
+}
 
 browser.storage.onChanged.addListener((changes, area) => {
   if (area !== "local" || !Object.prototype.hasOwnProperty.call(changes, "nativeSession")) return;
@@ -41,6 +78,7 @@ browser.storage.onChanged.addListener((changes, area) => {
     pendingEvents = [];
     inFlight.clear();
   }
+  void configureNativeHeartbeat(activeSession);
 });
 
 function uuid() {
@@ -476,6 +514,10 @@ browser.tabs.onRemoved.addListener(async tabId => {
 });
 browser.runtime.onMessage.addListener(async message => {
   if (!message || typeof message.type !== "string") return null;
+  if (message.type === "intercept-native:heartbeat") {
+    await reportNativeHeartbeat();
+    return {ok: true};
+  }
   if (message.type === "intercept-native:flush") {
     await flushEvents();
     return {ok: true};

@@ -496,6 +496,8 @@ struct SessionSummary {
     mode: &'static str,
     policy: &'static str,
     state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_last_seen_ago_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1113,17 +1115,37 @@ async fn intercept_css() -> impl IntoResponse {
     )
 }
 
+fn native_session_state(last_seen_ago_ms: Option<u64>) -> &'static str {
+    match last_seen_ago_ms {
+        Some(age_ms) if age_ms <= 120_000 => "CONNECTED",
+        Some(_) => "STALE",
+        None => "WAITING FOR EXTENSION",
+    }
+}
+
 async fn list_sessions(State(state): State<AppState>) -> Json<SessionsResponse> {
     let sessions = state.sessions.read().await.values().cloned().collect::<Vec<_>>();
     let active_sessions = sessions.len();
     let mut summaries = Vec::with_capacity(active_sessions);
 
     for session in sessions {
-        let gate = *session.gate.lock().await;
-        let state_label = match gate {
-            GateState::Waiting => "WAITING",
-            GateState::Running { .. } => "COUNTDOWN",
-            GateState::Released => "AUTHORIZED",
+        let native_last_seen_ago_ms = if session.native_origin {
+            let events = session.events.lock().await;
+            events.iter().rev()
+                .find(|event| event.kind == "native_session_heartbeat")
+                .map(|event| now_ms().saturating_sub(event.at_unix_ms).min(u128::from(u64::MAX)) as u64)
+        } else {
+            None
+        };
+        let state_label = if session.native_origin {
+            native_session_state(native_last_seen_ago_ms)
+        } else {
+            let gate = *session.gate.lock().await;
+            match gate {
+                GateState::Waiting => "WAITING",
+                GateState::Running { .. } => "COUNTDOWN",
+                GateState::Released => "AUTHORIZED",
+            }
         };
         let policy_label = match session.policy {
             AuthorizationPolicy::Standard => "standard",
@@ -1141,6 +1163,7 @@ async fn list_sessions(State(state): State<AppState>) -> Json<SessionsResponse> 
             mode: if session.native_origin { "native-origin" } else { "reverse-proxy" },
             policy: policy_label,
             state: state_label,
+            native_last_seen_ago_ms,
         });
     }
 
@@ -1747,7 +1770,8 @@ async fn native_record_events(
     for input in inputs.into_iter().take(100) {
         if !matches!(
             input.kind.as_str(),
-            "native_request_start"
+            "native_session_heartbeat"
+                | "native_request_start"
                 | "native_request_headers"
                 | "native_response_headers"
                 | "native_request_complete"
@@ -9477,4 +9501,18 @@ mod ump_stream_diagnostics_tests {
         assert!(!native_bearer_matches(&headers, "test-capability"));
     }
 
+}
+
+
+#[cfg(test)]
+mod native_session_dashboard_tests {
+    use super::native_session_state;
+
+    #[test]
+    fn native_dashboard_state_tracks_extension_heartbeat_freshness() {
+        assert_eq!(native_session_state(None), "WAITING FOR EXTENSION");
+        assert_eq!(native_session_state(Some(0)), "CONNECTED");
+        assert_eq!(native_session_state(Some(120_000)), "CONNECTED");
+        assert_eq!(native_session_state(Some(120_001)), "STALE");
+    }
 }
