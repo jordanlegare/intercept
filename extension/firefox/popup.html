@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Intercept Native Origin</title><link rel="stylesheet" href="popup.css"><script src="popup.js" defer></script>
+</head>
+<body><main>
+  <header><div class="eyebrow">INTERCEPT / FIREFOX</div><h1>NATIVE ORIGIN<span>_</span></h1>
+    <p>Keep YouTube on Firefox's native HTTPS path while Intercept observes request metadata.</p></header>
+  <div class="notice"><strong>OBSERVATION ONLY</strong><span>No requests are redirected or modified. Authorization timers, request holds, caching, and response rewriting are not active in this mode.</span></div>
+  <label for="server">INTERCEPT SERVER</label><input id="server" type="url" value="http://127.0.0.1:5000" spellcheck="false">
+  <label for="target">YOUTUBE URL</label><input id="target" type="url" value="https://www.youtube.com/" spellcheck="false">
+  <button id="start" type="button">OPEN NATIVE-ORIGIN SESSION</button>
+  <section id="active" hidden><div class="status"><span class="dot"></span><strong>SESSION ACTIVE</strong></div>
+    <div id="session-id" class="session-id"></div>
+    <div class="actions"><button id="refresh" type="button" class="secondary">REFRESH EVENTS</button><button id="export" type="button" class="secondary">EXPORT JSON</button><button id="stop" type="button" class="danger">STOP SESSION</button></div>
+    <div id="event-count" class="muted"></div><ol id="events" aria-live="polite"></ol>
+  </section>
+  <section id="comparison">
+    <div class="section-title">ENVIRONMENT COMPARISON</div>
+    <p class="section-copy">Capture the active tab in each mode. The latest native and proxy snapshots are compared locally.</p>
+    <div class="actions compare-actions">
+      <button id="capture-env" type="button" class="secondary">CAPTURE ACTIVE TAB</button>
+      <button id="export-comparison" type="button" class="secondary">EXPORT COMPARISON</button>
+    </div>
+    <div id="compare-status" class="muted">No environment snapshots captured yet.</div>
+    <ol id="differences" aria-live="polite"></ol>
+  </section>
+  <section id="media-trace">
+    <div class="section-title">PLAYBACK / REQUEST DIAGNOSTICS</div>
+    <p class="section-copy">Arm a trace on the active tab before reloading or playing. The trace counts browser-observed requests independently of document Resource Timing.</p>
+    <div class="actions trace-actions">
+      <button id="start-media-trace" type="button" class="secondary">START / RESET TRACE</button>
+      <button id="refresh-media-trace" type="button" class="secondary">REFRESH TRACE</button>
+      <button id="stop-media-trace" type="button" class="danger">STOP TRACE</button>
+      <button id="export-media-trace" type="button" class="secondary">EXPORT TRACE JSON</button>
+    </div>
+    <div id="media-trace-status" class="muted" aria-live="polite">No media trace is armed for this tab.</div>
+  </section>
+  <div id="message" role="status" aria-live="polite"></div>
+  <footer>Environment capture executes in the page's main world. Only sanitized capability and resource metadata is saved; no cookies, tokens, query strings, or request bodies.</footer>
+</main></body></html>
