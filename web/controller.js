@@ -1531,7 +1531,9 @@
       }
 
       const callsite = sanitizedYouTubeFetchCallsite(2);
-      if (!/kevlar_base_module|kevlar_main_mod/i.test(callsite)) {
+      const isKevlarRuntime = /kevlar_base_module|kevlar_main_mod/i.test(callsite);
+      const isBaseRuntime = /m=base(?::|[,/]|$)/i.test(callsite);
+      if (!isKevlarRuntime && !isBaseRuntime) {
         return Reflect.apply(nativeTimer, this, [handler, delay, ...args]);
       }
 
@@ -1556,10 +1558,11 @@
         .replace(/[^A-Za-z0-9_$.-]/g, "").slice(0, 40) || "anonymous";
       const registrationKey = kind + "|" + timer.delayMs + "|" + callsite;
       if (!observedYouTubeTimerRegistrations.has(registrationKey)
-          && observedYouTubeTimerRegistrations.size < 32) {
+          && observedYouTubeTimerRegistrations.size < 96) {
         observedYouTubeTimerRegistrations.add(registrationKey);
-        record("youtube_player_runtime", "kevlar timer",
-          "phase=timer_registered timer=" + kind + "#" + timer.id
+        record("youtube_player_runtime", "player timer",
+          "phase=timer_registered runtime=" + (isBaseRuntime ? "base" : "kevlar")
+          + " timer=" + kind + "#" + timer.id
           + " delay_ms=" + timer.delayMs
           + " callback=" + callbackName
           + " scheduled_by=" + callsite);
@@ -1604,8 +1607,8 @@
       const nativeSetInterval = window.setInterval;
       window.setTimeout = instrumentYouTubePlayerTimer("timeout", nativeSetTimeout);
       window.setInterval = instrumentYouTubePlayerTimer("interval", nativeSetInterval);
-      record("youtube_player_runtime", "kevlar timers",
-        "phase=timer_observer_installed scope=kevlar_base_module");
+      record("youtube_player_runtime", "player timers",
+        "phase=timer_observer_installed scope=kevlar_and_base");
     } catch (error) {
       const errorName = String(error && error.name || "unknown")
         .replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "unknown";
