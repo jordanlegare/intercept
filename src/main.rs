@@ -1188,7 +1188,7 @@ async fn create_session(
     State(state): State<AppState>,
     Json(input): Json<CreateSession>,
 ) -> Result<Json<CreateSessionResponse>, (StatusCode, String)> {
-    let target = Url::parse(input.url.trim())
+    let mut target = Url::parse(input.url.trim())
         .map_err(|_| (StatusCode::BAD_REQUEST, "Enter a valid absolute http:// or https:// URL".into()))?;
 
     if !matches!(target.scheme(), "http" | "https") {
@@ -7104,6 +7104,8 @@ mod tests {
         Session {
             id: "0123456789abcdef0123456789abcdef".to_owned(),
             base_url: Url::parse("https://example.com/start").unwrap(),
+            native_origin: false,
+            native_token: None,
             clients: Mutex::new(UpstreamClientCache::default()),
             cache: Mutex::new(ResourceCache::default()),
             gate: Mutex::new(GateState::Waiting),
@@ -8246,6 +8248,8 @@ mod tests {
         let session = Session {
             id: "session1234567890abcdef1234567890".to_owned(),
             base_url: Url::parse("https://example.com/start").unwrap(),
+            native_origin: false,
+            native_token: None,
             clients: Mutex::new(UpstreamClientCache::default()),
             cache: Mutex::new(ResourceCache::default()),
             gate: Mutex::new(GateState::Waiting),
@@ -8280,6 +8284,8 @@ mod tests {
         let session = Session {
             id: "session1234567890abcdef1234567890".to_owned(),
             base_url: Url::parse("https://www.youtube.com/start").unwrap(),
+            native_origin: false,
+            native_token: None,
             clients: Mutex::new(UpstreamClientCache::default()),
             cache: Mutex::new(ResourceCache::default()),
             gate: Mutex::new(GateState::Waiting),
@@ -8918,6 +8924,7 @@ mod ump_stream_diagnostics_tests {
         YouTubeAttestationTiming, YouTubeAttestationResponseMetadata,
         YouTubeSabrAttestationRequestSnapshot, youtube_attestation_age_band,
         youtube_playback_context_id_from_value, UmpStreamDiagnostics, event_detail_limit, clean_field,
+        is_firefox_extension_origin, native_bearer_matches, HeaderMap, HeaderValue, header,
     };
 
     #[test]
