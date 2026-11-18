@@ -124,6 +124,8 @@ function safeHeaderValue(headers, name) {
     const mime = raw.split(",", 1)[0].trim();
     return /^[a-z0-9.+_-]+\/[a-z0-9.+_-]+$/.test(mime) ? mime : "other";
   }
+  if (name === "content-length") return /^\\d{1,15}$/.test(raw) ? raw : "absent";
+  if (name === "content-encoding") return /^[a-z0-9._-]{1,24}$/.test(raw) ? raw : "other";
   return "present";
 }
 function recordRequestHeaders(details) {
