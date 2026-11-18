@@ -250,11 +250,20 @@ async function captureEnvironment() {
   try {
     const [tab] = await browser.tabs.query({active: true, currentWindow: true});
     if (!tab || !Number.isInteger(tab.id)) throw new Error("Could not identify the active tab.");
-    const results = await browser.scripting.executeScript({
-      target: {tabId: tab.id},
-      world: "MAIN",
-      func: capturePageEnvironment
-    });
+    let results;
+    try {
+      results = await browser.scripting.executeScript({
+        target: {tabId: tab.id},
+        world: "MAIN",
+        func: capturePageEnvironment
+      });
+    } catch (error) {
+      const detail = error && error.message ? error.message : String(error);
+      if (/permission|host|access/i.test(detail)) {
+        throw new Error("Firefox denied access to this tab. Reload the updated extension, click its toolbar button while on the page, then choose CAPTURE ACTIVE TAB. The activeTab permission grants temporary access to the current tab.");
+      }
+      throw error;
+    }
     const page = results && results[0] && results[0].result;
     if (!page || !page.mode) throw new Error("The page did not return an environment snapshot.");
     if (page.mode === "unclassified") {
