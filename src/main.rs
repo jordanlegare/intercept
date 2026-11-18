@@ -5508,6 +5508,14 @@ fn rewrite_worker_javascript(
       const primaryOrigin={primary_origin};
       const prefix="/p/"+encodeURIComponent(sessionId);
       const rawWorkerFetch=typeof self.fetch==="function"?self.fetch.bind(self):null;
+      let playbackContextId="";
+      function acceptPlaybackContext(event){{
+        const value=event&&event.data;
+        if(!value||value.__interceptPlaybackContext!==true||typeof value.id!=="string"||!/^[a-z0-9-]{{1,64}}$/.test(value.id))return;
+        playbackContextId=value.id;
+        try{{event.stopImmediatePropagation()}}catch(_e){{}}
+      }}
+      self.addEventListener("message",acceptPlaybackContext,true);
       let attestationSequence=0;
       function nextAttestationId(){{
         attestationSequence=(attestationSequence%999999)+1;
@@ -5655,7 +5663,10 @@ fn rewrite_worker_javascript(
           headers.set("X-Intercept-Proxy-Mode","ajax");
           headers.set("X-Intercept-Body-Diagnostic",bodyDetail);
           headers.set("X-Intercept-Transport-Diagnostic","worker-fetch");
-          if(attestationId)headers.set("X-Intercept-Attestation-Id",attestationId);
+          if(attestationId){{
+            headers.set("X-Intercept-Attestation-Id",attestationId);
+            if(playbackContextId)headers.set("X-Intercept-Playback-Context-Id",playbackContextId);
+          }}
           reportDispatch(attestation?attestation.target:routed,method+" · "+bodyDetail+" · transport=worker-fetch");
           const pending=nativeFetch(new Request(request,{{headers}}));
           if(!attestation)return pending;
@@ -5693,7 +5704,10 @@ fn rewrite_worker_javascript(
               nativeSet.call(this,"X-Intercept-Proxy-Mode","ajax");
               nativeSet.call(this,"X-Intercept-Body-Diagnostic",bodyDetail);
               nativeSet.call(this,"X-Intercept-Transport-Diagnostic","worker-xhr");
-              if(attestationId)nativeSet.call(this,"X-Intercept-Attestation-Id",attestationId);
+              if(attestationId){{
+                nativeSet.call(this,"X-Intercept-Attestation-Id",attestationId);
+                if(playbackContextId)nativeSet.call(this,"X-Intercept-Playback-Context-Id",playbackContextId);
+              }}
             }}catch(_e){{}}
             if(meta)reportDispatch(meta.attestation?meta.attestation.target:meta.url,meta.method+" · "+bodyDetail+" · transport=worker-xhr");
             if(meta&&meta.attestation){{
@@ -8040,6 +8054,9 @@ mod tests {
         assert!(output.contains("X-Intercept-Proxy-Mode"));
         assert!(output.contains("XMLHttpRequest"));
         assert!(output.contains("importScripts"));
+        assert!(output.contains("X-Intercept-Playback-Context-Id"));
+        assert!(output.contains("__interceptPlaybackContext"));
+        assert!(output.contains("acceptPlaybackContext"));
         assert!(output.contains("if(url.origin===primaryOrigin)return path;"));
     }
 
