@@ -888,7 +888,7 @@ async fn record_session_events(
         let mut detail = input.detail.unwrap_or_default();
         if matches!(
             input.kind.as_str(),
-            "youtube_player_state" | "youtube_player_watchdog" | "youtube_player_media_mutation" | "youtube_sabr_recovery"
+            "youtube_player_state" | "youtube_player_watchdog" | "youtube_player_media_mutation" | "youtube_sabr_recovery" | "youtube_player_error"
         ) {
             let event_at_unix_ms = detail.split_ascii_whitespace()
                 .find_map(|field| field.strip_prefix("observed_at_unix_ms="))
@@ -5657,8 +5657,82 @@ fn inject_youtube_recovery_class_method_entry(
     inject_youtube_recovery_function_entry_at(source, class_start + method_rel, phase)
 }
 
+fn youtube_function_body_open(source: &str, start: usize) -> Option<usize> {
+    let open_paren = start + source.get(start..)?.find('(')?;
+    let mut depth = 0usize;
+    for (offset, character) in source[open_paren..].char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    let mut body = open_paren + offset + 1;
+                    while source.as_bytes().get(body).is_some_and(u8::is_ascii_whitespace) {
+                        body += 1;
+                    }
+                    return (source.as_bytes().get(body) == Some(&b'{')).then_some(body);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn inject_youtube_player_error_handler(source: &mut String) -> bool {
+    let marker = "handleError";
+    let mut search_from = 0usize;
+    while let Some(relative) = source.get(search_from..).and_then(|rest| rest.find(marker)) {
+        let name_start = search_from + relative;
+        let mut candidate = name_start + marker.len();
+        while source.as_bytes().get(candidate).is_some_and(u8::is_ascii_whitespace) {
+            candidate += 1;
+        }
+
+        let next = source.as_bytes().get(candidate).copied();
+        if next == Some(b':') || next == Some(b'=') {
+            candidate += 1;
+            while source.as_bytes().get(candidate).is_some_and(u8::is_ascii_whitespace) {
+                candidate += 1;
+            }
+            if source[candidate..].starts_with("async") {
+                candidate += "async".len();
+                while source.as_bytes().get(candidate).is_some_and(u8::is_ascii_whitespace) {
+                    candidate += 1;
+                }
+            }
+            if !source[candidate..].starts_with("function") {
+                search_from = name_start + marker.len();
+                continue;
+            }
+            candidate += "function".len();
+            if source.as_bytes().get(candidate) == Some(&b'*') {
+                candidate += 1;
+            }
+            while source.as_bytes().get(candidate).is_some_and(u8::is_ascii_whitespace) {
+                candidate += 1;
+            }
+        } else if next != Some(b'(') {
+            search_from = name_start + marker.len();
+            continue;
+        }
+
+        let Some(body_open) = youtube_function_body_open(source, candidate) else {
+            search_from = name_start + marker.len();
+            continue;
+        };
+        source.insert_str(
+            body_open + 1,
+            r#"typeof window!=="undefined"&&window.__interceptRecordYouTubePlayerError&&window.__interceptRecordYouTubePlayerError(arguments,new Error().stack,this);"#,
+        );
+        return true;
+    }
+    false
+}
+
 fn instrument_youtube_sabr_recovery(source: &str) -> String {
     let mut instrumented = source.to_owned();
+    let handle_error_hook = inject_youtube_player_error_handler(&mut instrumented);
 
     let controller_init_hook = inject_youtube_recovery_function_entry(
         &mut instrumented,
@@ -5743,6 +5817,7 @@ fn instrument_youtube_sabr_recovery(source: &str) -> String {
     );
 
     let patch_count = [
+        handle_error_hook,
         controller_init_hook,
         controller_start_hook,
         controller_dispose_hook,
@@ -5761,7 +5836,7 @@ fn instrument_youtube_sabr_recovery(source: &str) -> String {
     ].into_iter().filter(|matched| *matched).count();
 
     let status = format!(
-        "try{{typeof window!==\"undefined\"&&window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery(\"base_instrumentation_status\",{{spsumpreject_hook:{},recovery_request_hook:{},session_wait_hook:{},session_generate_hook:{},content_generate_hook:{},fallback_token_hook:{},webpo_token_hook:{},k_t_release_hook:{},l_t_release_hook:{},loader_gate_hook:{},shared_provider_ready_hook:{},provider_ready_hook:{},controller_init_hook:{},controller_start_hook:{},controller_dispose_hook:{},patch_count:{patch_count}}})}}catch(_e){{}};\n",
+        "try{{typeof window!==\"undefined\"&&window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery(\"base_instrumentation_status\",{{spsumpreject_hook:{},recovery_request_hook:{},session_wait_hook:{},session_generate_hook:{},content_generate_hook:{},fallback_token_hook:{},webpo_token_hook:{},k_t_release_hook:{},l_t_release_hook:{},loader_gate_hook:{},shared_provider_ready_hook:{},provider_ready_hook:{},controller_init_hook:{},controller_start_hook:{},controller_dispose_hook:{},handle_error_hook:{},patch_count:{patch_count}}})}}catch(_e){{}};\n",
         spsumpreject_hook,
         recovery_request_hook,
         session_wait_hook,
@@ -5777,6 +5852,7 @@ fn instrument_youtube_sabr_recovery(source: &str) -> String {
         controller_init_hook,
         controller_start_hook,
         controller_dispose_hook,
+        handle_error_hook,
     );
     // Keep a top-level strict-mode directive first. Guard every injected hook
     // because the same JavaScript rewriter also handles worker scripts.
@@ -6790,7 +6866,7 @@ fn event_detail_limit(kind: &str) -> usize {
     // conservative default for ordinary events.
     match kind {
         "youtube_sabr_response_stream_complete" => 1024,
-        "youtube_player_watchdog" | "youtube_player_state" | "youtube_player_media_mutation" | "youtube_sabr_recovery" => 1100,
+        "youtube_player_watchdog" | "youtube_player_state" | "youtube_player_media_mutation" | "youtube_sabr_recovery" | "youtube_player_error" => 1100,
         "youtube_attestation_freshness" => 900,
         "youtube_sabr_attestation_context"
         | "youtube_sabr_request_metadata"
@@ -7017,6 +7093,50 @@ mod tests {
         assert!(output.contains("token_controller_dispose_enter"));
         assert!(output.contains("controller_dispose_hook:true"));
         assert!(output.contains("controller_active:!!(this&&this.K)"));
+    }
+
+    #[test]
+    fn youtube_base_bundle_instruments_handle_error_function_entries_only() {
+        let base = Url::parse("https://www.youtube.com/s/player/test/base.js").unwrap();
+        let method_fixture = r#"Player={handleError(a,b){this.stopVideo();}};Player.handleError(1,2);"#;
+        let method_output = rewrite_javascript(
+            method_fixture,
+            &base,
+            &base,
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+
+        assert!(method_output.contains("window.__interceptRecordYouTubePlayerError(arguments,new Error().stack,this)"));
+        assert!(method_output.contains("handle_error_hook:true"));
+        assert_eq!(method_output.matches("__interceptRecordYouTubePlayerError(arguments").count(), 1);
+
+        let assigned_fixture = r#"Player.handleError=function(a){this.stopVideo();};"#;
+        let assigned_output = rewrite_javascript(
+            assigned_fixture,
+            &base,
+            &base,
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        assert!(assigned_output.contains("handle_error_hook:true"));
+        assert!(assigned_output.contains("__interceptRecordYouTubePlayerError(arguments"));
+    }
+
+    #[test]
+    fn youtube_handle_error_hook_does_not_match_calls_without_a_definition() {
+        let base = Url::parse("https://www.youtube.com/s/player/test/base.js").unwrap();
+        let fixture = r#"Player.handleError(error);other.handleError(a,b);"#;
+        let output = rewrite_javascript(
+            fixture,
+            &base,
+            &base,
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+
+        assert!(output.contains("handle_error_hook:false"));
+        assert!(!output.contains("__interceptRecordYouTubePlayerError(arguments"));
     }
 
     #[test]
