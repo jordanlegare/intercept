@@ -3012,10 +3012,14 @@ fn is_youtube_inner_tube_endpoint(url: &Url) -> bool {
     // not make cookie lookup, SAPISID authorization, or Origin restoration
     // depend on a partial list of RPC names. New endpoints such as browse,
     // guide, and complete otherwise bypass that common authentication path.
-    youtube_host && (
-        path.starts_with("/youtubei/v1/")
-            || path.starts_with("/api/jnn/v1/")
-    )
+    let innertube_path = path
+        .strip_prefix("/youtubei/v1/")
+        .is_some_and(|rpc| !rpc.is_empty() && !rpc.starts_with("player/"));
+    let youtube_waa_path = path
+        .strip_prefix("/api/jnn/v1/")
+        .is_some_and(|rpc| !rpc.is_empty());
+
+    youtube_host && (innertube_path || youtube_waa_path)
 }
 
 fn youtube_attestation_rpc_operation(url: &Url) -> Option<&'static str> {
