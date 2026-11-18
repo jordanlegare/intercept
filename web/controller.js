@@ -1204,7 +1204,7 @@
           Object.defineProperty(proto, name, {
             ...descriptor,
             value: function(attributeName, ...args) {
-              const attribute = String(attributeName || "").toLowerCase();
+              const attribute = typeof attributeName === "string" ? attributeName.toLowerCase() : "";
               const isVideo = this instanceof HTMLVideoElement;
               const isSource = this instanceof HTMLSourceElement;
               if (attribute !== "src" || (!isVideo && !isSource)) {
