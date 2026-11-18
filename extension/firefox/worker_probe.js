@@ -114,6 +114,8 @@
             if (kind === "shared" && typeof options.name === "string") {
               event.options.name_present = options.name.length > 0;
             }
+          } else if (kind === "shared" && typeof options === "string") {
+            event.options.name_present = options.length > 0;
           }
 
           try {
