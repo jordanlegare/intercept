@@ -8312,6 +8312,20 @@ mod ump_stream_diagnostics_tests {
     };
 
     #[test]
+    fn playback_context_header_requires_a_lowercase_uuid_shape() {
+        assert!(youtube_playback_context_id_from_value(
+            "cc94b161-2abf-4e62-9b31-e393ff753cc8"
+        ));
+        assert!(!youtube_playback_context_id_from_value(
+            "cc94b161-2abf-4e62-9b31-e393ff753CC8"
+        ));
+        assert!(!youtube_playback_context_id_from_value("unscoped"));
+        assert!(!youtube_playback_context_id_from_value(
+            "cc94b161-2abf-4e62-9b31-e393ff753cc8-extra"
+        ));
+    }
+
+    #[test]
     fn sabr_attestation_context_retains_response_fields_past_default_event_limit() {
         let detail = format!("{}last_rpc_response_status=200 last_rpc_response_ago_ms=42", "x".repeat(300));
         let stored = clean_field(detail, event_detail_limit("youtube_sabr_attestation_context"));
