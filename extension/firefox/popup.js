@@ -150,7 +150,8 @@ byId("refresh").addEventListener("click", async () => {
   try { await refreshEvents(); message.textContent = ""; }
   catch (error) { message.textContent = error.message || String(error); }
 });
-byId("export").addEventListener("click", exportObservations);\nbyId("stop").addEventListener("click", async () => {
+byId("export").addEventListener("click", exportObservations);
+byId("stop").addEventListener("click", async () => {
   try { await stopSession(); } catch (error) { message.textContent = error.message || String(error); }
 });
 serverInput.addEventListener("change", async () => {
