@@ -888,7 +888,7 @@ async fn record_session_events(
         let mut detail = input.detail.unwrap_or_default();
         if matches!(
             input.kind.as_str(),
-            "youtube_player_state" | "youtube_player_watchdog" | "youtube_player_media_mutation"
+            "youtube_player_state" | "youtube_player_watchdog" | "youtube_player_media_mutation" | "youtube_sabr_recovery"
         ) {
             let event_at_unix_ms = detail.split_ascii_whitespace()
                 .find_map(|field| field.strip_prefix("observed_at_unix_ms="))
@@ -5570,8 +5570,124 @@ fn rewrite_javascript(source: &str, base: &Url, session_base: &Url, session_id: 
         let suffix = captures.get(3).map(|m| m.as_str()).unwrap_or(quote);
         let route = rewrite_url(base, session_base, session_id, raw).unwrap_or_else(|| raw.to_owned());
         format!("import({quote}{route}{suffix})")
-    });
-    Ok(rewritten.into_owned())
+    }).into_owned();
+
+    if is_youtube_player_base_bundle(base) {
+        Ok(instrument_youtube_sabr_recovery(&rewritten))
+    } else {
+        Ok(rewritten)
+    }
+}
+
+fn is_youtube_player_base_bundle(base: &Url) -> bool {
+    let host = base.host_str().unwrap_or_default().to_ascii_lowercase();
+    (host == "youtube.com" || host.ends_with(".youtube.com"))
+        && base.path().rsplit('/').next() == Some("base.js")
+}
+
+fn replace_youtube_recovery_source_once(source: &mut String, needle: &str, replacement: &str) -> bool {
+    let Some(index) = source.find(needle) else {
+        return false;
+    };
+    source.replace_range(index..index + needle.len(), replacement);
+    true
+}
+
+fn instrument_youtube_sabr_recovery(source: &str) -> String {
+    let mut instrumented = source.to_owned();
+
+    let spsumpreject_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"this.events.V(a,"spsumpreject",(c,d,e)=>{this.D=d;"#,
+        r#"this.events.V(a,"spsumpreject",(c,d,e)=>{window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("spsumpreject",{rejected:!!c,retry_remaining:!!d,video_data_present:!!e,token_controller_active:!!this.K,token_generation_pending:!!this.C,content_token_enabled:!!this.N("html5_generate_content_po_token"),session_token_enabled:!!this.N("html5_generate_session_po_token"),provider_ready:!!this.j,provider_present:!!this.A,fallback_present:!!this.B,living_room_mode:!!this.U});this.D=d;"#,
+    );
+    let recovery_request_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"this.N("html5_generate_content_po_token")&&e?this.Nx(e):this.N("html5_generate_session_po_token")&&C0a(this)"#,
+        r#"this.N("html5_generate_content_po_token")&&e?(window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("content_token_recovery_requested",{provider_ready:!!this.j,provider_present:!!this.A,token_generation_pending:!!this.C}),this.Nx(e)):this.N("html5_generate_session_po_token")&&(window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("session_token_recovery_requested",{provider_ready:!!this.j,provider_present:!!this.A,token_generation_pending:!!this.C}),C0a(this))"#,
+    );
+    let session_wait_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"C0a=function(a){a.A&&(a.C=LB(),a.L.promise.then(()=>{a.Ib.ti("pot_if");hT(a)}))};"#,
+        r#"C0a=function(a){window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("session_token_recovery_waiting",{provider_present:!!a.A,provider_ready:!!a.j,already_pending:!!a.C,release_pending:!!a.D});a.A&&(a.C=LB(),a.L.promise.then(()=>{a.Ib.ti("pot_if");hT(a)}))};"#,
+    );
+    let session_generate_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"hT=async function(a){if(a.N("html5_generate_session_po_token")&&!a.useLivingRoomPoToken){var b="#,
+        r#"hT=async function(a){if(a.N("html5_generate_session_po_token")&&!a.useLivingRoomPoToken){window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("session_token_generation_started",{provider_ready:!!a.j,provider_present:!!a.A,release_pending:!!a.D});var b="#,
+    );
+    let content_generate_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"Nx(a){if(this.A||this.B)a.yf=kT(this,a.videoId)"#,
+        r#"Nx(a){if(this.A||this.B)window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("content_token_generation_started",{provider_ready:!!this.j,provider_present:!!this.A,fallback_present:!!this.B,release_pending:!!this.D}),a.yf=kT(this,a.videoId)"#,
+    );
+    let fallback_token_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"if(!a.A){if(a.B)try{return a.B(b)}catch(c){g.bu(c)}return""}try{"#,
+        r#"if(!a.A){if(a.B)try{let d=a.B(b);window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("token_generated",{token_source:"fallback",token_present:!!d,provider_ready:!!a.j,release_pending:!!a.D});return d}catch(c){window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("token_generation_error",{token_source:"fallback"});g.bu(c)}window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("token_result_empty",{token_source:"fallback"});return""}try{"#,
+    );
+    let webpo_token_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"let d=a.A.yH(c);a.Ib.ti(a.j?"pot_cmf":"pot_csmf");"#,
+        r#"let d=a.A.yH(c);window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("token_generated",{token_source:"webpo",token_present:!!d,provider_ready:!!a.j,living_room_mode:!!a.U,release_pending:!!a.D});a.Ib.ti(a.j?"pot_cmf":"pot_csmf");"#,
+    );
+    let k_t_release_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"a.j&&!a.U&&(a.C?.resolve(),a.C=null,a.D&&(a.D=!1,a.api.app.Qa().ku(!1)));"#,
+        r#"a.j&&!a.U&&(a.C?.resolve(),a.C=null,a.D&&(window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("loader_release_requested",{path:"kT",provider_ready:!!a.j,living_room_mode:!!a.U,release_pending:!!a.D}),a.D=!1,a.api.app.Qa().ku(!1)));"#,
+    );
+    let l_t_release_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"lT=function(a,b){a.U&&a.j&&b&&(a.C?.resolve(),a.C=null,a.D&&(a.D=!1,a.api.app.Qa().ku(!1)))};"#,
+        r#"lT=function(a,b){window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("token_release_check",{path:"lT",living_room_mode:!!a.U,provider_ready:!!a.j,token_present:!!b,release_pending:!!a.D,eligible:!!(a.U&&a.j&&b)});a.U&&a.j&&b&&(a.C?.resolve(),a.C=null,a.D&&(window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("loader_release_requested",{path:"lT",living_room_mode:!!a.U,provider_ready:!!a.j,token_present:!!b,release_pending:!!a.D}),a.D=!1,a.api.app.Qa().ku(!1)))};"#,
+    );
+    let loader_gate_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"ku(a){a!==this.policy.nl&&((this.policy.nl=a)||this.Mf())}"#,
+        r#"ku(a){let b=this.policy.nl;b!==a&&window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("loader_gate",{previous:!!b,next:!!a});a!==this.policy.nl&&((this.policy.nl=a)||this.Mf())}"#,
+    );
+    let token_provider_shared_ready_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"z0a(b.sR()).then(()=>{a.j=!0;a.L.resolve();jT(a,"swpo_re")});"#,
+        r#"z0a(b.sR()).then(()=>{a.j=!0;window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("token_provider_ready",{provider_source:"shared"});a.L.resolve();jT(a,"swpo_re")});"#,
+    );
+    let token_provider_ready_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"z0a(f.sR()).then(()=>{a.j=!0;a.L.resolve()});"#,
+        r#"z0a(f.sR()).then(()=>{a.j=!0;window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("token_provider_ready",{provider_source:"webpo"});a.L.resolve()});"#,
+    );
+
+    let patch_count = [
+        spsumpreject_hook,
+        recovery_request_hook,
+        session_wait_hook,
+        session_generate_hook,
+        content_generate_hook,
+        fallback_token_hook,
+        webpo_token_hook,
+        k_t_release_hook,
+        l_t_release_hook,
+        loader_gate_hook,
+        token_provider_shared_ready_hook,
+        token_provider_ready_hook,
+    ].into_iter().filter(|matched| *matched).count();
+
+    let status = format!(
+        "try{{window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery(\"base_instrumentation_status\",{{spsumpreject_hook:{},recovery_request_hook:{},session_wait_hook:{},session_generate_hook:{},content_generate_hook:{},fallback_token_hook:{},webpo_token_hook:{},k_t_release_hook:{},l_t_release_hook:{},loader_gate_hook:{},shared_provider_ready_hook:{},provider_ready_hook:{},patch_count:{patch_count}}})}}catch(_e){{}};\n",
+        spsumpreject_hook,
+        recovery_request_hook,
+        session_wait_hook,
+        session_generate_hook,
+        content_generate_hook,
+        fallback_token_hook,
+        webpo_token_hook,
+        k_t_release_hook,
+        l_t_release_hook,
+        loader_gate_hook,
+        token_provider_shared_ready_hook,
+        token_provider_ready_hook,
+    );
+    format!("{status}{instrumented}")
 }
 
 fn rewrite_worker_javascript(
@@ -6567,7 +6683,7 @@ fn event_detail_limit(kind: &str) -> usize {
     // conservative default for ordinary events.
     match kind {
         "youtube_sabr_response_stream_complete" => 1024,
-        "youtube_player_watchdog" | "youtube_player_state" | "youtube_player_media_mutation" => 1100,
+        "youtube_player_watchdog" | "youtube_player_state" | "youtube_player_media_mutation" | "youtube_sabr_recovery" => 1100,
         "youtube_attestation_freshness" => 900,
         "youtube_sabr_attestation_context"
         | "youtube_sabr_request_metadata"
@@ -6725,6 +6841,47 @@ mod tests {
         assert!(output.contains("youtube_attestation_resource"));
         assert!(output.contains("youtubeAttLog"));
         assert!(output.contains("operation:youtubeAttGet?\"AttGet\":youtubeAttLog?\"AttLog\""));
+    }
+
+    #[test]
+    fn youtube_base_bundle_reports_sabr_recovery_state_without_exposing_tokens() {
+        let base = Url::parse("https://www.youtube.com/s/player/test/base.js").unwrap();
+        let fixture = concat!(
+            r#"this.events.V(a,"spsumpreject",(c,d,e)=>{this.D=d;c&&this.K&&!this.C&&(this.N("html5_generate_content_po_token")&&e?this.Nx(e):this.N("html5_generate_session_po_token")&&C0a(this));this.C||this.api.ea("stp",{s:+this.K,b:+this.D})});"#,
+            r#"C0a=function(a){a.A&&(a.C=LB(),a.L.promise.then(()=>{a.Ib.ti("pot_if");hT(a)}))};"#,
+            r#"hT=async function(a){if(a.N("html5_generate_session_po_token")&&!a.useLivingRoomPoToken){var b=g.ip("EOM_VISITOR_DATA")||g.ip("VISITOR_DATA");c=b.Pl?b.datasyncId:c;b.jb=kT(a,b.livingRoomPoTokenId||c);lT(a,b.jb)}};"#,
+            r#"Nx(a){if(this.A||this.B)a.yf=kT(this,a.videoId),lT(this,a.yf),this.j||(this.C=LB(),this.L.promise.then(()=>{this.Ib.ti("pot_if");a.yf=kT(this,a.videoId);lT(this,a.yf)}))}"#,
+            r#"kT=function(a,b){if(!a.A){if(a.B)try{return a.B(b)}catch(c){g.bu(c)}return""}try{a.Ib.ti(a.j?"pot_cms":"pot_csms");let c={T_:!0,U_:!0,Ft:b};a.N("html5_web_po_token_disable_caching")||(c.Mv={xQ:b,sX:!0,X1:!0});let d=a.A.yH(c);a.Ib.ti(a.j?"pot_cmf":"pot_csmf");a.j&&!a.U&&(a.C?.resolve(),a.C=null,a.D&&(a.D=!1,a.api.app.Qa().ku(!1)));return d}catch(c){return g.bu(c),""}};"#,
+            r#"lT=function(a,b){a.U&&a.j&&b&&(a.C?.resolve(),a.C=null,a.D&&(a.D=!1,a.api.app.Qa().ku(!1)))};"#,
+            r#"ku(a){a!==this.policy.nl&&((this.policy.nl=a)||this.Mf())}"#,
+            r#"z0a(b.sR()).then(()=>{a.j=!0;a.L.resolve();jT(a,"swpo_re")});"#,
+            r#"z0a(f.sR()).then(()=>{a.j=!0;a.L.resolve()});"#,
+        );
+        let output = rewrite_javascript(&fixture, &base, &base, "0123456789abcdef0123456789abcdef").unwrap();
+
+        assert!(output.contains("base_instrumentation_status"));
+        assert!(output.contains("spsumpreject_hook:true"));
+        assert!(output.contains("recovery_request_hook:true"));
+        assert!(output.contains("token_present:!!d"));
+        assert!(output.contains("phase=token_generated") || output.contains("token_generated"));
+        assert!(output.contains("loader_release_requested"));
+        assert!(output.contains("phase=loader_gate") || output.contains("loader_gate"));
+        assert!(!output.contains("token="));
+    }
+
+    #[test]
+    fn youtube_recovery_instrumentation_is_scoped_to_youtube_base_bundle() {
+        let youtube_base = Url::parse("https://www.youtube.com/s/player/test/base.js").unwrap();
+        let other_youtube_script = Url::parse("https://www.youtube.com/s/player/test/player.js").unwrap();
+        let other_host_base = Url::parse("https://example.com/s/player/test/base.js").unwrap();
+        let fixture = r#"this.events.V(a,"spsumpreject",(c,d,e)=>{this.D=d;c&&this.K&&!this.C&&(this.N("html5_generate_content_po_token")&&e?this.Nx(e):this.N("html5_generate_session_po_token")&&C0a(this));this.C||this.api.ea("stp",{s:+this.K,b:+this.D})});"#;
+
+        assert!(rewrite_javascript(fixture, &youtube_base, &youtube_base, "0123456789abcdef0123456789abcdef")
+            .unwrap().contains("spsumpreject_hook"));
+        assert!(!rewrite_javascript(fixture, &other_youtube_script, &youtube_base, "0123456789abcdef0123456789abcdef")
+            .unwrap().contains("spsumpreject_hook"));
+        assert!(!rewrite_javascript(fixture, &other_host_base, &youtube_base, "0123456789abcdef0123456789abcdef")
+            .unwrap().contains("spsumpreject_hook"));
     }
 
     #[test]
