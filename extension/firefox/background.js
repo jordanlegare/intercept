@@ -311,7 +311,7 @@ function mediaTraceSnapshot(includeEvents) {
     by_category: mediaTrace.by_category,
     event_count: mediaTrace.events.length,
     dropped_events: mediaTrace.dropped_events,
-    in_flight_requests: mediaTraceInFlight.size
+    in_flight_requests: mediaTrace.in_flight ? Object.keys(mediaTrace.in_flight).length : mediaTraceInFlight.size
   };
   if (includeEvents) result.events = mediaTrace.events.slice();
   return result;
@@ -364,6 +364,8 @@ function recordMediaRequestStart(details) {
       started_at_ms: Number(details.timeStamp) || Date.now()
     };
     mediaTraceInFlight.set(details.requestId, request);
+    if (!mediaTrace.in_flight) mediaTrace.in_flight = {};
+    mediaTrace.in_flight[String(details.requestId)] = request;
     const counters = categoryCounters(mediaTrace, request.category);
     counters.started++;
     mediaTrace.totals.requests_started++;
@@ -382,9 +384,12 @@ function recordMediaRequestStart(details) {
 }
 function recordMediaRequestComplete(details) {
   void persistMediaTraceMutation(() => {
-    const request = mediaTraceInFlight.get(details.requestId);
+    const request = mediaTrace && mediaTrace.in_flight
+      ? mediaTrace.in_flight[String(details.requestId)] || mediaTraceInFlight.get(details.requestId)
+      : mediaTraceInFlight.get(details.requestId);
     if (!request) return false;
     mediaTraceInFlight.delete(details.requestId);
+    if (mediaTrace.in_flight) delete mediaTrace.in_flight[String(details.requestId)];
     if (!mediaTrace || details.tabId !== mediaTrace.tab_id) return false;
     const status = Number.isInteger(details.statusCode) ? details.statusCode : 0;
     const elapsed = Math.max(0, Math.round((Number(details.timeStamp) || Date.now()) - request.started_at_ms));
@@ -411,9 +416,12 @@ function recordMediaRequestComplete(details) {
 }
 function recordMediaRequestError(details) {
   void persistMediaTraceMutation(() => {
-    const request = mediaTraceInFlight.get(details.requestId);
+    const request = mediaTrace && mediaTrace.in_flight
+      ? mediaTrace.in_flight[String(details.requestId)] || mediaTraceInFlight.get(details.requestId)
+      : mediaTraceInFlight.get(details.requestId);
     if (!request) return false;
     mediaTraceInFlight.delete(details.requestId);
+    if (mediaTrace.in_flight) delete mediaTrace.in_flight[String(details.requestId)];
     if (!mediaTrace || details.tabId !== mediaTrace.tab_id) return false;
     const elapsed = Math.max(0, Math.round((Number(details.timeStamp) || Date.now()) - request.started_at_ms));
     categoryCounters(mediaTrace, request.category).failed++;
@@ -449,6 +457,7 @@ browser.tabs.onRemoved.addListener(async tabId => {
       mediaTrace.active = false;
       mediaTrace.stopped_at = new Date().toISOString();
       mediaTraceInFlight.clear();
+      mediaTrace.in_flight = {};
       return true;
     });
   } catch (_) {}
@@ -502,6 +511,7 @@ browser.runtime.onMessage.addListener(async message => {
         },
         by_category: {},
         events: [],
+        in_flight: {},
         dropped_events: 0
       };
       return true;
@@ -517,6 +527,7 @@ browser.runtime.onMessage.addListener(async message => {
         mediaTrace.active = false;
         mediaTrace.stopped_at = new Date().toISOString();
         mediaTraceInFlight.clear();
+        mediaTrace.in_flight = {};
         return true;
       }
       return false;
