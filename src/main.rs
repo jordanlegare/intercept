@@ -5593,8 +5593,3529 @@ fn replace_youtube_recovery_source_once(source: &mut String, needle: &str, repla
     true
 }
 
+fn inject_youtube_recovery_function_entry_at(
+    source: &mut String,
+    start: usize,
+    phase: &str,
+) -> bool {
+    let Some(open_paren_rel) = source[start..].find('(') else {
+        return false;
+    };
+    let open_paren = start + open_paren_rel;
+    let Some(close_paren_rel) = source[open_paren + 1..].find(')') else {
+        return false;
+    };
+    let close_paren = open_paren + 1 + close_paren_rel;
+    let Some(body_open_rel) = source[close_paren + 1..].find('{') else {
+        return false;
+    };
+    let body_open = close_paren + 1 + body_open_rel;
+    if body_open.saturating_sub(start) > 180 {
+        return false;
+    }
+
+    let first_parameter = source[open_paren + 1..close_paren]
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim();
+    let owner = if !first_parameter.is_empty()
+        && first_parameter.chars().enumerate().all(|(index, ch)| {
+            ch == '
+
+    let spsumpreject_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"this.events.V(a,"spsumpreject",(c,d,e)=>{this.D=d;"#,
+        r#"this.events.V(a,"spsumpreject",(c,d,e)=>{window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("spsumpreject",{rejected:!!c,retry_remaining:!!d,video_data_present:!!e,token_controller_active:!!this.K,token_generation_pending:!!this.C,content_token_enabled:!!this.N("html5_generate_content_po_token"),session_token_enabled:!!this.N("html5_generate_session_po_token"),provider_ready:!!this.j,provider_present:!!this.A,fallback_present:!!this.B,living_room_mode:!!this.U});this.D=d;"#,
+    );
+    let recovery_request_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"this.N("html5_generate_content_po_token")&&e?this.Nx(e):this.N("html5_generate_session_po_token")&&C0a(this)"#,
+        r#"this.N("html5_generate_content_po_token")&&e?(window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("content_token_recovery_requested",{provider_ready:!!this.j,provider_present:!!this.A,token_generation_pending:!!this.C}),this.Nx(e)):this.N("html5_generate_session_po_token")&&(window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("session_token_recovery_requested",{provider_ready:!!this.j,provider_present:!!this.A,token_generation_pending:!!this.C}),C0a(this))"#,
+    );
+    let session_wait_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"C0a=function(a){a.A&&(a.C=LB(),a.L.promise.then(()=>{a.Ib.ti("pot_if");hT(a)}))};"#,
+        r#"C0a=function(a){window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("session_token_recovery_waiting",{provider_present:!!a.A,provider_ready:!!a.j,already_pending:!!a.C,release_pending:!!a.D});a.A&&(a.C=LB(),a.L.promise.then(()=>{a.Ib.ti("pot_if");hT(a)}))};"#,
+    );
+    let session_generate_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"hT=async function(a){if(a.N("html5_generate_session_po_token")&&!a.useLivingRoomPoToken){var b="#,
+        r#"hT=async function(a){if(a.N("html5_generate_session_po_token")&&!a.useLivingRoomPoToken){window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("session_token_generation_started",{provider_ready:!!a.j,provider_present:!!a.A,release_pending:!!a.D});var b="#,
+    );
+    let content_generate_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"Nx(a){if(this.A||this.B)a.yf=kT(this,a.videoId)"#,
+        r#"Nx(a){if(this.A||this.B)window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("content_token_generation_started",{provider_ready:!!this.j,provider_present:!!this.A,fallback_present:!!this.B,release_pending:!!this.D}),a.yf=kT(this,a.videoId)"#,
+    );
+    let fallback_token_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"if(!a.A){if(a.B)try{return a.B(b)}catch(c){g.bu(c)}return""}try{"#,
+        r#"if(!a.A){if(a.B)try{let d=a.B(b);window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("token_generated",{token_source:"fallback",token_present:!!d,provider_ready:!!a.j,release_pending:!!a.D});return d}catch(c){window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("token_generation_error",{token_source:"fallback"});g.bu(c)}window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("token_result_empty",{token_source:"fallback"});return""}try{"#,
+    );
+    let webpo_token_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"let d=a.A.yH(c);a.Ib.ti(a.j?"pot_cmf":"pot_csmf");"#,
+        r#"let d=a.A.yH(c);window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("token_generated",{token_source:"webpo",token_present:!!d,provider_ready:!!a.j,living_room_mode:!!a.U,release_pending:!!a.D});a.Ib.ti(a.j?"pot_cmf":"pot_csmf");"#,
+    );
+    let k_t_release_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"a.j&&!a.U&&(a.C?.resolve(),a.C=null,a.D&&(a.D=!1,a.api.app.Qa().ku(!1)));"#,
+        r#"a.j&&!a.U&&(a.C?.resolve(),a.C=null,a.D&&(window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("loader_release_requested",{path:"kT",provider_ready:!!a.j,living_room_mode:!!a.U,release_pending:!!a.D}),a.D=!1,a.api.app.Qa().ku(!1)));"#,
+    );
+    let l_t_release_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"lT=function(a,b){a.U&&a.j&&b&&(a.C?.resolve(),a.C=null,a.D&&(a.D=!1,a.api.app.Qa().ku(!1)))};"#,
+        r#"lT=function(a,b){window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("token_release_check",{path:"lT",living_room_mode:!!a.U,provider_ready:!!a.j,token_present:!!b,release_pending:!!a.D,eligible:!!(a.U&&a.j&&b)});a.U&&a.j&&b&&(a.C?.resolve(),a.C=null,a.D&&(window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("loader_release_requested",{path:"lT",living_room_mode:!!a.U,provider_ready:!!a.j,token_present:!!b,release_pending:!!a.D}),a.D=!1,a.api.app.Qa().ku(!1)))};"#,
+    );
+    let loader_gate_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"ku(a){a!==this.policy.nl&&((this.policy.nl=a)||this.Mf())}"#,
+        r#"ku(a){let b=this.policy.nl;b!==a&&window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("loader_gate",{previous:!!b,next:!!a});a!==this.policy.nl&&((this.policy.nl=a)||this.Mf())}"#,
+    );
+    let token_provider_shared_ready_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"z0a(b.sR()).then(()=>{a.j=!0;a.L.resolve();jT(a,"swpo_re")});"#,
+        r#"z0a(b.sR()).then(()=>{a.j=!0;window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("token_provider_ready",{provider_source:"shared"});a.L.resolve();jT(a,"swpo_re")});"#,
+    );
+    let token_provider_ready_hook = replace_youtube_recovery_source_once(
+        &mut instrumented,
+        r#"z0a(f.sR()).then(()=>{a.j=!0;a.L.resolve()});"#,
+        r#"z0a(f.sR()).then(()=>{a.j=!0;window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("token_provider_ready",{provider_source:"webpo"});a.L.resolve()});"#,
+    );
+
+    let patch_count = [
+        controller_init_hook,
+        controller_start_hook,
+        controller_dispose_hook,
+        spsumpreject_hook,
+        recovery_request_hook,
+        session_wait_hook,
+        session_generate_hook,
+        content_generate_hook,
+        fallback_token_hook,
+        webpo_token_hook,
+        k_t_release_hook,
+        l_t_release_hook,
+        loader_gate_hook,
+        token_provider_shared_ready_hook,
+        token_provider_ready_hook,
+    ].into_iter().filter(|matched| *matched).count();
+
+    let status = format!(
+        "try{{typeof window!==\"undefined\"&&window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery(\"base_instrumentation_status\",{{spsumpreject_hook:{},recovery_request_hook:{},session_wait_hook:{},session_generate_hook:{},content_generate_hook:{},fallback_token_hook:{},webpo_token_hook:{},k_t_release_hook:{},l_t_release_hook:{},loader_gate_hook:{},shared_provider_ready_hook:{},provider_ready_hook:{},controller_init_hook:{},controller_start_hook:{},controller_dispose_hook:{},patch_count:{patch_count}}})}}catch(_e){{}};\n",
+        spsumpreject_hook,
+        recovery_request_hook,
+        session_wait_hook,
+        session_generate_hook,
+        content_generate_hook,
+        fallback_token_hook,
+        webpo_token_hook,
+        k_t_release_hook,
+        l_t_release_hook,
+        loader_gate_hook,
+        token_provider_shared_ready_hook,
+        token_provider_ready_hook,
+        controller_init_hook,
+        controller_start_hook,
+        controller_dispose_hook,
+    );
+    // Keep a top-level strict-mode directive first. Guard every injected hook
+    // because the same JavaScript rewriter also handles worker scripts.
+    let mut instrumented = instrumented.replace(
+        "window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery",
+        "typeof window!==\"undefined\"&&window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery",
+    );
+    let leading_whitespace = instrumented.len() - instrumented.trim_start().len();
+    let rest = &instrumented[leading_whitespace..];
+    let directive_length = if rest.starts_with("\"use strict\";") {
+        "\"use strict\";".len()
+    } else if rest.starts_with("'use strict';") {
+        "'use strict';".len()
+    } else {
+        0
+    };
+    instrumented.insert_str(leading_whitespace + directive_length, &status);
+    instrumented
+}
+
+fn rewrite_worker_javascript(
+    source: &str,
+    base: &Url,
+    session_base: &Url,
+    session_id: &str,
+) -> Result<String, String> {
+    let rewritten = rewrite_javascript(source, base, session_base, session_id)?;
+    let session = serde_json::to_string(session_id).map_err(|error| error.to_string())?;
+    let primary_origin = serde_json::to_string(&session_base.origin().ascii_serialization())
+        .map_err(|error| error.to_string())?;
+    let bootstrap = format!(r#"(function(){{
+      const sessionId={session};
+      const primaryOrigin={primary_origin};
+      const prefix="/p/"+encodeURIComponent(sessionId);
+      const rawWorkerFetch=typeof self.fetch==="function"?self.fetch.bind(self):null;
+      let playbackContextId="";
+      function acceptPlaybackContext(event){{
+        const value=event&&event.data;
+        if(!value||value.__interceptPlaybackContext!==true||typeof value.id!=="string"||!/^[a-z0-9-]{{1,64}}$/.test(value.id))return;
+        playbackContextId=value.id;
+        try{{event.stopImmediatePropagation()}}catch(_e){{}}
+      }}
+      self.addEventListener("message",acceptPlaybackContext,true);
+      let attestationSequence=0;
+      function nextAttestationId(){{
+        attestationSequence=(attestationSequence%999999)+1;
+        return Date.now().toString(36)+"-"+attestationSequence+"-"+Math.random().toString(36).slice(2,8);
+      }}
+      function attestationInfo(value){{
+        try{{
+          const url=new URL(value instanceof URL?value.href:String(value),self.location.href);
+          let hostname=url.hostname.toLowerCase();
+          let pathname=url.pathname;
+          if(url.origin===self.location.origin){{
+            const marker=prefix+"/_/https/";
+            const index=pathname.indexOf(marker);
+            if(index>=0){{
+              const target=pathname.slice(index+marker.length);
+              const slash=target.indexOf("/");
+              if(slash<=0)return null;
+              hostname=target.slice(0,slash).toLowerCase();
+              pathname=target.slice(slash);
+            }}else if(pathname===prefix||pathname.startsWith(prefix+"/")){{
+              hostname=new URL(primaryOrigin).hostname.toLowerCase();
+              pathname=pathname.slice(prefix.length)||"/";
+            }}
+          }}
+          const lowerPath=pathname.toLowerCase();
+          const googleCandidate=hostname==="jnn-pa.googleapis.com"
+            ||(hostname.endsWith(".googleapis.com")&&lowerPath.includes("waa"));
+          const youtubeHost=hostname==="youtube.com"||hostname.endsWith(".youtube.com");
+          const youtubeJnn=youtubeHost&&lowerPath.startsWith("/api/jnn/v1/");
+          const youtubeAttGet=youtubeHost&&lowerPath==="/youtubei/v1/att/get";
+          const youtubeAttLog=youtubeHost&&lowerPath==="/youtubei/v1/att/log";
+          const youtubeAttResource=youtubeAttGet||youtubeAttLog;
+          if(!googleCandidate&&!youtubeJnn&&!youtubeAttResource)return null;
+          const match=pathname.match(/^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/)
+            ||pathname.match(/^\/api\/jnn\/v1\/(Create|GenerateIT)$/);
+          return {{target:hostname+pathname,
+            operation:youtubeAttGet?"AttGet":youtubeAttLog?"AttLog":match?match[1]:"Other",
+            kind:youtubeAttResource?"youtube_attestation_resource":"youtube_attestation_rpc"}};
+        }}catch(_e){{return null}}
+      }}
+      function reportAttestation(info,detail){{
+        if(!info||!rawWorkerFetch)return;
+        try{{
+          const endpoint=new URL("/_intercept/events",self.location.origin).href;
+          const payload=[{{kind:info.kind||"youtube_attestation_rpc",target:info.target,detail:String(detail||"").slice(0,300)}}];
+          rawWorkerFetch(endpoint,{{
+            method:"POST",
+            headers:{{"content-type":"application/json"}},
+            body:JSON.stringify(payload),
+            keepalive:true
+          }}).catch(()=>{{}});
+        }}catch(_e){{}}
+      }}
+      function safeResponseHeader(headers,name,mode){{
+        try{{
+          const value=headers.get(name);
+          if(!value)return "absent";
+          if(mode==="mime"){{
+            const mime=String(value).split(";",1)[0].trim().toLowerCase();
+            return /^[a-z0-9.+_-]+\/[a-z0-9.+_-]+$/.test(mime)?mime:"other";
+          }}
+          if(mode==="length")return /^\d{{1,15}}$/.test(String(value).trim())?String(value).trim():"absent";
+          const encoding=String(value).trim().toLowerCase();
+          return /^[a-z0-9._-]{{1,16}}$/.test(encoding)?encoding:"other";
+        }}catch(_e){{return "absent"}}
+      }}
+      if(typeof PerformanceObserver==="function"){{
+        try{{
+          const observed=new Set();
+          const observer=new PerformanceObserver(list=>{{
+            for(const entry of list.getEntries()){{
+              const info=attestationInfo(entry.name);
+              if(!info)continue;
+              const key=info.target+"|"+Math.round(entry.startTime*10)+"|"+String(entry.initiatorType||"other");
+              if(observed.has(key))continue;
+              observed.add(key);
+              if(observed.size>256)observed.delete(observed.values().next().value);
+              reportAttestation(info,"phase=worker_resource_timing_observed operation="+info.operation
+                +" initiator="+String(entry.initiatorType||"other").replace(/[^A-Za-z0-9_-]/g,"").slice(0,24)
+                +" duration_ms="+Math.max(0,Math.round(entry.duration))
+                +" transfer_bytes="+Math.max(0,Math.round(entry.transferSize||0)));
+            }}
+          }});
+          observer.observe({{type:"resource",buffered:true}});
+        }}catch(_e){{}}
+      }}
+      function route(value){{
+        let url;
+        try{{url=new URL(value instanceof URL?value.href:String(value),self.location.href)}}catch(_e){{return value}}
+        if(url.protocol!=="http:"&&url.protocol!=="https:")return url.href;
+        const path=url.pathname+url.search+url.hash;
+        if(url.origin===self.location.origin){{
+          if(url.pathname===prefix||url.pathname.startsWith(prefix+"/"))return url.href;
+          return url.href;
+        }}
+        if(url.origin===primaryOrigin)return path;
+        return prefix+"/_/"+url.protocol.slice(0,-1)+"/"+url.host+path;
+      }}
+      if(self.fetch){{
+        const nativeFetch=rawWorkerFetch;
+        function reportDispatch(target,detail){{
+          try{{
+            const endpoint=new URL("/_intercept/events",self.location.origin).href;
+            const payload=[{{kind:"ajax_dispatch",target:String(target||"").slice(0,240),detail:String(detail||"").slice(0,300)}}];
+            nativeFetch(endpoint,{{
+              method:"POST",
+              headers:{{"content-type":"application/json"}},
+              body:JSON.stringify(payload),
+              keepalive:true
+            }}).catch(()=>{{}});
+          }}catch(_e){{}}
+        }}
+        function bodyDiagnostic(body,provided){{
+          if(!provided)return "body_arg=omitted";
+          if(body===null)return "body_arg=null";
+          if(body===undefined)return "body_arg=undefined";
+          if(typeof body==="string")return "body_arg=string body_arg_bytes="+new TextEncoder().encode(body).byteLength;
+          if(typeof URLSearchParams!=="undefined"&&body instanceof URLSearchParams)
+            return "body_arg=urlsearchparams body_arg_bytes="+new TextEncoder().encode(body.toString()).byteLength;
+          if(typeof Blob!=="undefined"&&body instanceof Blob)return "body_arg=blob body_arg_bytes="+body.size;
+          if(typeof ArrayBuffer!=="undefined"&&body instanceof ArrayBuffer)return "body_arg=arraybuffer body_arg_bytes="+body.byteLength;
+          if(typeof ArrayBuffer!=="undefined"&&ArrayBuffer.isView(body))return "body_arg=arraybuffer_view body_arg_bytes="+body.byteLength;
+          if(typeof FormData!=="undefined"&&body instanceof FormData){{
+            let entries=0;
+            for(const _entry of body.entries())entries++;
+            return "body_arg=formdata body_arg_entries="+entries;
+          }}
+          if(typeof ReadableStream!=="undefined"&&body instanceof ReadableStream)return "body_arg=stream body_arg_bytes=unknown";
+          const type=Object.prototype.toString.call(body).slice(8,-1).slice(0,40);
+          return "body_arg="+(type||typeof body)+" body_arg_bytes=unknown";
+        }}
+        self.fetch=function(input,init){{
+          const source=input instanceof Request?input.url:input;
+          const method=String((init&&init.method)||(input instanceof Request&&input.method)||"GET").toUpperCase();
+          const routed=route(source);
+          const attestation=attestationInfo(source);
+          const attestationId=attestation?nextAttestationId():null;
+          let request;
+          if(input instanceof Request){{request=new Request(routed,input);if(init)request=new Request(request,init)}}
+          else request=new Request(routed,init);
+          const bodyDetail=init&&Object.prototype.hasOwnProperty.call(init,"body")&&init.body!==undefined
+            ?bodyDiagnostic(init.body,true)
+            :(input instanceof Request&&input.body?"body_arg=request_stream body_arg_bytes=unknown":"body_arg=none");
+          const headers=new Headers(request.headers);
+          headers.set("X-Intercept-Proxy-Mode","ajax");
+          headers.set("X-Intercept-Body-Diagnostic",bodyDetail);
+          headers.set("X-Intercept-Transport-Diagnostic","worker-fetch");
+          if(attestationId){{
+            headers.set("X-Intercept-Attestation-Id",attestationId);
+            if(playbackContextId)headers.set("X-Intercept-Playback-Context-Id",playbackContextId);
+          }}
+          reportDispatch(attestation?attestation.target:routed,method+" · "+bodyDetail+" · transport=worker-fetch");
+          const pending=nativeFetch(new Request(request,{{headers}}));
+          if(!attestation)return pending;
+          reportAttestation(attestation,"rpc="+attestationId+" phase=worker_dispatch operation="+attestation.operation
+            +" method="+request.method+" transport=worker-fetch");
+          return pending.then(response=>{{
+            reportAttestation(attestation,"rpc="+attestationId+" phase=worker_response operation="+attestation.operation
+              +" status="+response.status
+              +" ct="+safeResponseHeader(response.headers,"content-type","mime")
+              +" cl="+safeResponseHeader(response.headers,"content-length","length")
+              +" ce="+safeResponseHeader(response.headers,"content-encoding","encoding"));
+            return response;
+          }},error=>{{
+            const name=String(error&&error.name||"unknown").replace(/[^A-Za-z0-9_-]/g,"").slice(0,40)||"unknown";
+            reportAttestation(attestation,"rpc="+attestationId+" phase=worker_error operation="+attestation.operation+" error="+name);
+            throw error;
+          }});
+        }};
+        if(self.XMLHttpRequest){{
+          const proto=XMLHttpRequest.prototype;
+          const nativeOpen=proto.open;
+          const nativeSet=proto.setRequestHeader;
+          const nativeSend=proto.send;
+          const xhrMeta=new WeakMap();
+          proto.open=function(method,url,...rest){{
+            const routed=route(url);
+            xhrMeta.set(this,{{method:String(method).toUpperCase(),url:routed,attestation:attestationInfo(url)}});
+            return nativeOpen.call(this,method,routed,...rest);
+          }};
+          proto.send=function(...args){{
+            const meta=xhrMeta.get(this);
+            const attestationId=meta&&meta.attestation?nextAttestationId():null;
+            const bodyDetail=bodyDiagnostic(args[0],args.length>0);
+            try{{
+              nativeSet.call(this,"X-Intercept-Proxy-Mode","ajax");
+              nativeSet.call(this,"X-Intercept-Body-Diagnostic",bodyDetail);
+              nativeSet.call(this,"X-Intercept-Transport-Diagnostic","worker-xhr");
+              if(attestationId){{
+                nativeSet.call(this,"X-Intercept-Attestation-Id",attestationId);
+                if(playbackContextId)nativeSet.call(this,"X-Intercept-Playback-Context-Id",playbackContextId);
+              }}
+            }}catch(_e){{}}
+            if(meta)reportDispatch(meta.attestation?meta.attestation.target:meta.url,meta.method+" · "+bodyDetail+" · transport=worker-xhr");
+            if(meta&&meta.attestation){{
+              reportAttestation(meta.attestation,"rpc="+attestationId+" phase=worker_dispatch operation="+meta.attestation.operation
+                +" method="+meta.method+" transport=worker-xhr");
+              this.addEventListener("loadend",()=>{{
+                reportAttestation(meta.attestation,"rpc="+attestationId+" phase=worker_response operation="+meta.attestation.operation
+                  +" status="+this.status
+                  +" ct="+safeResponseHeader(this,"content-type","mime")
+                  +" cl="+safeResponseHeader(this,"content-length","length")
+                  +" ce="+safeResponseHeader(this,"content-encoding","encoding"));
+              }});
+            }}
+            try{{return nativeSend.apply(this,args)}}catch(error){{
+              if(meta&&meta.attestation){{
+                const name=String(error&&error.name||"unknown").replace(/[^A-Za-z0-9_-]/g,"").slice(0,40)||"unknown";
+                reportAttestation(meta.attestation,"rpc="+attestationId+" phase=worker_error operation="+meta.attestation.operation+" error="+name);
+              }}
+              throw error;
+            }}
+          }};
+        }}
+      }} else if(self.XMLHttpRequest){{
+        const proto=XMLHttpRequest.prototype;
+        const nativeOpen=proto.open;
+        const nativeSet=proto.setRequestHeader;
+        const nativeSend=proto.send;
+        proto.open=function(method,url,...rest){{return nativeOpen.call(this,method,route(url),...rest)}};
+        proto.send=function(...args){{try{{nativeSet.call(this,"X-Intercept-Proxy-Mode","ajax")}}catch(_e){{}}return nativeSend.apply(this,args)}};
+      }}
+      if(self.importScripts){{
+        const nativeImportScripts=self.importScripts.bind(self);
+        self.importScripts=(...urls)=>nativeImportScripts(...urls.map(route));
+      }}
+    }})();\n"#);
+    Ok(format!("{bootstrap}{rewritten}"))
+}
+
+fn rewrite_location(location: &str, current: &Url, session_base: &Url, session_id: &str) -> String {
+    match current.join(location) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") => proxy_url(&url, session_base, session_id),
+        _ => location.to_owned(),
+    }
+}
+
+fn rewrite_set_cookie(cookie: &str, target: &Url, session_base: &Url, session_id: &str) -> String {
+    let prefix = proxy_origin_prefix(target, session_base, session_id);
+    let mut parts = cookie
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.to_ascii_lowercase().starts_with("domain="))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut found_path = false;
+    for part in &mut parts {
+        if part.to_ascii_lowercase().starts_with("path=") {
+            let upstream_path = part[5..].trim();
+            let suffix = if upstream_path.is_empty() { "/" } else if upstream_path.starts_with('/') { upstream_path } else { "" };
+            *part = format!("Path={prefix}{suffix}");
+            found_path = true;
+        }
+    }
+    if !found_path {
+        parts.push(format!("Path={prefix}/"));
+    }
+    parts.join("; ")
+}
+
+
+fn decode_html_attribute_entities(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&#34;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+fn escape_meta_attribute_value(value: &str, quote: Option<char>) -> String {
+    let mut escaped = value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    match quote {
+        Some('"') => escaped = escaped.replace('"', "&quot;"),
+        Some('\'') => escaped = escaped.replace('\'', "&#39;"),
+        _ => {
+            escaped = escaped.replace('"', "&quot;");
+            return format!("\"{escaped}\"");
+        }
+    }
+    escaped
+}
+
+// Rewrites a single meta tag without requiring a valid surrounding HTML tree.
+// This is used when lol_html rejects malformed upstream markup; CSP must still
+// be rewritten in that fallback or the browser continues enforcing upstream
+// origins and blocks the local controller.
+fn rewrite_meta_csp_tag(tag: &str, session_id: &str) -> String {
+    let bytes = tag.as_bytes();
+    let mut cursor = 5usize; // immediately after "<meta"
+    let mut http_equiv: Option<String> = None;
+    let mut content: Option<(usize, usize, Option<char>, String)> = None;
+
+    while cursor < bytes.len() {
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || bytes[cursor] == b'>' || bytes[cursor] == b'/' {
+            break;
+        }
+
+        let name_start = cursor;
+        while cursor < bytes.len()
+            && !bytes[cursor].is_ascii_whitespace()
+            && !matches!(bytes[cursor], b'=' | b'>' | b'/')
+        {
+            cursor += 1;
+        }
+        if name_start == cursor {
+            cursor += 1;
+            continue;
+        }
+        let name = tag[name_start..cursor].to_ascii_lowercase();
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || bytes[cursor] != b'=' {
+            continue;
+        }
+        cursor += 1;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+
+        let (value_start, value_end, quote) = if cursor < bytes.len()
+            && matches!(bytes[cursor], b'"' | b'\'')
+        {
+            let quote = bytes[cursor] as char;
+            cursor += 1;
+            let start = cursor;
+            while cursor < bytes.len() && bytes[cursor] != quote as u8 {
+                cursor += 1;
+            }
+            let end = cursor;
+            if cursor < bytes.len() {
+                cursor += 1;
+            }
+            (start, end, Some(quote))
+        } else {
+            let start = cursor;
+            while cursor < bytes.len()
+                && !bytes[cursor].is_ascii_whitespace()
+                && bytes[cursor] != b'>'
+            {
+                cursor += 1;
+            }
+            (start, cursor, None)
+        };
+        let value = decode_html_attribute_entities(&tag[value_start..value_end]);
+        if name == "http-equiv" {
+            http_equiv = Some(value);
+        } else if name == "content" {
+            content = Some((value_start, value_end, quote, value));
+        }
+    }
+
+    if !http_equiv
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("content-security-policy"))
+    {
+        return tag.to_owned();
+    }
+
+    let Some((start, end, quote, policy)) = content else {
+        return tag.to_owned();
+    };
+    let rewritten = rewrite_csp(&policy, session_id);
+    let escaped = escape_meta_attribute_value(&rewritten, quote);
+    format!("{}{}{}", &tag[..start], escaped, &tag[end..])
+}
+
+fn rewrite_meta_csp_tags(html: &str, session_id: &str) -> String {
+    HTML_META_TAG_RE
+        .replace_all(html, |captures: &regex::Captures<'_>| {
+            let tag = captures.get(0).map(|value| value.as_str()).unwrap_or("");
+            rewrite_meta_csp_tag(tag, session_id)
+        })
+        .into_owned()
+}
+
+fn rewrite_csp(policy: &str, session_id: &str) -> String {
+    let local_origin = proxy_origin(session_id);
+    const DASHBOARD_ORIGIN: &str = "http://127.0.0.1:5000";
+    const SOURCE_DIRECTIVES: &[&str] = &[
+        "default-src", "script-src", "script-src-elem", "script-src-attr",
+        "style-src", "style-src-elem", "style-src-attr", "img-src", "font-src",
+        "media-src", "connect-src", "frame-src", "child-src", "worker-src",
+        "manifest-src", "prefetch-src", "form-action", "base-uri", "object-src",
+    ];
+    let mut has_style_src = false;
+    let mut rewritten = policy.split(';')
+        .filter_map(|directive| {
+            let mut tokens = directive.split_whitespace();
+            let name = tokens.next()?;
+            if name.eq_ignore_ascii_case("upgrade-insecure-requests") {
+                return None;
+            }
+            let is_style_src = name.eq_ignore_ascii_case("style-src");
+            let is_style_element = name.eq_ignore_ascii_case("style-src-elem");
+            if is_style_src {
+                has_style_src = true;
+            }
+            let mut values = tokens.map(str::to_owned).collect::<Vec<_>>();
+            if name.eq_ignore_ascii_case("trusted-types") {
+                // The controller uses one narrowly scoped policy to convert
+                // same-session script URLs into TrustedScriptURL objects.
+                // Preserve upstream policy names, but add ours even when the
+                // upstream policy was an explicit 'none' allow-list.
+                values.retain(|value| !value.eq_ignore_ascii_case("'none'"));
+                if !values.iter().any(|value| value == "*" || value == "intercept-proxy") {
+                    values.push("intercept-proxy".to_owned());
+                }
+            }
+            if SOURCE_DIRECTIVES.iter().any(|candidate| name.eq_ignore_ascii_case(candidate)) {
+                values.retain(|value| value != "'none'");
+                // strict-dynamic discards host allow-lists in modern browsers.
+                // Nonce-bearing injected scripts retain the source's nonce path.
+                if name.eq_ignore_ascii_case("script-src") || name.eq_ignore_ascii_case("script-src-elem") {
+                    values.retain(|value| !value.eq_ignore_ascii_case("'strict-dynamic'"));
+                }
+                // Proxied sites commonly use inline style blocks for layout and
+                // runtime rendering. Rewriting the allowed origins alone does not
+                // authorize those blocks when style-src falls back to default-src.
+                // Permit inline CSS only; script execution remains governed by the
+                // original script directives and their nonce/hash requirements.
+                if (is_style_src || is_style_element)
+                    && !values.iter().any(|value| value.eq_ignore_ascii_case("'unsafe-inline'"))
+                {
+                    values.push("'unsafe-inline'".to_owned());
+                }
+                for value in &mut values {
+                    if value.starts_with("http://") || value.starts_with("https://") || value.starts_with("*.") {
+                        *value = local_origin.clone();
+                    }
+                }
+                if !values.iter().any(|value| value == &local_origin || value == "'self'") {
+                    values.push(local_origin.clone());
+                }
+                if (name.eq_ignore_ascii_case("default-src")
+                    || name.eq_ignore_ascii_case("frame-src")
+                    || name.eq_ignore_ascii_case("child-src"))
+                    && !values.iter().any(|value| value == DASHBOARD_ORIGIN)
+                {
+                    values.push(DASHBOARD_ORIGIN.to_owned());
+                }
+            }
+            Some(if values.is_empty() { name.to_owned() } else { format!("{name} {}", values.join(" ")) })
+        })
+        .collect::<Vec<_>>();
+    // If no explicit style-src exists, default-src would otherwise continue to
+    // block inline CSS. Add a narrow style policy rather than weakening default-src.
+    if !has_style_src {
+        rewritten.push(format!("style-src 'unsafe-inline' {local_origin}"));
+    }
+    rewritten.join("; ")
+}
+
+// Report only whether the important YouTube request headers are present.
+ // Credential and cookie values are never copied into the event stream.
+fn parse_youtube_data_sync_id(value: &str) -> (Option<&str>, Option<&str>) {
+    let value = value.trim();
+    if value.is_empty() {
+        return (None, None);
+    }
+    if let Some((first, second)) = value.split_once("||") {
+        let first = (!first.is_empty()).then_some(first);
+        let second = (!second.is_empty()).then_some(second);
+        match second {
+            // Secondary/brand channel: delegated session ID, then user session ID.
+            Some(user_session_id) => (first, Some(user_session_id)),
+            // Primary channel: first component is the user session ID.
+            None => (None, first),
+        }
+    } else {
+        (None, Some(value))
+    }
+}
+
+fn normalized_youtube_origin(value: &HeaderValue) -> Option<String> {
+    let raw = value.to_str().ok()?.trim();
+    let url = Url::parse(raw).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    if url.scheme() != "https"
+        || !(host == "youtube.com" || host.ends_with(".youtube.com"))
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || (url.path() != "/" && !url.path().is_empty())
+    {
+        return None;
+    }
+    Some(url.origin().ascii_serialization())
+}
+
+fn youtube_sapisid_authorization(
+    cookie_header: Option<&HeaderValue>,
+    origin: &str,
+    timestamp: u64,
+    user_session_id: Option<&str>,
+) -> Option<HeaderValue> {
+    let cookie_header = cookie_header?.to_str().ok()?;
+    let cookie_value = |name: &str| {
+        cookie_header.split(';').find_map(|part| {
+            let (cookie_name, value) = part.trim().split_once('=')?;
+            (cookie_name == name && !value.is_empty()).then_some(value)
+        })
+    };
+
+    let sapisid = cookie_value("SAPISID").or_else(|| cookie_value("__Secure-3PAPISID"));
+    let one_p_sapisid = cookie_value("__Secure-1PAPISID");
+    let three_p_sapisid = cookie_value("__Secure-3PAPISID");
+
+    let timestamp = timestamp.to_string();
+    let mut authorizations = Vec::new();
+    for (scheme, sid) in [
+        ("SAPISIDHASH", sapisid),
+        ("SAPISID1PHASH", one_p_sapisid),
+        ("SAPISID3PHASH", three_p_sapisid),
+    ] {
+        let Some(sid) = sid else { continue };
+        let mut hash_parts = Vec::with_capacity(4);
+        if let Some(user_session_id) = user_session_id.filter(|value| !value.is_empty()) {
+            hash_parts.push(user_session_id);
+        }
+        hash_parts.push(timestamp.as_str());
+        hash_parts.push(sid);
+        hash_parts.push(origin);
+        let digest = Sha1::digest(hash_parts.join(" ").as_bytes());
+        let digest_hex = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let user_suffix = user_session_id
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("_u{value}"))
+            .unwrap_or_default();
+        authorizations.push(format!("{scheme} {timestamp}_{digest_hex}{user_suffix}"));
+    }
+
+    if authorizations.is_empty() {
+        return None;
+    }
+    HeaderValue::from_str(&authorizations.join(" ")).ok()
+}
+
+fn youtube_search_cookie_profile(cookie_header: Option<&HeaderValue>) -> String {
+    let cookie_value_present = |name: &str| {
+        cookie_header
+            .and_then(|header| header.to_str().ok())
+            .is_some_and(|value| {
+                value.split(';').any(|part| {
+                    part.trim().split_once('=')
+                        .is_some_and(|(cookie_name, cookie_value)| {
+                            cookie_name == name && !cookie_value.is_empty()
+                        })
+                })
+            })
+    };
+    format!(
+        "primary_auth={};first_party_auth={};third_party_auth={}",
+        if cookie_value_present("SAPISID") { "present" } else { "absent" },
+        if cookie_value_present("__Secure-1PAPISID") { "present" } else { "absent" },
+        if cookie_value_present("__Secure-3PAPISID") { "present" } else { "absent" },
+    )
+}
+
+// Report only whether the important YouTube request headers are present.
+// Credential and cookie values are never copied into the event stream.
+fn youtube_search_header_profile(
+    headers: &HeaderMap,
+    cookie_header: Option<&HeaderValue>,
+    origin_host_out: &str,
+    fetch_site_out: &str,
+) -> String {
+    let host_for = |name: &str| {
+        headers.get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| Url::parse(value).ok())
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_else(|| "absent".to_owned())
+    };
+    let user_agent = headers.get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            if value.starts_with("Mozilla/") {
+                "browser"
+            } else if value.starts_with("Intercept/") {
+                "intercept"
+            } else {
+                "other"
+            }
+        })
+        .unwrap_or("intercept_default");
+    let cookie = cookie_header
+        .map(|value| format!("jar({}B)", value.as_bytes().len()))
+        .unwrap_or_else(|| "absent".to_owned());
+    format!(
+        "auth={};cookie={cookie};ua={user_agent};origin={origin_host_out};x_origin={};authuser={};visitor={};yt_client={};yt_version={};bootstrap={};fetch_site={fetch_site_out}",
+        if headers.contains_key(header::AUTHORIZATION) { "present" } else { "absent" },
+        host_for("x-origin"),
+        if headers.contains_key("x-goog-authuser") { "present" } else { "absent" },
+        if headers.contains_key("x-goog-visitor-id") { "present" } else { "absent" },
+        if headers.contains_key("x-youtube-client-name") { "present" } else { "absent" },
+        if headers.contains_key("x-youtube-client-version") { "present" } else { "absent" },
+        if headers.contains_key("x-youtube-bootstrap-logged-in") { "present" } else { "absent" },
+    )
+}
+
+fn request_body_encoding_diagnostic(headers: &HeaderMap, body: &[u8]) -> &'static str {
+    let content_encoding = headers.get(header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let declares_gzip = content_encoding.split(',')
+        .any(|encoding| encoding.trim().eq_ignore_ascii_case("gzip"));
+    let gzip_magic = body.starts_with(&[0x1f, 0x8b, 0x08]);
+
+    match (declares_gzip, gzip_magic) {
+        (true, true) => "gzip",
+        (true, false) => "content_encoding_mismatch",
+        (false, true) => "gzip_without_content_encoding",
+        (false, false) if content_encoding.is_empty()
+            || content_encoding.eq_ignore_ascii_case("identity") => "identity",
+        (false, false) => "other_content_encoding",
+    }
+}
+
+// Describe only JSON object keys at the upstream boundary. Payload values can
+// contain query text and session-specific identifiers, so they are never
+// copied into the event stream.
+fn youtube_search_json_shape_diagnostic(body: &[u8]) -> String {
+    let value = match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(value) => value,
+        Err(_) => return "json=invalid".to_owned(),
+    };
+    let Some(object) = value.as_object() else {
+        return "json=not_object".to_owned();
+    };
+    let key_list = |value: Option<&serde_json::Value>, limit: usize| -> String {
+        value
+            .and_then(serde_json::Value::as_object)
+            .map(|object| object.keys().take(limit).cloned().collect::<Vec<_>>().join(","))
+            .unwrap_or_else(|| "absent".to_owned())
+    };
+    let top_keys = object.keys().take(10).cloned().collect::<Vec<_>>().join(",");
+    let context_keys = key_list(object.get("context"), 8);
+    let client_keys = object.get("context")
+        .and_then(|value| value.get("client"))
+        .and_then(serde_json::Value::as_object)
+        .map(|client| client.keys().take(10).cloned().collect::<Vec<_>>().join(","))
+        .unwrap_or_else(|| "absent".to_owned());
+    let optional_fields = format!(
+        "user={},click={},ads={},stats={},inline={}",
+        object.contains_key("user"),
+        object.contains_key("clickTracking"),
+        object.contains_key("adSignalsInfo"),
+        object.contains_key("webSearchboxStatsUrl"),
+        object.contains_key("inlineSettingStatus"),
+    );
+    // Put field-presence flags first so they survive the bounded event detail
+    // even when YouTube's client context contains a long list of keys.
+    let mut summary = format!(
+        "{optional_fields};top={top_keys};ctx={context_keys};client={client_keys}"
+    );
+    if summary.len() > 260 {
+        let mut boundary = 260;
+        while !summary.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        summary.truncate(boundary);
+    }
+    summary
+}
+
+fn youtube_stats_request_diagnostics(
+    method: &Method,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> String {
+    let header_text = |name: &str, limit: usize| {
+        headers.get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), limit))
+            .filter(|value| !value.is_empty())
+    };
+    let content_type = header_text("content-type", 80).unwrap_or_else(|| "absent".to_owned());
+    let content_encoding = header_text("content-encoding", 32).unwrap_or_else(|| "absent".to_owned());
+    let content_length_in = header_text("content-length", 20).unwrap_or_else(|| "absent".to_owned());
+    let body_text = if body.is_empty() {
+        "empty"
+    } else if std::str::from_utf8(body).is_ok() {
+        "utf8_text"
+    } else {
+        "binary"
+    };
+
+    format!(
+        "method={method} bytes={} text={body_text} ct={content_type} len_in={content_length_in} len_out={} ce={content_encoding} encoding={}",
+        body.len(),
+        body.len(),
+        request_body_encoding_diagnostic(headers, body),
+    )
+}
+
+fn outbound_fetch_site_header(
+    has_fetch_site: bool,
+    is_youtube_inner_tube: bool,
+    is_youtube_stats: bool,
+    upstream_matches_session_origin: bool,
+) -> Option<&'static str> {
+    if !has_fetch_site {
+        return None;
+    }
+
+    // These requests originate from YouTube's own page context. The proxy's
+    // localhost session origin must not make a first-party upstream request
+    // appear cross-site to YouTube.
+    Some(if is_youtube_inner_tube || is_youtube_stats || upstream_matches_session_origin {
+        "same-origin"
+    } else {
+        "cross-site"
+    })
+}
+
+fn youtube_stats_outbound_header_diagnostics(
+    headers: &HeaderMap,
+    origin: Option<&HeaderValue>,
+    referer: Option<&HeaderValue>,
+    fetch_site: Option<&str>,
+    cookie_header: Option<&HeaderValue>,
+) -> String {
+    let host_only = |value: Option<&HeaderValue>| {
+        value
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| Url::parse(value).ok())
+            .and_then(|url| url.host_str().map(|host| clean_field(host.to_owned(), 64)))
+            .unwrap_or_else(|| "absent".to_owned())
+    };
+    let header_text = |name: &str, limit: usize| {
+        headers.get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), limit))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "absent".to_owned())
+    };
+    let cookie_profile = cookie_header
+        .map(|value| format!("present({}B)", value.as_bytes().len()))
+        .unwrap_or_else(|| "absent".to_owned());
+    let authorization = if headers.contains_key(header::AUTHORIZATION) { "present" } else { "absent" };
+    // The reqwest client supplies its configured default User-Agent when the
+    // browser request does not provide one.
+    let user_agent = if headers.contains_key(header::USER_AGENT) { "browser" } else { "client_default" };
+
+    format!(
+        "origin={} referer={} fetch={}/{}/{} cookie_jar={cookie_profile} auth={authorization} ua={user_agent}",
+        host_only(origin),
+        host_only(referer),
+        header_text("sec-fetch-dest", 16),
+        header_text("sec-fetch-mode", 16),
+        fetch_site.unwrap_or("absent"),
+    )
+}
+
+fn youtube_log_event_dispatch_diagnostics(
+    method: &Method,
+    headers: &HeaderMap,
+    body_len: usize,
+) -> String {
+    let content_length_in = headers.get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| clean_field(value.to_owned(), 24))
+        .unwrap_or_else(|| "absent".to_owned());
+    let content_type = headers.get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| clean_field(value.to_owned(), 80))
+        .unwrap_or_else(|| "absent".to_owned());
+    let content_encoding = headers.get(header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| clean_field(value.to_owned(), 32))
+        .unwrap_or_else(|| "absent".to_owned());
+
+    format!(
+        "method={method} body_bytes={body_len} content_length_out={body_len} content_length_in={content_length_in} content_type={content_type} content_encoding={content_encoding}"
+    )
+}
+
+fn ajax_request_diagnostics(method: &Method, headers: &HeaderMap, body: &[u8]) -> String {
+    let header_text = |name: &str, limit: usize| {
+        headers.get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| clean_field(value.to_owned(), limit))
+            .filter(|value| !value.is_empty())
+    };
+    let header_or_absent = |name: &str, limit: usize| {
+        header_text(name, limit).unwrap_or_else(|| "absent".to_owned())
+    };
+    let host_only = |name: &str| {
+        header_text(name, 2048)
+            .and_then(|value| Url::parse(&value).ok())
+            .and_then(|url| url.host_str().map(str::to_owned))
+    };
+    let dispatch_marker = if header_text("x-intercept-proxy-mode", 32)
+        .is_some_and(|value| value.eq_ignore_ascii_case("ajax"))
+    {
+        "present"
+    } else {
+        "absent"
+    };
+    let fetch_dest = header_or_absent("sec-fetch-dest", 24);
+    let fetch_mode = header_or_absent("sec-fetch-mode", 24);
+    let fetch_site = header_or_absent("sec-fetch-site", 24);
+    let requested_with = header_or_absent("x-requested-with", 32);
+    let browser_body = header_text("x-intercept-body-diagnostic", 120)
+        .map(|value| format!(" · browser_body={value}"))
+        .unwrap_or_else(|| " · browser_body=absent".to_owned());
+    let transport = header_text("x-intercept-transport-diagnostic", 40)
+        .map(|value| format!(" · transport={value}"))
+        .unwrap_or_else(|| " · transport=unidentified".to_owned());
+    let content_type = header_text("content-type", 100)
+        .map(|value| format!(" · content_type={value}"))
+        .unwrap_or_default();
+    let declared_length = header_text("content-length", 24)
+        .map(|value| format!(" · content_length_in={value}"))
+        .unwrap_or_default();
+    let content_encoding = header_text("content-encoding", 48)
+        .unwrap_or_else(|| "absent".to_owned());
+    let body_encoding = request_body_encoding_diagnostic(headers, body);
+    let origin = host_only("origin")
+        .map(|host| format!(" · origin_host_in={host}"))
+        .unwrap_or_else(|| " · origin_host_in=absent".to_owned());
+    let referer = host_only("referer")
+        .map(|host| format!(" · referer_host_in={host}"))
+        .unwrap_or_else(|| " · referer_host_in=absent".to_owned());
+    let cookie_header_in = headers.get(header::COOKIE)
+        .map(|value| format!("present({}B)", value.as_bytes().len()))
+        .unwrap_or_else(|| "absent".to_owned());
+    let json_state = if body.starts_with(&[0x1f, 0x8b, 0x08]) {
+        "gzip_compressed"
+    } else {
+        match header_text("content-type", 160)
+            .map(|value| value.to_ascii_lowercase())
+            .filter(|value| value.contains("application/json") || value.contains("+json"))
+        {
+            Some(_) if serde_json::from_slice::<serde_json::Value>(body).is_ok() => "valid",
+            Some(_) => "invalid",
+            None => "not_checked",
+        }
+    };
+    let client_headers = [
+        ("yt_client_name", "x-youtube-client-name"),
+        ("yt_client_version", "x-youtube-client-version"),
+        ("yt_visitor_id", "x-goog-visitor-id"),
+    ].into_iter().map(|(label, name)| {
+        format!(
+            " · {label}={}",
+            if headers.contains_key(name) { "present" } else { "absent" }
+        )
+    }).collect::<String>();
+
+    // Keep the dispatch marker and Fetch Metadata first: these are the key
+    // clues when a browser request reaches Rust without a matching
+    // browser-side ajax_dispatch event.
+    format!(
+        "method={method} · body_bytes={} · dispatch_marker={dispatch_marker}{browser_body}{transport} · sec_fetch_dest={fetch_dest} · sec_fetch_mode={fetch_mode} · sec_fetch_site={fetch_site} · x_requested_with={requested_with} · content_length_expected_out={}{}{}{}{} · content_encoding_in={content_encoding} · body_encoding={body_encoding} · cookie_header_in={cookie_header_in} · json={json_state}{client_headers}",
+        body.len(),
+        body.len(),
+        content_type,
+        declared_length,
+        origin,
+        referer,
+    )
+}
+
+fn input_event_trace(headers: &HeaderMap) -> Option<String> {
+    let id = headers.get("x-intercept-input-id")
+        .and_then(|value| value.to_str().ok())?;
+    if id.is_empty()
+        || id.len() > 48
+        || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return None;
+    }
+    let target = headers.get("x-intercept-input-target")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| clean_field(value.to_owned(), 180))
+        .filter(|value| !value.is_empty());
+    Some(match target {
+        Some(target) => format!("input_id={id} target={target}"),
+        None => format!("input_id={id}"),
+    })
+}
+
+fn should_skip_request_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "host" | "connection" | "keep-alive" | "proxy-authenticate" | "proxy-authorization"
+            | "te" | "trailer" | "transfer-encoding" | "upgrade" | "content-length"
+            | "accept-encoding" | "cookie" | "x-intercept-cookie-token" | "x-intercept-cookie-updated" | "x-intercept-proxy-mode"
+            | "x-intercept-input-id" | "x-intercept-input-target"
+            | "x-intercept-body-diagnostic" | "x-intercept-transport-diagnostic"
+            | "x-intercept-youtube-datasync-id" | "x-intercept-attestation-id"
+            | "x-intercept-playback-context-id"
+    )
+}
+
+fn should_skip_response_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection" | "keep-alive" | "proxy-authenticate" | "proxy-authorization"
+            | "te" | "trailer" | "transfer-encoding" | "upgrade" | "origin-agent-cluster" | "set-cookie" | "x-intercept-cookie-updated"
+    )
+}
+
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_public_v4(ip),
+        IpAddr::V6(ip) => is_public_v6(ip),
+    }
+}
+
+fn is_public_destination(url: &Url) -> bool {
+    let Some(host) = url.host_str() else { return false };
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    if normalized == "localhost"
+        || normalized.ends_with(".localhost")
+        || normalized.ends_with(".local")
+        || normalized.ends_with(".internal")
+        || normalized.ends_with(".lan")
+    {
+        return false;
+    }
+
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => is_public_v4(ip),
+        Some(url::Host::Ipv6(ip)) => is_public_v6(ip),
+        Some(url::Host::Domain(_)) => true,
+        None => false,
+    }
+}
+
+fn is_public_v4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    !(ip.is_private()
+        || ip.is_multicast()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_unspecified()
+        || octets[0] == 0
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)))
+}
+
+fn is_public_v6(ip: Ipv6Addr) -> bool {
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_unique_local()
+        || ip.is_unicast_link_local()
+        || ip.is_multicast()
+        || ip.to_ipv4_mapped().is_some_and(|v4| !is_public_v4(v4)))
+}
+
+fn event_detail_limit(kind: &str) -> usize {
+    // Keep larger correlated diagnostics intact while retaining the
+    // conservative default for ordinary events.
+    match kind {
+        "youtube_sabr_response_stream_complete" => 1024,
+        "youtube_player_watchdog" | "youtube_player_state" | "youtube_player_media_mutation" | "youtube_sabr_recovery" => 1100,
+        "youtube_attestation_freshness" => 900,
+        "youtube_sabr_attestation_context"
+        | "youtube_sabr_request_metadata"
+        | "youtube_attestation_rpc"
+        | "youtube_attestation_resource_header_profile" => 480,
+        _ => 300,
+    }
+}
+
+fn clean_field(value: String, max: usize) -> String {
+    value.chars().filter(|ch| !ch.is_control()).take(max).collect()
+}
+
+fn sanitize_error_body(body: &[u8]) -> String {
+    let raw = String::from_utf8_lossy(body);
+    let without_scripts = ERROR_BODY_SCRIPT_RE.replace_all(&raw, " ");
+    let without_styles = ERROR_BODY_STYLE_RE.replace_all(&without_scripts, " ");
+    let without_comments = ERROR_BODY_COMMENT_RE.replace_all(&without_styles, " ");
+    let without_tags = ERROR_BODY_TAG_RE.replace_all(&without_comments, " ");
+    let without_secrets = ERROR_BODY_SECRET_RE.replace_all(&without_tags, "$1=[REDACTED]");
+    let without_bearers = ERROR_BODY_BEARER_RE.replace_all(&without_secrets, "Bearer [REDACTED]");
+    let without_queries = ERROR_BODY_URL_QUERY_RE.replace_all(&without_bearers, "$1?[query redacted]");
+    let normalized = without_queries.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_utf8_bytes(&normalized, MAX_ERROR_BODY_BYTES)
+}
+
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
+fn error_body_state(sampled: bool, sampled_bytes: usize, read_failed: bool) -> &'static str {
+    if !sampled {
+        "not_sampled"
+    } else if read_failed {
+        "read_error"
+    } else if sampled_bytes == 0 {
+        "empty"
+    } else {
+        "sampled"
+    }
+}
+
+fn diagnostic_header(headers: &HeaderMap, name: &str, label: &str, max: usize) -> String {
+    headers.get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| format!(
+            " · {label}={}",
+            clean_field(value.to_owned(), max)
+        ))
+        .unwrap_or_default()
+}
+
+fn now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn plain(status: StatusCode, message: &str) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Body::from(message.to_owned()))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy_test_session(policy: AuthorizationPolicy, rules: Vec<AuthorizationRule>) -> Session {
+        Session {
+            id: "0123456789abcdef0123456789abcdef".to_owned(),
+            base_url: Url::parse("https://example.com/start").unwrap(),
+            clients: Mutex::new(UpstreamClientCache::default()),
+            cache: Mutex::new(ResourceCache::default()),
+            gate: Mutex::new(GateState::Waiting),
+            gate_tx: watch::channel(GateState::Waiting).0,
+            cancel_tx: watch::channel(false).0,
+            cancelled: AtomicBool::new(false),
+            events: Mutex::new(VecDeque::new()),
+            policy,
+            rules,
+            bootstrap_pending: AtomicBool::new(true),
+            last_accessed_ms: AtomicU64::new(0),
+            start_delay_nanos: AtomicU64::new(0),
+            inflight: Arc::new(Semaphore::new(8)),
+            max_inflight: 8,
+            cookie_jar: Arc::new(SessionCookieJar::default()),
+            cookie_tokens: StdMutex::new(HashMap::new()),
+            sabr_backoff: StdMutex::new(None),
+            sabr_request_timing: StdMutex::new(SabrRequestTiming::default()),
+            youtube_attestation_timing: StdMutex::new(HashMap::new()),
+        }
+    }
+
+
+    #[test]
+    fn attestation_correlation_id_is_validated_and_never_forwarded() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-intercept-attestation-id",
+            HeaderValue::from_static("mwl2lpxu-1"),
+        );
+        assert_eq!(youtube_attestation_correlation_id(&headers), Some("mwl2lpxu-1"));
+        assert!(should_skip_request_header(&HeaderName::from_static("x-intercept-attestation-id")));
+
+        headers.insert(
+            "x-intercept-attestation-id",
+            HeaderValue::from_static("invalid/id?secret"),
+        );
+        assert_eq!(youtube_attestation_correlation_id(&headers), None);
+    }
+
+    #[test]
+    fn youtube_attestation_resources_use_inner_tube_cookie_auth_path() {
+        let att_get = Url::parse("https://www.youtube.com/youtubei/v1/att/get").unwrap();
+        let att_log = Url::parse("https://youtube.com/youtubei/v1/att/log").unwrap();
+        let jnn_rpc = Url::parse("https://www.youtube.com/api/jnn/v1/GenerateIT").unwrap();
+        let wrong_host = Url::parse("https://example.com/youtubei/v1/att/get").unwrap();
+        let wrong_path = Url::parse("https://www.youtube.com/youtubei/v1/player/att/get").unwrap();
+
+        assert!(is_youtube_inner_tube_endpoint(&att_get));
+        assert!(is_youtube_inner_tube_endpoint(&att_log));
+        assert!(is_youtube_inner_tube_endpoint(&jnn_rpc));
+        assert!(!is_youtube_inner_tube_endpoint(&wrong_host));
+        assert!(!is_youtube_inner_tube_endpoint(&wrong_path));
+    }
+
+    #[test]
+    fn worker_bootstrap_instruments_waa_fetch_xhr_and_resource_timing() {
+        let base = Url::parse("https://www.youtube.com/watch?v=test").unwrap();
+        let output = rewrite_worker_javascript(
+            "fetch('https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/Create?key=not-logged');",
+            &base,
+            &base,
+            "0123456789abcdef0123456789abcdef",
+        ).unwrap();
+
+        assert!(output.contains("phase=worker_dispatch"));
+        assert!(output.contains("phase=worker_response"));
+        assert!(output.contains("phase=worker_resource_timing_observed"));
+        assert!(output.contains("youtube_attestation_rpc"));
+        assert!(output.contains("X-Intercept-Attestation-Id"));
+        assert!(output.contains("nextAttestationId"));
+        assert!(output.contains("attestation?attestation.target:routed"));
+        assert!(output.contains("attestation?meta.attestation.target:meta.url"));
+        assert!(output.contains(r#"const match=pathname.match(/^\/\$rpc\/google\.internal\.waa\.v1\.Waa\/(Create|GenerateIT)$/)"#));
+        assert!(output.contains(r#"pathname.match(/^\/api\/jnn\/v1\/(Create|GenerateIT)$/)"#));
+        assert!(output.contains("youtube_attestation_resource"));
+        assert!(output.contains("youtubeAttLog"));
+        assert!(output.contains("operation:youtubeAttGet?\"AttGet\":youtubeAttLog?\"AttLog\""));
+    }
+
+    #[test]
+    fn youtube_base_bundle_reports_sabr_recovery_state_without_exposing_tokens() {
+        let base = Url::parse("https://www.youtube.com/s/player/test/base.js").unwrap();
+        let fixture = concat!(
+            r#"this.events.V(a,"spsumpreject",(c,d,e)=>{this.D=d;c&&this.K&&!this.C&&(this.N("html5_generate_content_po_token")&&e?this.Nx(e):this.N("html5_generate_session_po_token")&&C0a(this));this.C||this.api.ea("stp",{s:+this.K,b:+this.D})});"#,
+            r#"C0a=function(a){a.A&&(a.C=LB(),a.L.promise.then(()=>{a.Ib.ti("pot_if");hT(a)}))};"#,
+            r#"hT=async function(a){if(a.N("html5_generate_session_po_token")&&!a.useLivingRoomPoToken){var b=g.ip("EOM_VISITOR_DATA")||g.ip("VISITOR_DATA");c=b.Pl?b.datasyncId:c;b.jb=kT(a,b.livingRoomPoTokenId||c);lT(a,b.jb)}};"#,
+            r#"Nx(a){if(this.A||this.B)a.yf=kT(this,a.videoId),lT(this,a.yf),this.j||(this.C=LB(),this.L.promise.then(()=>{this.Ib.ti("pot_if");a.yf=kT(this,a.videoId);lT(this,a.yf)}))}"#,
+            r#"kT=function(a,b){if(!a.A){if(a.B)try{return a.B(b)}catch(c){g.bu(c)}return""}try{a.Ib.ti(a.j?"pot_cms":"pot_csms");let c={T_:!0,U_:!0,Ft:b};a.N("html5_web_po_token_disable_caching")||(c.Mv={xQ:b,sX:!0,X1:!0});let d=a.A.yH(c);a.Ib.ti(a.j?"pot_cmf":"pot_csmf");a.j&&!a.U&&(a.C?.resolve(),a.C=null,a.D&&(a.D=!1,a.api.app.Qa().ku(!1)));return d}catch(c){return g.bu(c),""}};"#,
+            r#"lT=function(a,b){a.U&&a.j&&b&&(a.C?.resolve(),a.C=null,a.D&&(a.D=!1,a.api.app.Qa().ku(!1)))};"#,
+            r#"ku(a){a!==this.policy.nl&&((this.policy.nl=a)||this.Mf())}"#,
+            r#"z0a(b.sR()).then(()=>{a.j=!0;a.L.resolve();jT(a,"swpo_re")});"#,
+            r#"z0a(f.sR()).then(()=>{a.j=!0;a.L.resolve()});"#,
+        );
+        let output = rewrite_javascript(fixture, &base, &base, "0123456789abcdef0123456789abcdef").unwrap();
+
+        assert!(output.contains("base_instrumentation_status"));
+        assert!(output.contains("spsumpreject_hook:true"));
+        assert!(output.contains("recovery_request_hook:true"));
+        assert!(output.contains("token_present:!!d"));
+        assert!(output.contains("phase=token_generated") || output.contains("token_generated"));
+        assert!(output.contains("loader_release_requested"));
+        assert!(output.contains("phase=loader_gate") || output.contains("loader_gate"));
+        assert!(!output.contains("token="));
+    }
+
+    #[test]
+    fn youtube_base_bundle_reports_token_controller_lifecycle_entry_points() {
+        let base = Url::parse("https://www.youtube.com/s/player/test/base.js").unwrap();
+        let fixture = concat!(
+            r#"F0a=function(a){a.K=!1;};"#,
+            r#"iT=function(a){a.K=!0;a.C=null;};"#,
+            r#"Upb.prototype.ka=function(){this.K=!1;this.C=null;};"#,
+        );
+        let output = rewrite_javascript(
+            fixture,
+            &base,
+            &base,
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+
+        assert!(output.contains("token_controller_init_enter"));
+        assert!(output.contains("token_controller_start_enter"));
+        assert!(output.contains("token_controller_dispose_enter"));
+        assert!(output.contains("controller_init_hook:true"));
+        assert!(output.contains("controller_start_hook:true"));
+        assert!(output.contains("controller_dispose_hook:true"));
+        assert!(output.contains("controller_active:!!(a&&a.K)"));
+        assert!(output.contains("controller_active:!!(this&&this.K)"));
+    }
+
+    #[test]
+    fn youtube_base_class_method_disposal_hook_is_supported() {
+        let base = Url::parse("https://www.youtube.com/s/player/test/base.js").unwrap();
+        let fixture = r#"Upb=class{ka(){this.K=!1;this.C=null;}};"#;
+        let output = rewrite_javascript(
+            fixture,
+            &base,
+            &base,
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+
+        assert!(output.contains("token_controller_dispose_enter"));
+        assert!(output.contains("controller_dispose_hook:true"));
+        assert!(output.contains("controller_active:!!(this&&this.K)"));
+    }
+
+    #[test]
+    fn youtube_recovery_instrumentation_is_scoped_to_youtube_base_bundle() {
+        let youtube_base = Url::parse("https://www.youtube.com/s/player/test/base.js").unwrap();
+        let other_youtube_script = Url::parse("https://www.youtube.com/s/player/test/player.js").unwrap();
+        let other_host_base = Url::parse("https://example.com/s/player/test/base.js").unwrap();
+        let fixture = r#"this.events.V(a,"spsumpreject",(c,d,e)=>{this.D=d;c&&this.K&&!this.C&&(this.N("html5_generate_content_po_token")&&e?this.Nx(e):this.N("html5_generate_session_po_token")&&C0a(this));this.C||this.api.ea("stp",{s:+this.K,b:+this.D})});"#;
+
+        assert!(rewrite_javascript(fixture, &youtube_base, &youtube_base, "0123456789abcdef0123456789abcdef")
+            .unwrap().contains("spsumpreject_hook"));
+        assert!(!rewrite_javascript(fixture, &other_youtube_script, &youtube_base, "0123456789abcdef0123456789abcdef")
+            .unwrap().contains("spsumpreject_hook"));
+        assert!(!rewrite_javascript(fixture, &other_host_base, &youtube_base, "0123456789abcdef0123456789abcdef")
+            .unwrap().contains("spsumpreject_hook"));
+    }
+
+    #[test]
+    fn detects_unexpected_waa_paths_on_the_attestation_host() {
+        let changed_rpc = Url::parse(
+            "https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/GenerateIntegrityToken?alt=proto"
+        ).unwrap();
+        let related_google_api = Url::parse(
+            "https://other.googleapis.com/$rpc/google.internal.waa.v2.Waa/GenerateIT"
+        ).unwrap();
+        let unrelated_google_api = Url::parse(
+            "https://other.googleapis.com/$rpc/google.internal.identity.v1.Identity/Get"
+        ).unwrap();
+
+        assert_eq!(youtube_attestation_rpc_operation(&changed_rpc), Some("Other"));
+        assert_eq!(youtube_attestation_rpc_operation(&related_google_api), Some("Other"));
+        assert_eq!(youtube_attestation_rpc_operation(&unrelated_google_api), None);
+    }
+
+    #[test]
+    fn recognizes_youtube_waa_create_and_generate_it_rpc_paths() {
+        let create = Url::parse(
+            "https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/Create?key=redacted&alt=proto"
+        ).unwrap();
+        let generate = Url::parse(
+            "https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/GenerateIT?alt=proto"
+        ).unwrap();
+        let wrong_host = Url::parse(
+            "https://example.com/$rpc/google.internal.waa.v1.Waa/Create"
+        ).unwrap();
+        let wrong_path = Url::parse(
+            "https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/Other"
+        ).unwrap();
+
+        assert_eq!(youtube_attestation_rpc_operation(&create), Some("Create"));
+        assert_eq!(youtube_attestation_rpc_operation(&generate), Some("GenerateIT"));
+        assert_eq!(youtube_attestation_rpc_operation(&wrong_host), None);
+        assert_eq!(youtube_attestation_rpc_operation(&wrong_path), Some("Other"));
+    }
+
+    #[test]
+    fn recognizes_youtube_same_origin_waa_service_endpoints() {
+        let create = Url::parse("https://www.youtube.com/api/jnn/v1/Create").unwrap();
+        let generate = Url::parse("https://www.youtube.com/api/jnn/v1/GenerateIT").unwrap();
+        let other = Url::parse("https://www.youtube.com/api/jnn/v1/Refresh").unwrap();
+        let unrelated = Url::parse("https://example.com/api/jnn/v1/Create").unwrap();
+
+        assert_eq!(youtube_attestation_rpc_operation(&create), Some("Create"));
+        assert_eq!(youtube_attestation_rpc_operation(&generate), Some("GenerateIT"));
+        assert_eq!(youtube_attestation_rpc_operation(&other), Some("Other"));
+        assert_eq!(youtube_attestation_rpc_operation(&unrelated), None);
+    }
+
+    #[test]
+    fn recognizes_youtube_innertube_attestation_challenge_endpoint() {
+        let challenge = Url::parse("https://www.youtube.com/youtubei/v1/att/get?prettyPrint=false").unwrap();
+        let wrong_host = Url::parse("https://example.com/youtubei/v1/att/get").unwrap();
+        let wrong_path = Url::parse("https://www.youtube.com/youtubei/v1/player").unwrap();
+
+        assert!(is_youtube_attestation_challenge_request(&challenge));
+        assert_eq!(youtube_attestation_resource_operation(&challenge), Some("AttGet"));
+        let log = Url::parse("https://www.youtube.com/youtubei/v1/att/log?prettyPrint=false").unwrap();
+        assert_eq!(youtube_attestation_resource_operation(&log), Some("AttLog"));
+        assert_eq!(
+            youtube_attestation_resource_operation(&Url::parse("https://www.youtube.com/youtubei/v1/att/other").unwrap()),
+            None
+        );
+        assert!(!is_youtube_attestation_challenge_request(&wrong_host));
+        assert!(!is_youtube_attestation_challenge_request(&wrong_path));
+    }
+
+    #[test]
+    fn upstream_client_cache_evicts_least_recently_used_origin() {
+        let mut cache = UpstreamClientCache::default();
+
+        let retained_client = cache.insert_or_get(
+            "https://cdn-a.example".to_owned(),
+            reqwest::Client::new(),
+            2,
+        );
+        cache.insert_or_get(
+            "https://cdn-b.example".to_owned(),
+            reqwest::Client::new(),
+            2,
+        );
+
+        // Touch A after B so B is now the least recently used entry.
+        assert!(cache.get("https://cdn-a.example").is_some());
+        cache.insert_or_get(
+            "https://cdn-c.example".to_owned(),
+            reqwest::Client::new(),
+            2,
+        );
+
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains_origin("https://cdn-a.example"));
+        assert!(!cache.contains_origin("https://cdn-b.example"));
+        assert!(cache.contains_origin("https://cdn-c.example"));
+
+        // An in-flight request's clone remains usable after its cache entry is evicted.
+        assert!(retained_client.get("https://example.com").build().is_ok());
+    }
+
+    #[tokio::test]
+    async fn concurrent_insertions_reuse_one_cached_origin_entry() {
+        let cache = Arc::new(Mutex::new(UpstreamClientCache::default()));
+        let mut tasks = Vec::new();
+
+        for _ in 0..16 {
+            let cache = Arc::clone(&cache);
+            tasks.push(tokio::spawn(async move {
+                let mut cache = cache.lock().await;
+                cache.insert_or_get(
+                    "https://cdn.example".to_owned(),
+                    reqwest::Client::new(),
+                    2,
+                );
+            }));
+        }
+
+        for task in tasks {
+            task.await.expect("cache insertion task should complete");
+        }
+
+        assert_eq!(cache.lock().await.len(), 1);
+    }
+
+    #[test]
+    fn upstream_client_cache_respects_capacity_and_supports_zero_capacity() {
+        let mut cache = UpstreamClientCache::default();
+        cache.insert_or_get(
+            "https://cdn-a.example".to_owned(),
+            reqwest::Client::new(),
+            1,
+        );
+        cache.insert_or_get(
+            "https://cdn-b.example".to_owned(),
+            reqwest::Client::new(),
+            0,
+        );
+
+        assert_eq!(cache.len(), 0);
+        assert!(!cache.contains_origin("https://cdn-a.example"));
+        assert!(!cache.contains_origin("https://cdn-b.example"));
+    }
+
+    #[test]
+    fn youtube_stats_endpoint_classifier_matches_only_the_three_first_party_stats_paths() {
+        for path in ["/api/stats/qoe", "/api/stats/watchtime", "/api/stats/playback"] {
+            let url = Url::parse(&format!("https://www.youtube.com{path}?fmt=397")).unwrap();
+            assert!(is_youtube_stats_endpoint(&url), "{path} should be classified as YouTube stats");
+        }
+
+        for url in [
+            "https://googlevideo.com/api/stats/qoe",
+            "https://www.youtube.com/api/stats/atr",
+            "https://www.youtube.com/api/stats/qoe/extra",
+            "https://example.com/api/stats/watchtime",
+        ] {
+            assert!(!is_youtube_stats_endpoint(&Url::parse(url).unwrap()), "{url} must not be classified as YouTube stats");
+        }
+    }
+
+    #[test]
+    fn cookie_scope_diagnostics_distinguish_empty_and_host_scoped_jars() {
+        let jar = SessionCookieJar::default();
+        let qoe_url = Url::parse("https://www.youtube.com/api/stats/qoe").unwrap();
+
+        let empty = jar.request_cookie_scope_profile(&qoe_url);
+        assert!(empty.contains("stored:0"));
+        assert!(empty.contains("target:0"));
+
+        // A host-only cookie for the apex host is stored, but must not be
+        // sent to www.youtube.com.
+        let apex_url = Url::parse("https://youtube.com/").unwrap();
+        assert!(jar.set_document_cookie("apex=present; Path=/; Secure", &apex_url).is_ok());
+        let apex_only = jar.request_cookie_scope_profile(&qoe_url);
+        assert!(apex_only.contains("stored:1"));
+        assert!(apex_only.contains("target:0"));
+        assert!(apex_only.contains("apex_target:1"));
+
+        // A Domain=youtube.com cookie should match both the apex and www host.
+        let www_url = Url::parse("https://www.youtube.com/").unwrap();
+        assert!(jar.set_document_cookie(
+            "site=present; Domain=youtube.com; Path=/; Secure",
+            &www_url,
+        ).is_ok());
+        let with_domain_cookie = jar.request_cookie_scope_profile(&qoe_url);
+        assert!(with_domain_cookie.contains("stored:2"));
+        assert!(with_domain_cookie.contains("target:1"));
+        assert!(with_domain_cookie.contains("root_path:1"));
+        assert!(with_domain_cookie.contains("apex_target:2"));
+    }
+
+    #[test]
+    fn youtube_log_event_dispatch_reports_buffered_length_not_declared_length() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("50"));
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let body_len = 5_007;
+        let detail = youtube_log_event_dispatch_diagnostics(
+            &Method::POST,
+            &headers,
+            body_len,
+        );
+
+        assert!(detail.contains("body_bytes=5007"));
+        assert!(detail.contains("content_length_out=5007"));
+        assert!(detail.contains("content_length_in=50"));
+    }
+
+    #[test]
+    fn youtube_stats_preserve_first_party_fetch_site_classification() {
+        for path in ["/api/stats/qoe", "/api/stats/watchtime", "/api/stats/playback"] {
+            let url = Url::parse(&format!("https://www.youtube.com{path}")).unwrap();
+            assert!(is_youtube_stats_endpoint(&url));
+            assert_eq!(
+                outbound_fetch_site_header(true, false, is_youtube_stats_endpoint(&url), false),
+                Some("same-origin"),
+                "{path} must remain same-origin despite the localhost proxy origin"
+            );
+        }
+    }
+
+    #[test]
+    fn youtube_inner_tube_preserves_first_party_fetch_site_classification() {
+        assert_eq!(
+            outbound_fetch_site_header(true, true, false, false),
+            Some("same-origin")
+        );
+    }
+
+    #[test]
+    fn unrelated_cross_origin_requests_remain_cross_site() {
+        assert_eq!(
+            outbound_fetch_site_header(true, false, false, false),
+            Some("cross-site")
+        );
+    }
+
+    #[test]
+    fn missing_fetch_site_header_remains_absent() {
+        assert_eq!(
+            outbound_fetch_site_header(false, false, true, false),
+            None
+        );
+    }
+
+    #[test]
+    fn youtube_data_sync_id_parses_primary_and_secondary_sessions() {
+        assert_eq!(
+            parse_youtube_data_sync_id("primary-user||"),
+            (None, Some("primary-user"))
+        );
+        assert_eq!(
+            parse_youtube_data_sync_id("delegated-channel||secondary-user"),
+            (Some("delegated-channel"), Some("secondary-user"))
+        );
+        assert_eq!(
+            parse_youtube_data_sync_id("user-without-separator"),
+            (None, Some("user-without-separator"))
+        );
+        assert_eq!(parse_youtube_data_sync_id("||"), (None, None));
+    }
+
+    #[test]
+    fn youtube_sapisid_authorization_uses_session_id_and_cookie_variants() {
+        let cookies = HeaderValue::from_static(
+            "SAPISID=primary-secret; __Secure-1PAPISID=one-secret; __Secure-3PAPISID=three-secret"
+        );
+        let auth = youtube_sapisid_authorization(
+            Some(&cookies),
+            "https://www.youtube.com",
+            1_700_000_000,
+            Some("user-session"),
+        ).unwrap();
+        let auth = auth.to_str().unwrap();
+        let digest = format!(
+            "{:x}",
+            Sha1::digest(
+                b"user-session 1700000000 primary-secret https://www.youtube.com"
+            )
+        );
+        let digest_one = format!(
+            "{:x}",
+            Sha1::digest(
+                b"user-session 1700000000 one-secret https://www.youtube.com"
+            )
+        );
+        let digest_three = format!(
+            "{:x}",
+            Sha1::digest(
+                b"user-session 1700000000 three-secret https://www.youtube.com"
+            )
+        );
+        assert!(auth.contains(&format!("SAPISIDHASH 1700000000_{digest}_uuser-session")));
+        assert!(auth.contains(&format!("SAPISID1PHASH 1700000000_{digest_one}_uuser-session")));
+        assert!(auth.contains(&format!("SAPISID3PHASH 1700000000_{digest_three}_uuser-session")));
+        assert!(!auth.contains("primary-secret"));
+    }
+
+    #[test]
+    fn youtube_sapisid_authorization_falls_back_to_secure_three_p_cookie() {
+        let cookies = HeaderValue::from_static("__Secure-3PAPISID=three-secret");
+        let auth = youtube_sapisid_authorization(
+            Some(&cookies),
+            "https://www.youtube.com",
+            1_700_000_000,
+            None,
+        ).unwrap();
+        let auth = auth.to_str().unwrap();
+        assert!(auth.contains("SAPISIDHASH 1700000000_"));
+        assert!(auth.contains("SAPISID3PHASH 1700000000_"));
+        assert!(!auth.contains("_u"));
+        assert!(!auth.contains("three-secret"));
+    }
+
+    #[test]
+    fn youtube_search_cookie_profile_reports_presence_without_cookie_values() {
+        let cookies = HeaderValue::from_static(
+            "SAPISID=private; __Secure-3PAPISID=private3; SID=session"
+        );
+        let profile = youtube_search_cookie_profile(Some(&cookies));
+        assert!(profile.contains("primary_auth=present"));
+        assert!(profile.contains("first_party_auth=absent"));
+        assert!(profile.contains("third_party_auth=present"));
+        assert!(!profile.contains("private"));
+        assert!(!profile.contains("SID"));
+    }
+
+    #[test]
+    fn youtube_origin_validation_accepts_www_youtube_only_over_https() {
+        assert_eq!(
+            normalized_youtube_origin(&HeaderValue::from_static("https://www.youtube.com")),
+            Some("https://www.youtube.com".to_owned())
+        );
+        for invalid in [
+            "http://www.youtube.com",
+            "https://youtube.example",
+            "https://www.youtube.com.attacker.example",
+            "https://www.youtube.com/path",
+        ] {
+            assert!(normalized_youtube_origin(&HeaderValue::from_str(invalid).unwrap()).is_none());
+        }
+    }
+
+    #[test]
+    fn youtube_sapisid_authorization_requires_a_matching_cookie() {
+        let cookies = HeaderValue::from_static("SID=session; HSID=hash");
+        assert!(youtube_sapisid_authorization(
+            Some(&cookies),
+            "https://www.youtube.com",
+            1_700_000_000,
+            None,
+        ).is_none());
+        assert!(youtube_sapisid_authorization(
+            None,
+            "https://www.youtube.com",
+            1_700_000_000,
+            None,
+        ).is_none());
+    }
+
+    #[test]
+    fn internal_youtube_data_sync_header_is_never_forwarded() {
+        assert!(should_skip_request_header(
+            &HeaderName::from_static("x-intercept-youtube-datasync-id")
+        ));
+    }
+
+    #[test]
+    fn youtube_search_header_profile_reports_presence_without_secrets() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer secret-token"));
+        headers.insert(header::USER_AGENT, HeaderValue::from_static("Mozilla/5.0 Firefox/153.0"));
+        headers.insert("x-origin", HeaderValue::from_static("https://www.youtube.com"));
+        headers.insert("x-goog-authuser", HeaderValue::from_static("0"));
+        headers.insert("x-goog-visitor-id", HeaderValue::from_static("visitor-secret"));
+        headers.insert("x-youtube-client-name", HeaderValue::from_static("1"));
+        headers.insert("x-youtube-client-version", HeaderValue::from_static("test-version"));
+        headers.insert("x-youtube-bootstrap-logged-in", HeaderValue::from_static("true"));
+        let cookie = HeaderValue::from_static("SID=cookie-secret");
+
+        let detail = youtube_search_header_profile(
+            &headers,
+            Some(&cookie),
+            "www.youtube.com",
+            "same-origin",
+        );
+        assert!(detail.contains("auth=present"));
+        assert!(detail.contains("cookie=jar("));
+        assert!(detail.contains("ua=browser"));
+        assert!(detail.contains("origin=www.youtube.com"));
+        assert!(detail.contains("x_origin=www.youtube.com"));
+        assert!(detail.contains("authuser=present"));
+        assert!(detail.contains("visitor=present"));
+        assert!(detail.contains("yt_client=present"));
+        assert!(detail.contains("yt_version=present"));
+        assert!(detail.contains("bootstrap=present"));
+        assert!(detail.contains("fetch_site=same-origin"));
+        assert!(!detail.contains("secret-token"));
+        assert!(!detail.contains("cookie-secret"));
+        assert!(!detail.contains("visitor-secret"));
+    }
+
+    #[test]
+    fn youtube_search_header_profile_identifies_missing_auth_and_default_user_agent() {
+        let headers = HeaderMap::new();
+        let detail = youtube_search_header_profile(
+            &headers,
+            None,
+            "absent",
+            "cross-site",
+        );
+        assert!(detail.contains("auth=absent"));
+        assert!(detail.contains("cookie=absent"));
+        assert!(detail.contains("ua=intercept_default"));
+        assert!(detail.contains("x_origin=absent"));
+        assert!(detail.contains("authuser=absent"));
+        assert!(detail.contains("visitor=absent"));
+        assert!(detail.contains("fetch_site=cross-site"));
+    }
+
+    #[test]
+    fn youtube_search_json_shape_reports_keys_without_payload_values() {
+        let body = br#"{
+            "context":{"client":{"hl":"en","visitorData":"visitor-secret"}},
+            "request":{},
+            "query":"private search phrase",
+            "clickTracking":{"clickTrackingParams":"tracking-secret"},
+            "adSignalsInfo":{"params":[{"value":"ad-secret"}]}
+        }"#;
+        let detail = youtube_search_json_shape_diagnostic(body);
+        assert!(detail.contains("top="));
+        assert!(detail.contains("context"));
+        assert!(detail.contains("client"));
+        assert!(detail.contains("user=false"));
+        assert!(detail.contains("click=true"));
+        assert!(detail.contains("ads=true"));
+        assert!(detail.contains("stats=false"));
+        assert!(detail.contains("inline=false"));
+        assert!(!detail.contains("private search phrase"));
+        assert!(!detail.contains("visitor-secret"));
+        assert!(!detail.contains("tracking-secret"));
+        assert!(!detail.contains("ad-secret"));
+    }
+
+    #[test]
+    fn youtube_search_json_shape_marks_invalid_and_non_object_bodies() {
+        assert_eq!(youtube_search_json_shape_diagnostic(b"{"), "json=invalid");
+        assert_eq!(youtube_search_json_shape_diagnostic(b"[]"), "json=not_object");
+    }
+
+    #[test]
+    fn ajax_request_diagnostics_expose_dispatch_marker_and_fetch_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
+        headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+        headers.insert(
+            "x-intercept-body-diagnostic",
+            HeaderValue::from_static("body_arg=string body_arg_bytes=12"),
+        );
+        headers.insert(
+            "x-intercept-transport-diagnostic",
+            HeaderValue::from_static("worker-fetch"),
+        );
+
+        let unmarked = ajax_request_diagnostics(&Method::POST, &headers, b"");
+        assert!(unmarked.contains("body_bytes=0"));
+        assert!(unmarked.contains("dispatch_marker=absent"));
+        assert!(unmarked.contains("browser_body=body_arg=string body_arg_bytes=12"));
+        assert!(unmarked.contains("sec_fetch_dest=empty"));
+        assert!(unmarked.contains("sec_fetch_mode=cors"));
+        assert!(unmarked.contains("sec_fetch_site=same-origin"));
+
+        headers.insert("x-intercept-proxy-mode", HeaderValue::from_static("ajax"));
+        let marked = ajax_request_diagnostics(&Method::POST, &headers, br#"{"q":"test"}"#);
+        assert!(marked.contains("dispatch_marker=present"));
+        assert!(marked.contains("body_bytes=12"));
+        assert!(marked.contains("transport=worker-fetch"));
+        assert!(marked.contains("content_encoding_in=absent"));
+        assert!(marked.contains("body_encoding=identity"));
+        assert!(marked.contains("json=valid"));
+    }
+
+    #[test]
+    fn youtube_stats_request_profile_reports_body_framing_without_logging_payload() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain;charset=UTF-8"));
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("18"));
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("identity"));
+        let body = b"private-qoe-payload";
+        let detail = youtube_stats_request_diagnostics(&Method::POST, &headers, body);
+
+        assert!(detail.contains("method=POST"));
+        assert!(detail.contains("bytes=19"));
+        assert!(detail.contains("text=utf8_text"));
+        assert!(detail.contains("ct=text/plain;charset=UTF-8"));
+        assert!(detail.contains("len_in=18"));
+        assert!(detail.contains("len_out=19"));
+        assert!(detail.contains("encoding=identity"));
+        assert!(!detail.contains("private-qoe-payload"));
+    }
+
+    #[test]
+    fn youtube_stats_outbound_profile_reports_effective_headers_without_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
+        headers.insert("sec-fetch-mode", HeaderValue::from_static("no-cors"));
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer private-token"));
+        headers.insert(header::USER_AGENT, HeaderValue::from_static("private-user-agent"));
+        let origin = HeaderValue::from_static("https://www.youtube.com");
+        let referer = HeaderValue::from_static("https://www.youtube.com/watch?v=private-video");
+        let cookie_header = HeaderValue::from_static("SID=private-cookie");
+        let detail = youtube_stats_outbound_header_diagnostics(
+            &headers,
+            Some(&origin),
+            Some(&referer),
+            Some("same-origin"),
+            Some(&cookie_header),
+        );
+
+        assert!(detail.contains("origin=www.youtube.com"));
+        assert!(detail.contains("referer=www.youtube.com"));
+        assert!(detail.contains("fetch=empty/no-cors/same-origin"));
+        assert!(detail.contains("cookie_jar=present("));
+        assert!(detail.contains("auth=present"));
+        assert!(detail.contains("ua=browser"));
+        assert!(!detail.contains("private-token"));
+        assert!(!detail.contains("private-user-agent"));
+        assert!(!detail.contains("private-video"));
+        assert!(!detail.contains("private-cookie"));
+        assert!(format!("rid={} {}", "a".repeat(32), detail).len() <= 300);
+    }
+
+    #[test]
+    fn youtube_stats_outbound_profile_marks_default_user_agent_and_missing_headers() {
+        let headers = HeaderMap::new();
+        let detail = youtube_stats_outbound_header_diagnostics(&headers, None, None, None, None);
+
+        assert!(detail.contains("origin=absent"));
+        assert!(detail.contains("referer=absent"));
+        assert!(detail.contains("fetch=absent/absent/absent"));
+        assert!(detail.contains("cookie_jar=absent"));
+        assert!(detail.contains("auth=absent"));
+        assert!(detail.contains("ua=client_default"));
+    }
+
+    #[test]
+    fn ajax_request_diagnostics_detects_gzip_body_framing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        let gzip_body = [0x1f, 0x8b, 0x08, 0x00];
+        let detail = ajax_request_diagnostics(&Method::POST, &headers, &gzip_body);
+        assert!(detail.contains("content_encoding_in=gzip"));
+        assert!(detail.contains("body_encoding=gzip"));
+        assert!(detail.contains("json=gzip_compressed"));
+    }
+
+    #[test]
+    fn ajax_request_diagnostics_detects_gzip_header_body_mismatch() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        let detail = ajax_request_diagnostics(&Method::POST, &headers, br#"{"query":"test"}"#);
+        assert!(detail.contains("content_encoding_in=gzip"));
+        assert!(detail.contains("body_encoding=content_encoding_mismatch"));
+        assert!(detail.contains("json=valid"));
+    }
+
+    #[test]
+    fn ajax_request_diagnostics_detects_gzip_without_header() {
+        let headers = HeaderMap::new();
+        let gzip_body = [0x1f, 0x8b, 0x08, 0x00];
+        assert_eq!(
+            request_body_encoding_diagnostic(&headers, &gzip_body),
+            "gzip_without_content_encoding"
+        );
+    }
+
+    #[test]
+    fn classifies_upstream_error_body_sampling_states() {
+        assert_eq!(error_body_state(false, 0, false), "not_sampled");
+        assert_eq!(error_body_state(true, 0, false), "empty");
+        assert_eq!(error_body_state(true, 12, false), "sampled");
+        assert_eq!(error_body_state(true, 0, true), "read_error");
+        assert_eq!(error_body_state(true, 12, true), "read_error");
+    }
+
+    #[test]
+    fn formats_only_present_sanitized_upstream_diagnostic_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-length", HeaderValue::from_static("0"));
+        headers.insert("server", HeaderValue::from_static("gvs  "));
+        headers.insert("retry-after", HeaderValue::from_static("5"));
+        assert_eq!(
+            diagnostic_header(&headers, "content-length", "content_length", 24),
+            " · content_length=0"
+        );
+        assert_eq!(
+            diagnostic_header(&headers, "server", "server", 80),
+            " · server=gvs  "
+        );
+        assert_eq!(
+            diagnostic_header(&headers, "retry-after", "retry_after", 80),
+            " · retry_after=5"
+        );
+        assert_eq!(
+            diagnostic_header(&headers, "x-guploader-uploadid", "guploader", 80),
+            ""
+        );
+    }
+
+    #[test]
+    fn error_body_sanitizer_removes_markup_scripts_and_sensitive_values() {
+        let body = br#"<!doctype html>
+            <html><head><script>window.sessionToken = "do-not-export";</script>
+            <style>.secret { color: red; }</style></head>
+            <body><h1>Sorry...</h1>
+            <input type="hidden" name="access_token" value="hidden-value">
+            <p>Authorization: Bearer abc.def.ghi</p>
+            <p>access_token=visible-secret</p>
+            <p>https://accounts.example/login?continue=private&token=private</p>
+            </body></html>"#;
+        let sanitized = sanitize_error_body(body);
+
+        assert!(sanitized.contains("Sorry..."));
+        assert!(!sanitized.contains("<"));
+        assert!(!sanitized.contains("window.sessionToken"));
+        assert!(!sanitized.contains("do-not-export"));
+        assert!(!sanitized.contains("hidden-value"));
+        assert!(!sanitized.contains("abc.def.ghi"));
+        assert!(!sanitized.contains("visible-secret"));
+        assert!(!sanitized.contains("continue=private"));
+        assert!(sanitized.contains("[REDACTED]"));
+        assert!(sanitized.contains("[query redacted]"));
+    }
+
+    #[test]
+    fn error_body_sanitizer_enforces_a_utf8_byte_limit() {
+        let body = "é".repeat(MAX_ERROR_BODY_BYTES);
+        let sanitized = sanitize_error_body(body.as_bytes());
+        assert!(sanitized.len() <= MAX_ERROR_BODY_BYTES);
+        assert!(sanitized.is_char_boundary(sanitized.len()));
+    }
+
+    #[test]
+    fn event_json_retains_the_separate_bounded_body_field() {
+        let event = ActionEvent {
+            at_unix_ms: 1,
+            kind: "ajax_response".to_owned(),
+            target: "example.test/resource".to_owned(),
+            detail: "upstream=short preview".to_owned(),
+            upstream_error_body: Some(UpstreamErrorBody {
+                text: "Sorry...".to_owned(),
+                captured_bytes: 8,
+                truncated: false,
+                complete: true,
+                timed_out: false,
+            }),
+        };
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["detail"], "upstream=short preview");
+        assert_eq!(value["upstream_error_body"]["text"], "Sorry...");
+        assert_eq!(value["upstream_error_body"]["captured_bytes"], 8);
+
+        let event_without_body = ActionEvent {
+            at_unix_ms: 2,
+            kind: "timer_started".to_owned(),
+            target: "session".to_owned(),
+            detail: "timer".to_owned(),
+            upstream_error_body: None,
+        };
+        let value = serde_json::to_value(event_without_body).unwrap();
+        assert!(value.get("upstream_error_body").is_none());
+    }
+
+    #[test]
+    fn filters_internal_authority_lifecycle_events_from_activity_stream() {
+        for kind in [
+            "authority_status_received",
+            "authority_frame_load",
+            "authority_frame_error",
+            "authority_frame_retry",
+            "authority_frame_ready",
+            "authority_host_removed",
+            "controller_loaded",
+        ] {
+            assert!(is_internal_authority_event(kind), "{kind} should be hidden");
+        }
+
+        for kind in [
+            "timer_started",
+            "authorization_released",
+            "http_request",
+            "ajax_request",
+            "dom_click",
+        ] {
+            assert!(!is_internal_authority_event(kind), "{kind} is meaningful activity");
+        }
+    }
+
+    #[test]
+    fn ajax_request_diagnostics_reports_safe_request_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("13"));
+        headers.insert(header::ORIGIN, HeaderValue::from_static("https://www.youtube.com"));
+        headers.insert(header::REFERER, HeaderValue::from_static("https://www.youtube.com/results"));
+        headers.insert(header::COOKIE, HeaderValue::from_static("SID=secret; PREF=private"));
+        headers.insert("x-youtube-client-name", HeaderValue::from_static("1"));
+        headers.insert("x-youtube-client-version", HeaderValue::from_static("2.20261116.00.00"));
+
+        let detail = ajax_request_diagnostics(
+            &Method::POST,
+            &headers,
+            br#"{"query":"a"}"#,
+        );
+
+        assert!(detail.contains("method=POST"));
+        assert!(detail.contains("body_bytes=13"));
+        assert!(detail.contains("content_length_expected_out=13"));
+        assert!(detail.contains("content_type=application/json"));
+        assert!(detail.contains("content_length_in=13"));
+        assert!(detail.contains("origin_host_in=www.youtube.com"));
+        assert!(detail.contains("referer_host_in=www.youtube.com"));
+        assert!(detail.contains("cookie_header_in=present("));
+        assert!(detail.contains("json=valid"));
+        assert!(detail.contains("yt_client_name=present"));
+        assert!(detail.contains("yt_client_version=present"));
+        assert!(!detail.contains("SID=secret"));
+        assert!(!detail.contains("PREF=private"));
+        assert!(!detail.contains("2.20261116.00.00"));
+    }
+
+    #[test]
+    fn ajax_request_diagnostics_marks_invalid_json_and_missing_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let detail = ajax_request_diagnostics(&Method::POST, &headers, b"{broken");
+
+        assert!(detail.contains("content_length_expected_out=7"));
+        assert!(detail.contains("origin_host_in=absent"));
+        assert!(detail.contains("referer_host_in=absent"));
+        assert!(detail.contains("cookie_header_in=absent"));
+        assert!(detail.contains("json=invalid"));
+        assert!(detail.contains("yt_client_name=absent"));
+    }
+
+    #[test]
+    fn identifies_explicit_controller_ajax_marker() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-intercept-proxy-mode", HeaderValue::from_static("ajax"));
+        assert!(is_ajax_request(&headers));
+
+        // Multiple values can occur when XMLHttpRequest appends to an existing
+        // same-name application header.
+        headers.insert(
+            "x-intercept-proxy-mode",
+            HeaderValue::from_static("application, ajax"),
+        );
+        assert!(is_ajax_request(&headers));
+    }
+
+    #[test]
+    fn identifies_fetch_metadata_ajax_requests() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
+        assert!(is_ajax_request(&headers));
+    }
+
+    #[test]
+    fn identifies_legacy_xhr_and_eventsource_requests() {
+        let mut xhr_headers = HeaderMap::new();
+        xhr_headers.insert("x-requested-with", HeaderValue::from_static("XMLHttpRequest"));
+        assert!(is_ajax_request(&xhr_headers));
+
+        let mut event_headers = HeaderMap::new();
+        event_headers.insert(header::ACCEPT, HeaderValue::from_static("text/event-stream"));
+        assert!(is_ajax_request(&event_headers));
+    }
+
+    #[test]
+    fn cache_key_includes_varyable_request_headers_in_stable_order() {
+        let url = Url::parse("https://cdn.example/assets/image.webp").unwrap();
+        let mut first = HeaderMap::new();
+        first.insert(header::ACCEPT, HeaderValue::from_static("image/avif,image/webp"));
+        first.insert("sec-fetch-dest", HeaderValue::from_static("image"));
+        first.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip, br"));
+
+        let mut same_representation = HeaderMap::new();
+        same_representation.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        same_representation.insert("sec-fetch-dest", HeaderValue::from_static("image"));
+        same_representation.insert(header::ACCEPT, HeaderValue::from_static("image/avif,image/webp"));
+
+        // Accept-Encoding is normalized to the proxy's fixed upstream value.
+        assert_eq!(
+            resource_cache_key(&url, &first),
+            resource_cache_key(&url, &same_representation)
+        );
+
+        let mut another_variant = same_representation.clone();
+        another_variant.insert("sec-fetch-dest", HeaderValue::from_static("script"));
+        assert_ne!(
+            resource_cache_key(&url, &first),
+            resource_cache_key(&url, &another_variant)
+        );
+    }
+
+    #[test]
+    fn cache_key_ignores_request_revalidation_directives() {
+        let url = Url::parse("https://cdn.example/assets/site.css").unwrap();
+        let normal = HeaderMap::new();
+        let mut reload = HeaderMap::new();
+        reload.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        reload.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+        assert_eq!(
+            resource_cache_key(&url, &normal),
+            resource_cache_key(&url, &reload)
+        );
+    }
+
+    #[test]
+    fn request_no_cache_forces_origin_fetch_but_no_store_forbids_storage() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        assert!(request_requires_revalidation(&headers));
+        assert!(!request_forbids_cache_storage(&headers));
+
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("max-age=0"));
+        assert!(request_requires_revalidation(&headers));
+        assert!(!request_forbids_cache_storage(&headers));
+
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        assert!(request_forbids_cache_storage(&headers));
+    }
+
+    #[test]
+    fn supports_arbitrary_valid_vary_fields_but_rejects_star() {
+        assert!(vary_header_is_supported(""));
+        assert!(vary_header_is_supported("Accept-Encoding, Sec-Fetch-Dest, Origin"));
+        assert!(!vary_header_is_supported("*"));
+        assert!(!vary_header_is_supported("Accept, *"));
+        assert!(!vary_header_is_supported("not a header name"));
+    }
+
+    #[test]
+    fn session_host_root_paths_proxy_to_the_primary_upstream_origin() {
+        let mut session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        session.base_url = Url::parse("https://www.youtube.com/").unwrap();
+
+        let uri = "/results?search_query=a".parse::<axum::http::Uri>().unwrap();
+        assert_eq!(
+            upstream_url_for_request(&uri, &session).unwrap().as_str(),
+            "https://www.youtube.com/results?search_query=a"
+        );
+
+        let root = "/".parse::<axum::http::Uri>().unwrap();
+        assert_eq!(
+            upstream_url_for_request(&root, &session).unwrap().as_str(),
+            "https://www.youtube.com/"
+        );
+    }
+
+    #[test]
+    fn canonical_session_paths_keep_existing_upstream_mapping() {
+        let mut session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        session.base_url = Url::parse("https://www.youtube.com/").unwrap();
+
+        let uri = format!("/p/{}/results?search_query=a", session.id)
+            .parse::<axum::http::Uri>().unwrap();
+        assert_eq!(
+            upstream_url_for_request(&uri, &session).unwrap().as_str(),
+            "https://www.youtube.com/results?search_query=a"
+        );
+    }
+
+    #[test]
+    fn cache_browser_paths_group_resources_by_scheme_host_and_directory() {
+        let url = Url::parse("https://cdn.example:8443/assets/css/site.css?v=2").unwrap();
+        assert_eq!(
+            cache_virtual_path(&url),
+            ("https-cdn.example:8443/assets/css/site.css".to_owned(), "site.css".to_owned())
+        );
+    }
+
+    #[test]
+    fn cache_browser_paths_show_directory_resources_as_index_entries() {
+        let url = Url::parse("https://example.com/assets/").unwrap();
+        assert_eq!(
+            cache_virtual_path(&url),
+            ("https-example.com/assets/index".to_owned(), "index".to_owned())
+        );
+    }
+
+    #[test]
+    fn does_not_classify_document_navigation_as_ajax() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-fetch-dest", HeaderValue::from_static("document"));
+        headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
+        headers.insert(header::ACCEPT, HeaderValue::from_static("text/html"));
+        assert!(!is_ajax_request(&headers));
+    }
+
+    #[test]
+    fn translates_session_origin_referers_back_to_the_upstream_url() {
+        let session = Session {
+            id: "session1234567890abcdef1234567890".to_owned(),
+            base_url: Url::parse("https://example.com/start").unwrap(),
+            clients: Mutex::new(UpstreamClientCache::default()),
+            cache: Mutex::new(ResourceCache::default()),
+            gate: Mutex::new(GateState::Waiting),
+            gate_tx: watch::channel(GateState::Waiting).0,
+            cancel_tx: watch::channel(false).0,
+            cancelled: AtomicBool::new(false),
+            events: Mutex::new(VecDeque::new()),
+            policy: AuthorizationPolicy::Standard,
+            rules: Vec::new(),
+            bootstrap_pending: AtomicBool::new(false),
+            last_accessed_ms: AtomicU64::new(0),
+            start_delay_nanos: AtomicU64::new(0),
+            inflight: Arc::new(Semaphore::new(1)),
+            max_inflight: 1,
+            cookie_jar: Arc::new(SessionCookieJar::default()),
+            cookie_tokens: StdMutex::new(HashMap::new()),
+            sabr_backoff: StdMutex::new(None),
+            sabr_request_timing: StdMutex::new(SabrRequestTiming::default()),
+            youtube_attestation_timing: StdMutex::new(HashMap::new()),
+        };
+        let referer = HeaderValue::from_str(
+            "http://session1234567890abcdef1234567890.localhost:5000/p/session1234567890abcdef1234567890/profile"
+        ).unwrap();
+        assert_eq!(
+            rewrite_referer(&referer, &session).unwrap(),
+            HeaderValue::from_static("https://example.com/profile")
+        );
+    }
+
+    #[test]
+    fn youtube_stats_euri_rewrites_only_the_session_proxy_page_url() {
+        let session = Session {
+            id: "session1234567890abcdef1234567890".to_owned(),
+            base_url: Url::parse("https://www.youtube.com/start").unwrap(),
+            clients: Mutex::new(UpstreamClientCache::default()),
+            cache: Mutex::new(ResourceCache::default()),
+            gate: Mutex::new(GateState::Waiting),
+            gate_tx: watch::channel(GateState::Waiting).0,
+            cancel_tx: watch::channel(false).0,
+            cancelled: AtomicBool::new(false),
+            events: Mutex::new(VecDeque::new()),
+            policy: AuthorizationPolicy::Standard,
+            rules: Vec::new(),
+            bootstrap_pending: AtomicBool::new(false),
+            last_accessed_ms: AtomicU64::new(0),
+            start_delay_nanos: AtomicU64::new(0),
+            inflight: Arc::new(Semaphore::new(1)),
+            max_inflight: 1,
+            cookie_jar: Arc::new(SessionCookieJar::default()),
+            cookie_tokens: StdMutex::new(HashMap::new()),
+            sabr_backoff: StdMutex::new(None),
+            sabr_request_timing: StdMutex::new(SabrRequestTiming::default()),
+            youtube_attestation_timing: StdMutex::new(HashMap::new()),
+        };
+        let mut url = Url::parse(
+            "https://www.youtube.com/api/stats/watchtime?fmt=398&euri=http%3A%2F%2Fsession1234567890abcdef1234567890.localhost%3A5000%2F"
+        ).unwrap();
+        let (present, rewritten) = rewrite_youtube_stats_euri(&mut url, &session);
+        assert!(present);
+        assert!(rewritten);
+        assert_eq!(
+            url.query_pairs().find(|(name, _)| name == "euri").unwrap().1,
+            "https://www.youtube.com/"
+        );
+        assert_eq!(
+            url.query_pairs().find(|(name, _)| name == "fmt").unwrap().1,
+            "398"
+        );
+
+        let mut external = Url::parse(
+            "https://www.youtube.com/api/stats/qoe?euri=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Dredacted"
+        ).unwrap();
+        let (present, rewritten) = rewrite_youtube_stats_euri(&mut external, &session);
+        assert!(present);
+        assert!(!rewritten);
+    }
+
+    #[test]
+    fn event_targets_redact_url_queries_and_fragments() {
+        assert_eq!(
+            sanitize_event_target(
+                "https://rr2---sn.googlevideo.com/videoplayback?expire=secret&id=secret#fragment".to_owned(),
+                240
+            ),
+            "https://rr2---sn.googlevideo.com/videoplayback"
+        );
+        assert_eq!(
+            sanitize_event_target("/p/session/_/https/www.youtube.com/api/stats/qoe?euri=local#part".to_owned(), 240),
+            "/p/session/_/https/www.youtube.com/api/stats/qoe"
+        );
+        assert_eq!(
+            sanitize_event_target("button.ytp-button.ytp-error-button".to_owned(), 240),
+            "button.ytp-button.ytp-error-button"
+        );
+    }
+
+    #[test]
+    fn standard_policy_allows_only_known_youtube_read_only_post_endpoints() {
+        let session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        for url in [
+            "https://www.youtube.com/youtubei/v1/complete?prettyPrint=false",
+            "https://www.youtube.com/youtubei/v1/search",
+            "https://youtubei.googleapis.com/youtubei/v1/complete",
+            "https://m.youtube.com/youtubei/v1/search",
+        ] {
+            let target = Url::parse(url).unwrap();
+            assert!(
+                !should_hold_request(&session, &Method::POST, &target, false),
+                "{url} should be allowed as a read-only POST"
+            );
+        }
+
+        for url in [
+            "https://www.youtube.com/youtubei/v1/like",
+            "https://www.youtube.com/youtubei/v1/comment/create",
+            "https://other.example/youtubei/v1/complete",
+        ] {
+            let target = Url::parse(url).unwrap();
+            assert!(
+                should_hold_request(&session, &Method::POST, &target, false),
+                "{url} must remain protected"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_policy_allows_youtube_search_document_navigation_without_timer_release() {
+        let session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        let target = Url::parse("https://www.youtube.com/results?search_query=intercept").unwrap();
+        assert!(
+            !should_hold_request(&session, &Method::GET, &target, false),
+            "Standard policy must allow YouTube's GET search navigation"
+        );
+    }
+
+    #[test]
+    fn strict_policy_holds_youtube_search_document_navigation_until_authorized() {
+        let session = policy_test_session(AuthorizationPolicy::Strict, Vec::new());
+        let target = Url::parse("https://www.youtube.com/results?search_query=intercept").unwrap();
+        assert!(should_hold_request(&session, &Method::GET, &target, false));
+    }
+
+    #[test]
+    fn strict_policy_still_holds_youtube_read_only_post_requests() {
+        let session = policy_test_session(AuthorizationPolicy::Strict, Vec::new());
+        let target = Url::parse("https://www.youtube.com/youtubei/v1/complete").unwrap();
+        assert!(should_hold_request(&session, &Method::POST, &target, false));
+    }
+
+    #[test]
+    fn input_event_trace_is_bounded_and_contains_no_input_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-intercept-input-id", HeaderValue::from_static("i1"));
+        headers.insert("x-intercept-input-target", HeaderValue::from_static("input%23search"));
+        assert_eq!(
+            input_event_trace(&headers).as_deref(),
+            Some("input_id=i1 target=input%23search")
+        );
+
+        headers.insert("x-intercept-input-id", HeaderValue::from_static("bad id"));
+        assert!(input_event_trace(&headers).is_none());
+    }
+
+    #[test]
+    fn standard_policy_holds_mutating_methods_but_allows_safe_methods() {
+        let session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        let target = Url::parse("https://example.com/api/items").unwrap();
+        assert!(!should_hold_request(&session, &Method::GET, &target, false));
+        assert!(!should_hold_request(&session, &Method::HEAD, &target, false));
+        assert!(!should_hold_request(&session, &Method::OPTIONS, &target, false));
+        assert!(should_hold_request(&session, &Method::POST, &target, false));
+        assert!(should_hold_request(&session, &Method::DELETE, &target, false));
+    }
+
+    #[test]
+    fn strict_policy_allows_only_the_initial_document_bootstrap() {
+        let session = policy_test_session(AuthorizationPolicy::Strict, Vec::new());
+        let target = Url::parse("https://example.com/start").unwrap();
+        assert!(!should_hold_request(&session, &Method::GET, &target, true));
+        assert!(should_hold_request(&session, &Method::GET, &target, false));
+        assert!(should_hold_request(&session, &Method::POST, &target, true));
+    }
+
+    #[test]
+    fn custom_policy_matches_host_path_and_method_then_falls_back_to_standard() {
+        let session = policy_test_session(
+            AuthorizationPolicy::Custom,
+            vec![AuthorizationRule {
+                host: Some("example.com".to_owned()),
+                path_prefix: "/api/".to_owned(),
+                methods: vec!["GET".to_owned()],
+                hold: true,
+            }],
+        );
+        let api = Url::parse("https://example.com/api/items").unwrap();
+        let other_path = Url::parse("https://example.com/public/items").unwrap();
+        let other_host = Url::parse("https://cdn.example/api/items").unwrap();
+        assert!(should_hold_request(&session, &Method::GET, &api, false));
+        assert!(!should_hold_request(&session, &Method::GET, &other_path, false));
+        assert!(!should_hold_request(&session, &Method::GET, &other_host, false));
+        assert!(should_hold_request(&session, &Method::POST, &api, false));
+    }
+
+    #[test]
+    fn forwards_origin_and_referer_for_upstream_translation() {
+        assert!(!should_skip_request_header(&header::ORIGIN));
+        assert!(!should_skip_request_header(&header::REFERER));
+    }
+
+    #[test]
+    fn accepts_fractional_timer_delays() {
+        assert_eq!(timer_duration(1.25).unwrap(), Duration::from_millis(1250));
+        assert_eq!(timer_duration(0.5).unwrap(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn accepts_maximum_timer_delay() {
+        assert_eq!(
+            timer_duration(MAX_DELAY_SECONDS as f64).unwrap(),
+            Duration::from_secs(MAX_DELAY_SECONDS)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_timer_delays() {
+        for seconds in [
+            0.0,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.000_000_000_1,
+            MAX_DELAY_SECONDS as f64 + 0.1,
+        ] {
+            assert!(timer_duration(seconds).is_err(), "accepted {seconds}");
+        }
+    }
+
+    #[test]
+    fn rejects_private_and_local_destinations() {
+        for value in [
+            "http://127.0.0.1/",
+            "http://192.168.1.10/",
+            "http://10.0.0.4/",
+            "http://localhost/",
+            "http://service.local/",
+            "http://[::1]/",
+        ] {
+            let url = Url::parse(value).unwrap();
+            assert!(!is_public_destination(&url), "{value}");
+        }
+    }
+
+    #[test]
+    fn allows_public_https_hosts() {
+        let url = Url::parse("https://example.com/docs").unwrap();
+        assert!(is_public_destination(&url));
+    }
+
+    #[test]
+    fn rewrites_same_origin_and_external_urls_to_local_session_paths() {
+        let base = Url::parse("https://example.com/account/").unwrap();
+        assert_eq!(
+            rewrite_url(&base, &base, "session123", "../settings?tab=security"),
+            Some("http://session123.localhost:5000/settings?tab=security".to_owned())
+        );
+        assert_eq!(
+            rewrite_url(&base, &base, "session123", "https://cdn.example/image.png"),
+            Some("http://session123.localhost:5000/p/session123/_/https/cdn.example/image.png".to_owned())
+        );
+    }
+
+    #[test]
+    fn session_url_preserves_the_submitted_path_query_and_fragment() {
+        let target = Url::parse("https://example.com/account/settings?tab=security#sessions").unwrap();
+        assert_eq!(
+            local_url(&target, "session123"),
+            "http://session123.localhost:5000/account/settings?tab=security#sessions"
+        );
+    }
+
+    #[test]
+    fn session_url_preserves_root_query_and_fragment() {
+        let target = Url::parse("https://example.com/?mode=compact#top").unwrap();
+        assert_eq!(
+            local_url(&target, "session123"),
+            "http://session123.localhost:5000/?mode=compact#top"
+        );
+    }
+
+
+    #[test]
+    fn cookie_jar_keeps_http_only_cookies_out_of_document_cookie() {
+        let jar = SessionCookieJar::default();
+        let url = Url::parse("https://example.com/consent/index").unwrap();
+        let http_only = HeaderValue::from_static("sid=secret; Domain=example.com; Path=/; HttpOnly; Secure");
+        let visible = HeaderValue::from_static("consent=yes; Domain=example.com; Path=/consent; Secure; SameSite=Lax");
+        let mut headers = [&http_only, &visible].into_iter();
+        reqwest::cookie::CookieStore::set_cookies(&jar, &mut headers, &url);
+        let script_cookie = jar.document_cookie_header(&url);
+        assert!(script_cookie.contains("consent=yes"));
+        assert!(!script_cookie.contains("sid=secret"));
+        let request_cookie = jar.request_cookie_header(&url).unwrap().to_str().unwrap().to_owned();
+        assert!(request_cookie.contains("sid=secret"));
+        assert!(request_cookie.contains("consent=yes"));
+        assert_eq!(jar.document_cookie_header(&Url::parse("https://example.com/other").unwrap()), "");
+    }
+
+    #[test]
+    fn javascript_cookie_bridge_rejects_httponly_and_invalid_host_prefixes() {
+        let jar = SessionCookieJar::default();
+        let url = Url::parse("https://example.com/consent").unwrap();
+        assert!(jar.set_document_cookie("visible=yes; Path=/", &url).is_ok());
+        assert!(jar.set_document_cookie("hidden=yes; HttpOnly", &url).is_err());
+        assert!(jar.set_document_cookie("__Host-bad=yes; Secure; Path=/nested", &url).is_err());
+        assert!(jar.set_document_cookie("__Host-good=yes; Secure; Path=/", &url).is_ok());
+        assert!(jar.document_cookie_header(&url).contains("__Host-good=yes"));
+    }
+
+    #[test]
+    fn javascript_cookie_bridge_ignores_domain_mismatch_like_browser() {
+        let jar = SessionCookieJar::default();
+        let url = Url::parse("https://www.youtube.com/").unwrap();
+
+        // A script may attempt this, but a browser does not let a youtube.com
+        // document write a cookie scoped to an unrelated domain.
+        assert!(jar.set_document_cookie(
+            "third_party=value; Domain=google.example; Path=/",
+            &url
+        ).is_ok());
+        assert_eq!(jar.document_cookie_header(&url), "");
+        assert_eq!(
+            jar.document_cookie_header(&Url::parse("https://google.example/").unwrap()),
+            ""
+        );
+    }
+
+    #[test]
+    fn javascript_cookie_bridge_treats_absent_expired_cookie_as_noop() {
+        let jar = SessionCookieJar::default();
+        let url = Url::parse("https://www.youtube.com/").unwrap();
+
+        assert!(jar.set_document_cookie(
+            "obsolete=; Max-Age=0; Path=/",
+            &url
+        ).is_ok());
+        assert_eq!(jar.document_cookie_header(&url), "");
+    }
+
+    #[test]
+    fn javascript_cookie_bridge_can_delete_an_existing_cookie() {
+        let jar = SessionCookieJar::default();
+        let url = Url::parse("https://www.youtube.com/").unwrap();
+
+        assert!(jar.set_document_cookie("session=active; Path=/", &url).is_ok());
+        assert!(jar.document_cookie_header(&url).contains("session=active"));
+
+        assert!(jar.set_document_cookie(
+            "session=; Max-Age=0; Path=/",
+            &url
+        ).is_ok());
+        assert_eq!(jar.document_cookie_header(&url), "");
+    }
+
+    #[test]
+    fn cookie_bridge_root_paths_use_the_document_capability_origin_after_redirects() {
+        let session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        let token = "0123456789abcdef0123456789abcdef";
+        session.cookie_tokens.lock().unwrap().insert(token.to_owned(), "https://www.youtube.com".to_owned());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-intercept-cookie-token", HeaderValue::from_static(token));
+
+        let capability_origin = cookie_bridge_capability_origin(&session, &headers).unwrap();
+        let target = cookie_bridge_target("/results?search_query=infected+mushroom", &session, &capability_origin).unwrap();
+
+        assert_eq!(target.as_str(), "https://www.youtube.com/results?search_query=infected+mushroom");
+        assert_ne!(target.origin(), session.base_url.origin());
+    }
+
+    #[test]
+    fn cookie_bridge_encoded_secondary_origin_must_match_document_capability() {
+        let session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        let token = "0123456789abcdef0123456789abcdef";
+        session.cookie_tokens.lock().unwrap().insert(token.to_owned(), "https://www.youtube.com".to_owned());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-intercept-cookie-token", HeaderValue::from_static(token));
+        let capability_origin = cookie_bridge_capability_origin(&session, &headers).unwrap();
+
+        let allowed = format!("/p/{}/_/https/www.youtube.com/youtubei/v1/search", session.id);
+        let allowed_url = cookie_bridge_target(&allowed, &session, &capability_origin).unwrap();
+        assert_eq!(allowed_url.origin(), capability_origin.origin());
+
+        let denied = format!("/p/{}/_/https/attacker.example/private", session.id);
+        assert!(cookie_bridge_target(&denied, &session, &capability_origin).is_err());
+    }
+
+    #[test]
+    fn cookie_bridge_capability_is_required_and_bound_to_a_registered_origin() {
+        let session = policy_test_session(AuthorizationPolicy::Standard, Vec::new());
+        let token = "0123456789abcdef0123456789abcdef";
+        session.cookie_tokens.lock().unwrap().insert(token.to_owned(), "https://example.com".to_owned());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-intercept-cookie-token", HeaderValue::from_static(token));
+        let origin = cookie_bridge_capability_origin(&session, &headers).unwrap();
+        assert_eq!(origin.origin().ascii_serialization(), "https://example.com");
+
+        headers.insert("x-intercept-cookie-token", HeaderValue::from_static("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert!(cookie_bridge_capability_origin(&session, &headers).is_err());
+    }
+
+    #[test]
+    fn html_rewriter_catches_svg_and_custom_element_resource_urls() {
+        let base = Url::parse("https://www.youtube.com/").unwrap();
+        let html = r##"<!doctype html><html><head></head><body>
+            <svg><use href="https://www.gstatic.com/youtube/img/icons/web/youtube_fill/yt-logo-updated/v3/24px.svg#logo"></use></svg>
+            <svg><image href="https://www.gstatic.com/youtube/img/icons/web/youtube_fill/offline_no_content/v1/192px.svg"></image></svg>
+            <yt-icon href="https://youtube.com/"></yt-icon>
+        </body></html>"##;
+        let output = rewrite_html(
+            html,
+            &base,
+            &base,
+            "session123",
+            "",
+            "0123456789abcdef0123456789abcdef",
+        ).unwrap();
+
+        assert!(output.contains(
+            "http://session123.localhost:5000/p/session123/_/https/www.gstatic.com/youtube/img/icons/web/youtube_fill/yt-logo-updated/v3/24px.svg#logo"
+        ));
+        assert!(output.contains(
+            "http://session123.localhost:5000/p/session123/_/https/www.gstatic.com/youtube/img/icons/web/youtube_fill/offline_no_content/v1/192px.svg"
+        ));
+        assert!(output.contains(
+            "http://session123.localhost:5000/p/session123/_/https/youtube.com/"
+        ));
+    }
+
+    #[test]
+    fn html_rewriter_injects_controller_and_styles() {
+        let base = Url::parse("https://example.com/").unwrap();
+        let html = r#"<!doctype html><html><head></head><body></body></html>"#;
+        let result = rewrite_html(html, &base, &base, "session123", "consent=yes", "0123456789abcdef0123456789abcdef").unwrap();
+        assert!(result.contains("data-intercept-controller"));
+        assert!(result.contains("/assets/controller.js"));
+        assert!(result.contains("/assets/intercept.css"));
+        assert!(result.contains("data-session=\"session123\""));
+    }
+
+    #[test]
+    fn html_controller_injection_handles_pages_without_head_or_body() {
+        let base = Url::parse("https://example.com/").unwrap();
+        let html = r#"<!doctype html><html><main>fragment</main></html>"#;
+        let result = rewrite_html(html, &base, &base, "session123", "consent=yes", "0123456789abcdef0123456789abcdef").unwrap();
+        assert!(result.contains("data-intercept-controller"));
+        assert!(result.contains("/assets/controller.js"));
+    }
+
+    #[test]
+    fn fallback_controller_injection_preserves_an_existing_csp_nonce() {
+        let result = ensure_controller_bootstrap(
+            r#"<html><head><script nonce="abc123">boot()</script></head><body>page</body></html>"#,
+            "session123",
+            "https://example.com",
+            "consent=yes",
+            "0123456789abcdef0123456789abcdef",
+        );
+        assert!(result.contains(r#"nonce="abc123""#));
+        assert!(result.contains("data-intercept-controller"));
+    }
+
+    #[test]
+    fn rewrites_external_resources_inside_css() {
+        let base = Url::parse("https://example.com/css/site.css").unwrap();
+        let output = rewrite_css(
+            "body { background: url('../images/bg.png') } @import url('https://cdn.example/theme.css');",
+            &base,
+            &Url::parse("https://example.com/").unwrap(),
+            "session123",
+        ).unwrap();
+        assert!(output.contains("/images/bg.png"));
+        assert!(output.contains("/p/session123/_/https/cdn.example/theme.css"));
+    }
+
+
+    #[test]
+    fn injects_worker_fetch_and_xhr_routing_bootstrap() {
+        let base = Url::parse("https://example.com/worker.js").unwrap();
+        let output = rewrite_worker_javascript(
+            "self.onmessage = () => fetch('/api/data');",
+            &base,
+            &Url::parse("https://example.com/").unwrap(),
+            "session123",
+        ).unwrap();
+        assert!(output.contains("X-Intercept-Proxy-Mode"));
+        assert!(output.contains("XMLHttpRequest"));
+        assert!(output.contains("importScripts"));
+        assert!(output.contains("X-Intercept-Playback-Context-Id"));
+        assert!(output.contains("__interceptPlaybackContext"));
+        assert!(output.contains("acceptPlaybackContext"));
+        assert!(output.contains("if(url.origin===primaryOrigin)return path;"));
+    }
+
+    #[test]
+    fn rewrites_external_redirects_through_the_session() {
+        let current = Url::parse("https://example.com/start").unwrap();
+        let primary = Url::parse("https://example.com/").unwrap();
+        assert_eq!(
+            rewrite_location("https://accounts.example/login", &current, &primary, "session123"),
+            "http://session123.localhost:5000/p/session123/_/https/accounts.example/login"
+        );
+    }
+
+    #[test]
+    fn rewrites_meta_csp_and_removes_strict_dynamic_for_the_session_controller() {
+        let base = Url::parse("https://example.com/").unwrap();
+        let html = r#"<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="script-src 'nonce-abc' 'strict-dynamic' https://cdn.example; default-src 'self'"></head><body></body></html>"#;
+        let result = rewrite_html(html, &base, &base, "session123", "consent=yes", "0123456789abcdef0123456789abcdef").unwrap();
+        assert!(result.contains("script-src 'nonce-abc'"));
+        assert!(!result.contains("'strict-dynamic'"));
+        assert!(result.contains("http://session123.localhost:5000"));
+    }
+
+    
+
+    #[test]
+    fn authority_frame_cooperates_with_cross_origin_isolated_parent() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cross-origin-resource-policy",
+            HeaderValue::from_static("cross-origin"),
+        );
+        headers.insert(
+            "cross-origin-embedder-policy",
+            HeaderValue::from_static("require-corp"),
+        );
+        assert_eq!(
+            headers.get("cross-origin-resource-policy").unwrap(),
+            "cross-origin"
+        );
+        assert_eq!(
+            headers.get("cross-origin-embedder-policy").unwrap(),
+            "require-corp"
+        );
+    }
+
+    #[test]
+    fn fallback_meta_csp_rewrite_handles_attribute_order_and_single_quotes() {
+        let html = "<meta content='default-src &#39;none&#39;; script-src https://cdn.example' HTTP-EQUIV='content-security-policy'>";
+        let output = rewrite_meta_csp_tags(html, "0123456789abcdef0123456789abcdef");
+        assert!(output.contains("default-src"));
+        assert!(output.contains("http://0123456789abcdef0123456789abcdef.localhost:5000"));
+        assert!(output.contains("style-src &#39;unsafe-inline&#39;"));
+        assert!(!output.contains("https://cdn.example"));
+    }
+
+    #[test]
+    fn csp_rewrite_allows_inline_styles_when_only_default_src_is_present() {
+        let output = rewrite_csp(
+            "default-src http://upstream.example",
+            "session1234567890abcdef1234567890",
+        );
+        assert!(output.contains("style-src 'unsafe-inline' http://session1234567890abcdef1234567890.localhost:5000"));
+        assert!(output.contains("default-src http://session1234567890abcdef1234567890.localhost:5000"));
+    }
+
+    #[test]
+    fn csp_rewrite_allows_inline_styles_in_explicit_style_directives() {
+        let output = rewrite_csp(
+            "default-src 'self'; style-src 'self'; style-src-elem 'self'",
+            "session1234567890abcdef1234567890",
+        );
+        let style_src = output.split(';').find(|part| part.trim_start().starts_with("style-src ")).unwrap();
+        let style_elem = output.split(';').find(|part| part.trim_start().starts_with("style-src-elem ")).unwrap();
+        assert!(style_src.contains("'unsafe-inline'"));
+        assert!(style_elem.contains("'unsafe-inline'"));
+    }
+
+    #[test]
+    fn csp_rewrite_allows_the_named_trusted_types_script_url_policy() {
+        let output = rewrite_csp(
+            "require-trusted-types-for 'script'; trusted-types youtube lit-html",
+            "session123",
+        );
+        let directive = output.split(';')
+            .find(|part| part.trim_start().starts_with("trusted-types "))
+            .expect("trusted-types directive should remain");
+        assert!(directive.split_whitespace().any(|value| value == "youtube"));
+        assert!(directive.split_whitespace().any(|value| value == "lit-html"));
+        assert!(directive.split_whitespace().any(|value| value == "intercept-proxy"));
+        assert!(!directive.contains("*"));
+    }
+
+    #[test]
+    fn csp_rewrite_replaces_a_none_trusted_types_allowlist_with_intercept_policy() {
+        let output = rewrite_csp(
+            "trusted-types 'none'; require-trusted-types-for 'script'",
+            "session123",
+        );
+        let directive = output.split(';')
+            .find(|part| part.trim_start().starts_with("trusted-types "))
+            .expect("trusted-types directive should remain");
+        assert!(directive.split_whitespace().any(|value| value == "intercept-proxy"));
+        assert!(!directive.contains("'none'"));
+    }
+
+    #[test]
+    fn csp_rewrite_preserves_nonce_policy_without_strict_dynamic() {
+        let output = rewrite_csp("script-src 'nonce-abc' 'strict-dynamic' https://cdn.example", "session123");
+        assert!(output.contains("'nonce-abc'"));
+        assert!(!output.contains("'strict-dynamic'"));
+        assert!(output.contains("http://session123.localhost:5000"));
+    }
+
+    #[test]
+    fn rewrites_external_origins_in_csp_to_local_proxy_origin() {
+        let policy = "default-src 'self' https://cdn.example; img-src https://images.example";
+        let output = rewrite_csp(policy, "session1234567890abcdef1234567890");
+        assert!(output.contains("default-src 'self' http://session1234567890abcdef1234567890.localhost:5000"));
+        assert!(output.contains("img-src http://session1234567890abcdef1234567890.localhost:5000"));
+    }
+
+    #[test]
+    fn namespaces_external_origins_in_proxy_paths() {
+        let primary = Url::parse("https://example.com/").unwrap();
+        let external = Url::parse("https://cdn.example:8443/a.js").unwrap();
+        assert_eq!(
+            proxy_url(&external, &primary, "session123"),
+            "http://session123.localhost:5000/p/session123/_/https/cdn.example:8443/a.js"
+        );
+    }
+    #[test]
+    fn dashboard_accepts_both_loopback_hostnames_and_matches_origins() {
+        assert_eq!(
+            dashboard_origin_for_host("127.0.0.1:5000"),
+            Some("http://127.0.0.1:5000")
+        );
+        assert_eq!(
+            dashboard_origin_for_host("localhost:5000"),
+            Some("http://localhost:5000")
+        );
+        assert!(is_dashboard_host("LOCALHOST:5000"));
+        assert!(dashboard_origin_matches_host(
+            "localhost:5000",
+            "http://localhost:5000"
+        ));
+        assert!(dashboard_origin_matches_host(
+            "127.0.0.1:5000",
+            "http://127.0.0.1:5000"
+        ));
+        assert!(!dashboard_origin_matches_host(
+            "localhost:5000",
+            "http://127.0.0.1:5000"
+        ));
+        assert!(!dashboard_origin_matches_host(
+            "127.0.0.1:5000",
+            "http://localhost:5000"
+        ));
+        assert!(!is_dashboard_host("example.com:5000"));
+    }
+}
+
+#[cfg(test)]
+mod ump_stream_diagnostics_tests {
+    use super::{
+        decode_next_request_policy, decode_sabr_request_metadata,
+        decode_stream_protection_status, observe_sabr_backoff,
+        mark_sabr_response_complete, observe_sabr_request_gap,
+        Duration, Instant, SabrBackoffWindow, SabrRequestParseState, SabrRequestTiming,
+        YouTubeAttestationTiming, YouTubeAttestationResponseMetadata,
+        YouTubeSabrAttestationRequestSnapshot, youtube_attestation_age_band,
+        youtube_playback_context_id_from_value, UmpStreamDiagnostics, event_detail_limit, clean_field,
+    };
+
+    #[test]
+    fn playback_context_header_requires_a_lowercase_uuid_shape() {
+        assert!(youtube_playback_context_id_from_value(
+            "cc94b161-2abf-4e62-9b31-e393ff753cc8"
+        ));
+        assert!(!youtube_playback_context_id_from_value(
+            "cc94b161-2abf-4e62-9b31-e393ff753CC8"
+        ));
+        assert!(!youtube_playback_context_id_from_value("unscoped"));
+        assert!(!youtube_playback_context_id_from_value(
+            "cc94b161-2abf-4e62-9b31-e393ff753cc8-extra"
+        ));
+    }
+
+    #[test]
+    fn sabr_attestation_context_retains_response_fields_past_default_event_limit() {
+        let detail = format!("{}last_rpc_response_status=200 last_rpc_response_ago_ms=42", "x".repeat(300));
+        let stored = clean_field(detail, event_detail_limit("youtube_sabr_attestation_context"));
+        assert!(stored.len() > 300);
+        assert!(stored.ends_with("last_rpc_response_status=200 last_rpc_response_ago_ms=42"));
+
+        let watchdog = clean_field("x".repeat(1_500), event_detail_limit("youtube_player_watchdog"));
+        assert_eq!(watchdog.len(), 1_100);
+
+        let player_state = clean_field("x".repeat(1_500), event_detail_limit("youtube_player_state"));
+        assert_eq!(player_state.len(), 1_100);
+
+        let media_mutation = clean_field("x".repeat(1_500), event_detail_limit("youtube_player_media_mutation"));
+        assert_eq!(media_mutation.len(), 1_100);
+
+        let ordinary = clean_field("x".repeat(400), event_detail_limit("ajax_response"));
+        assert_eq!(ordinary.len(), 300);
+    }
+
+    #[test]
+    fn sabr_completion_event_preserves_full_ump_payload_totals() {
+        let diagnostics = UmpStreamDiagnostics {
+            total_parts: 11,
+            total_payload_bytes: 260_109,
+            part_counts: std::collections::BTreeMap::from([
+                (20, 2), (21, 2), (22, 2), (35, 1), (47, 1), (52, 1), (53, 1),
+            ]),
+            part_payload_bytes: std::collections::BTreeMap::from([
+                (20, 154), (21, 259_839), (22, 2), (35, 82),
+                (47, 12), (52, 8), (53, 12),
+            ]),
+            ..UmpStreamDiagnostics::default()
+        };
+        let detail = format!(
+            "rid={} outcome=complete response_bytes=260137 · {}",
+            "a".repeat(32),
+            diagnostics.summary(),
+        );
+        let stored = clean_field(
+            detail,
+            event_detail_limit("youtube_sabr_response_stream_complete"),
+        );
+        assert!(stored.contains("total_parts=11"), "{stored}");
+        assert!(stored.contains("part_count_sum=10"), "{stored}");
+        assert!(stored.contains("part_count_mismatch=true"), "{stored}");
+        assert!(stored.contains("total_payload_bytes=260109"), "{stored}");
+        assert!(stored.contains("part_payload_sum=260109"), "{stored}");
+        assert!(stored.contains("payload_sum_mismatch=false"), "{stored}");
+        assert!(stored.contains("media_payload_bytes=259839"), "{stored}");
+        assert!(stored.contains("malformed=false"), "{stored}");
+    }
+
+    #[test]
+    fn correlates_latest_waa_response_metadata_with_following_sabr_po_presence() {
+        let observed_at = Instant::now();
+        let mut timing = YouTubeAttestationTiming::default();
+        let refresh = timing.observe_proxy_response(
+            "GenerateIT",
+            Some("mwl4oib2-1-wu4yb4"),
+            200,
+            YouTubeAttestationResponseMetadata {
+                content_type: "application/json".to_owned(),
+                content_length: "512".to_owned(),
+                content_encoding: "identity".to_owned(),
+            },
+            observed_at,
+            observed_at,
+        );
+        assert!(refresh.is_none());
+        let snapshot = timing.snapshot(observed_at + Duration::from_millis(37));
+        assert_eq!(snapshot.last_rpc_response_operation, Some("GenerateIT"));
+        assert_eq!(
+            snapshot.last_rpc_response_correlation_id.as_deref(),
+            Some("mwl4oib2-1-wu4yb4")
+        );
+        assert_eq!(snapshot.last_rpc_response_status, Some(200));
+        assert_eq!(snapshot.last_rpc_response_content_type.as_deref(), Some("application/json"));
+        assert_eq!(snapshot.last_rpc_response_content_length.as_deref(), Some("512"));
+        assert_eq!(snapshot.last_rpc_response_content_encoding.as_deref(), Some("identity"));
+        assert_eq!(snapshot.last_rpc_response_ago_ms, Some(37));
+
+        // StreamerContext.poToken is measured by length only. Its bytes are
+        // intentionally opaque and never appear in the diagnostic summary.
+        let body = [
+            0x9a, 0x01, 0x06, // VideoPlaybackAbrRequest.streamerContext
+            0x12, 0x04, 0xaa, 0xbb, 0xcc, 0xdd, // poToken
+        ];
+        let metadata = decode_sabr_request_metadata(&body, None);
+        assert_eq!(metadata.parse_state, Some(SabrRequestParseState::Ok));
+        assert_eq!(metadata.po_token_bytes, Some(4));
+        assert!(metadata.summary().contains("po=present:4"));
+        assert!(!metadata.summary().contains("aabbccdd"));
+    }
+
+    #[test]
+    fn attestation_age_bands_are_diagnostic_buckets_not_expiry_decisions() {
+        assert_eq!(youtube_attestation_age_band(None), "unobserved");
+        assert_eq!(youtube_attestation_age_band(Some(29_999)), "recent");
+        assert_eq!(youtube_attestation_age_band(Some(30_000)), "aging");
+        assert_eq!(youtube_attestation_age_band(Some(59_999)), "aging");
+        assert_eq!(youtube_attestation_age_band(Some(60_000)), "old");
+    }
+
+    #[test]
+    fn correlates_generateit_refresh_and_media_recovery_after_status3() {
+        let start = Instant::now();
+        let mut timing = YouTubeAttestationTiming::default();
+        let old_request = YouTubeSabrAttestationRequestSnapshot {
+            operation: Some("GenerateIT"),
+            correlation_id: Some("waa-old".to_owned()),
+            response_status: Some(200),
+            response_age_ms: Some(75_844),
+            po_present: true,
+            pc_present: true,
+        };
+
+        timing.observe_sabr_status3("sabr-status3", &old_request, start);
+        let old_media = timing.observe_sabr_media_after_status3(
+            &old_request,
+            2,
+            100_000,
+            start + Duration::from_millis(100),
+        ).expect("media after status 3 is diagnostically relevant");
+        assert!(!old_media.new_generate_it_after_status3);
+        assert_eq!(old_media.status3_request_id, "sabr-status3");
+
+        let request_started_at = start + Duration::from_millis(1_000);
+        let request_observation = timing.observe_proxy_request(
+            "GenerateIT",
+            Some("waa-new"),
+            request_started_at,
+        ).expect("GenerateIT request should be observed after status 3");
+        assert_eq!(request_observation.status3_relation, "after");
+        assert_eq!(request_observation.status3_request_id.as_deref(), Some("sabr-status3"));
+        assert_eq!(request_observation.elapsed_since_status3_request_ms, Some(1_000));
+
+        let refresh = timing.observe_proxy_response(
+            "GenerateIT",
+            Some("waa-new"),
+            200,
+            YouTubeAttestationResponseMetadata {
+                content_type: "application/json+protobuf".to_owned(),
+                content_length: "absent".to_owned(),
+                content_encoding: "absent".to_owned(),
+            },
+            request_started_at,
+            start + Duration::from_millis(2_000),
+        ).expect("new GenerateIT request and response after status 3");
+        assert_eq!(refresh.status3_request_id, "sabr-status3");
+        assert_eq!(refresh.status3_waa_id.as_deref(), Some("waa-old"));
+        assert_eq!(refresh.correlation_id.as_deref(), Some("waa-new"));
+        assert!(refresh.correlation_changed);
+        assert_eq!(refresh.elapsed_since_status3_request_ms, 1_000);
+        assert_eq!(refresh.request_to_response_ms, 1_000);
+
+        let refreshed_request = YouTubeSabrAttestationRequestSnapshot {
+            operation: Some("GenerateIT"),
+            correlation_id: Some("waa-new".to_owned()),
+            response_status: Some(200),
+            response_age_ms: Some(250),
+            po_present: true,
+            pc_present: true,
+        };
+        let recovery = timing.observe_sabr_media_after_status3(
+            &refreshed_request,
+            2,
+            250_000,
+            start + Duration::from_millis(3_000),
+        ).expect("media associated with refreshed GenerateIT response");
+        assert!(recovery.new_generate_it_after_status3);
+        assert_eq!(recovery.current_waa_id.as_deref(), Some("waa-new"));
+        assert_eq!(recovery.current_waa_age_ms, Some(250));
+        assert_eq!(recovery.media_payload_bytes, 250_000);
+        assert_eq!(recovery.elapsed_since_status3_ms, 3_000);
+        assert!(recovery.po_present);
+        assert!(recovery.pc_present);
+    }
+
+    #[test]
+    fn reports_generateit_request_context_when_status3_is_missing_or_not_yet_observed() {
+        let start = Instant::now();
+        let mut timing = YouTubeAttestationTiming::default();
+
+        let unscoped = timing.observe_proxy_request("GenerateIT", Some("waa-none"), start)
+            .expect("all GenerateIT requests should have a context diagnostic");
+        assert_eq!(unscoped.status3_relation, "none");
+        assert_eq!(unscoped.status3_request_id, None);
+
+        let status3_request = YouTubeSabrAttestationRequestSnapshot {
+            operation: Some("GenerateIT"),
+            correlation_id: Some("waa-status3".to_owned()),
+            response_status: Some(200),
+            response_age_ms: Some(40_000),
+            po_present: true,
+            pc_present: true,
+        };
+        timing.observe_sabr_status3("sabr-status3", &status3_request, start + Duration::from_millis(500));
+        let request_before_status3 = timing.observe_proxy_request(
+            "GenerateIT",
+            Some("waa-before"),
+            start + Duration::from_millis(250),
+        ).expect("request context should be observed");
+        assert_eq!(request_before_status3.status3_relation, "before");
+        assert_eq!(request_before_status3.status3_request_id.as_deref(), Some("sabr-status3"));
+        assert_eq!(request_before_status3.elapsed_since_status3_request_ms, None);
+    }
+
+    #[test]
+    fn does_not_count_generateit_request_started_before_status3_as_refresh() {
+        let start = Instant::now();
+        let mut timing = YouTubeAttestationTiming::default();
+        let status3_request = YouTubeSabrAttestationRequestSnapshot {
+            operation: Some("GenerateIT"),
+            correlation_id: Some("waa-before".to_owned()),
+            response_status: Some(200),
+            response_age_ms: Some(42_000),
+            po_present: true,
+            pc_present: true,
+        };
+        timing.observe_sabr_status3(
+            "sabr-status3",
+            &status3_request,
+            start + Duration::from_millis(1_000),
+        );
+
+        let in_flight_before_status3 = timing.observe_proxy_response(
+            "GenerateIT",
+            Some("waa-before-status3-request"),
+            200,
+            YouTubeAttestationResponseMetadata {
+                content_type: "application/json+protobuf".to_owned(),
+                content_length: "absent".to_owned(),
+                content_encoding: "absent".to_owned(),
+            },
+            start + Duration::from_millis(500),
+            start + Duration::from_millis(2_000),
+        );
+        assert!(
+            in_flight_before_status3.is_none(),
+            "a response completing after status 3 must not qualify if its request began before status 3"
+        );
+
+        let after_status3 = timing.observe_proxy_request(
+            "GenerateIT",
+            Some("waa-after-status3-request"),
+            start + Duration::from_millis(2_500),
+        ).expect("request received after status 3 should be marked");
+        assert_eq!(after_status3.status3_relation, "after");
+        assert_eq!(after_status3.status3_request_id.as_deref(), Some("sabr-status3"));
+        assert_eq!(after_status3.elapsed_since_status3_request_ms, Some(1_500));
+    }
+
+    #[test]
+    fn parses_parts_across_arbitrary_chunk_boundaries() {
+        let frame = [21, 3, 0, 1, 2, 22, 1, 0];
+        let mut diagnostics = UmpStreamDiagnostics::default();
+        diagnostics.feed(&frame[..2]);
+        diagnostics.feed(&frame[2..6]);
+        diagnostics.feed(&frame[6..]);
+        let summary = diagnostics.summary();
+        assert!(summary.contains("MEDIA:1/3B"));
+        assert!(summary.contains("MEDIA_END:1/1B"));
+        assert!(summary.contains("media_payload_bytes=3"));
+        assert!(summary.contains("ump_framing_bytes=4"));
+        assert!(summary.contains("ump_accounted_bytes=8"));
+        assert!(summary.contains("frame_complete=true"));
+        assert!(summary.contains("malformed=false"));
+    }
+
+    #[test]
+    fn decodes_stream_protection_status_and_optional_retry_count() {
+        let status_only = decode_stream_protection_status(&[0x08, 0x02]).unwrap();
+        assert_eq!(status_only.status, Some(2));
+        assert_eq!(status_only.max_retries, None);
+
+        let with_retries =
+            decode_stream_protection_status(&[0x08, 0x02, 0x10, 0x00]).unwrap();
+        assert_eq!(with_retries.status, Some(2));
+        assert_eq!(with_retries.max_retries, Some(0));
+
+        let attestation_required =
+            decode_stream_protection_status(&[0x08, 0x03, 0x10, 0x0a]).unwrap();
+        assert_eq!(attestation_required.status, Some(3));
+        assert_eq!(attestation_required.max_retries, Some(10));
+    }
+
+    #[test]
+    fn decodes_next_request_policy_timing_fields_and_skips_opaque_fields() {
+        // target_audio_readahead_ms=100, backoff_time_ms=500,
+        // followed by length-delimited playbackCookie and videoId fields.
+        let policy = decode_next_request_policy(&[
+            0x08, 0x64, 0x20, 0xf4, 0x03,
+            0x3a, 0x02, 0xaa, 0xbb,
+            0x42, 0x03, b'v', b'i', b'd',
+        ]).unwrap();
+        assert_eq!(policy.target_audio_readahead_ms, Some(100));
+        assert_eq!(policy.backoff_time_ms, Some(500));
+        assert_eq!(policy.target_video_readahead_ms, None);
+    }
+
+    #[test]
+    fn includes_decoded_protection_and_policy_fields_in_ump_summary() {
+        let mut frame = vec![58, 4, 0x08, 0x02, 0x10, 0x00];
+        frame.extend_from_slice(&[35, 5, 0x08, 0x64, 0x20, 0xf4, 0x03]);
+        let mut diagnostics = UmpStreamDiagnostics::default();
+        diagnostics.feed(&frame[..4]);
+        diagnostics.feed(&frame[4..]);
+        let summary = diagnostics.summary();
+        assert!(summary.contains("stream_protection_status=status:2,max_retries:0"));
+        assert!(summary.contains("target_audio_readahead_ms:100"));
+        assert!(summary.contains("backoff_time_ms:500"));
+        assert!(summary.contains("frame_complete=true"));
+    }
+
+    #[test]
+    fn compact_policy_diagnostic_preserves_decoded_scalars_under_event_limit() {
+        let mut frame = vec![58, 4, 0x08, 0x02, 0x10, 0x00];
+        frame.extend_from_slice(&[
+            35, 13,
+            0x08, 100,
+            0x10, 0xc8, 0x01,
+            0x18, 30,
+            0x20, 5,
+            0x28, 10,
+            0x30, 20,
+        ]);
+        let mut diagnostics = UmpStreamDiagnostics::default();
+        diagnostics.feed(&frame);
+
+        let detail = diagnostics.policy_diagnostic(
+            "0123456789abcdef0123456789abcdef",
+            "complete",
+        );
+        assert!(detail.len() < 300, "diagnostic detail was {} bytes", detail.len());
+        assert!(detail.contains("sps=status:2,retry:0"));
+        assert!(detail.contains("nrp=ta:100,tv:200,max:30,bo:5,mina:10,minv:20"));
+        assert!(detail.contains("decode_err=sps:0,nrp:0"));
+        assert!(detail.contains("malformed=false frame=true"));
+    }
+
+    #[test]
+    fn scans_sabr_request_streamer_context_without_retaining_token_bytes() {
+        // VideoPlaybackAbrRequest field 19 => StreamerContext.
+        // StreamerContext fields: clientInfo=1, poToken=2, playbackCookie=3.
+        let body = [
+            0x9a, 0x01, 0x0d,
+            0x0a, 0x00,
+            0x12, 0x04, 0xaa, 0xbb, 0xcc, 0xdd,
+            0x1a, 0x03, 0x11, 0x22, 0x33,
+        ];
+        let metadata = decode_sabr_request_metadata(&body, None);
+        assert_eq!(metadata.parse_state, Some(SabrRequestParseState::Ok));
+        assert!(metadata.streamer_context_present);
+        assert!(metadata.client_info_present);
+        assert_eq!(metadata.po_token_bytes, Some(4));
+        assert_eq!(metadata.playback_cookie_bytes, Some(3));
+
+        let summary = metadata.summary();
+        assert!(summary.contains("po=present:4"));
+        assert!(summary.contains("pc=present:3"));
+        assert!(!summary.contains("aabbccdd"));
+    }
+
+    #[test]
+    fn sabr_request_scanner_distinguishes_missing_context_and_unsupported_encoding() {
+        let no_context = decode_sabr_request_metadata(&[0x10, 0x00], None);
+        assert_eq!(no_context.parse_state, Some(SabrRequestParseState::Ok));
+        assert!(!no_context.streamer_context_present);
+        assert_eq!(no_context.po_token_bytes, None);
+
+        let compressed = decode_sabr_request_metadata(&[0x9a, 0x01], Some("gzip"));
+        assert_eq!(compressed.parse_state, Some(SabrRequestParseState::UnsupportedEncoding));
+        assert_eq!(compressed.po_token_bytes, None);
+    }
+
+    #[test]
+    fn sabr_request_scanner_reports_truncated_nested_fields() {
+        // StreamerContext length is complete, but poToken claims five bytes and has one.
+        let body = [0x9a, 0x01, 0x03, 0x12, 0x05, 0xaa];
+        let metadata = decode_sabr_request_metadata(&body, None);
+        assert_eq!(metadata.parse_state, Some(SabrRequestParseState::Truncated));
+    }
+
+    #[test]
+    fn sabr_request_gap_distinguishes_request_and_completed_response_spacing() {
+        let start = Instant::now();
+        let mut timing = SabrRequestTiming::default();
+
+        let first = observe_sabr_request_gap(&mut timing, start);
+        assert_eq!(first.since_previous_request_ms, None);
+        assert_eq!(first.since_previous_response_ms, None);
+
+        mark_sabr_response_complete(&mut timing, start + Duration::from_millis(100));
+        let second_at = start + Duration::from_millis(145);
+        let second = observe_sabr_request_gap(&mut timing, second_at);
+        assert_eq!(second.since_previous_request_ms, Some(145));
+        assert_eq!(second.since_previous_response_ms, Some(45));
+    }
+
+    #[test]
+    fn attestation_timing_snapshot_reports_never_seen_and_last_proxy_request() {
+        let start = Instant::now();
+        let mut timing = YouTubeAttestationTiming::default();
+
+        let never_seen = timing.snapshot(start);
+        assert_eq!(never_seen.proxy_request_count, 0);
+        assert_eq!(never_seen.last_operation, None);
+        assert_eq!(never_seen.last_correlation_id, None);
+        assert_eq!(never_seen.last_request_ago_ms, None);
+        assert_eq!(never_seen.att_get_request_count, 0);
+        assert_eq!(never_seen.last_att_get_correlation_id, None);
+        assert_eq!(never_seen.last_att_get_request_ago_ms, None);
+        assert_eq!(never_seen.att_log_request_count, 0);
+        assert_eq!(never_seen.last_att_log_correlation_id, None);
+        assert_eq!(never_seen.last_att_log_request_ago_ms, None);
+
+        let request_context = timing.observe_proxy_request("GenerateIT", Some("mwl2lpxu-1"), start)
+            .expect("GenerateIT request context");
+        assert_eq!(request_context.status3_relation, "none");
+        timing.observe_proxy_resource_request("AttGet", Some("attget-1"), start + Duration::from_millis(25));
+        timing.observe_proxy_resource_request("AttLog", Some("attlog-1"), start + Duration::from_millis(50));
+        let observed = timing.snapshot(start + Duration::from_millis(125));
+        assert_eq!(observed.proxy_request_count, 1);
+        assert_eq!(observed.last_operation, Some("GenerateIT"));
+        assert_eq!(observed.last_correlation_id.as_deref(), Some("mwl2lpxu-1"));
+        assert_eq!(observed.last_request_ago_ms, Some(125));
+        assert_eq!(observed.att_get_request_count, 1);
+        assert_eq!(observed.last_att_get_correlation_id.as_deref(), Some("attget-1"));
+        assert_eq!(observed.last_att_get_request_ago_ms, Some(100));
+        assert_eq!(observed.att_log_request_count, 1);
+        assert_eq!(observed.last_att_log_correlation_id.as_deref(), Some("attlog-1"));
+        assert_eq!(observed.last_att_log_request_ago_ms, Some(75));
+    }
+
+    #[test]
+    fn sabr_backoff_observation_compares_elapsed_time_to_server_policy() {
+        let now = Instant::now();
+        let pending = SabrBackoffWindow {
+            backoff_ms: 2_000,
+            policy_observed_at: now - Duration::from_millis(1_999),
+        };
+        let early = observe_sabr_backoff(pending, now);
+        assert_eq!(early.elapsed_ms, 1_999);
+        assert_eq!(early.remaining_ms, 1);
+        assert!(!early.satisfied);
+
+        let after = observe_sabr_backoff(
+            pending,
+            now + Duration::from_millis(2),
+        );
+        assert_eq!(after.elapsed_ms, 2_001);
+        assert_eq!(after.remaining_ms, 0);
+        assert!(after.satisfied);
+    }
+
+    #[test]
+    fn decodes_extended_length_varints() {
+        let mut frame = vec![20, 0x82, 0x02];
+        frame.extend(std::iter::repeat_n(0, 130));
+        let mut diagnostics = UmpStreamDiagnostics::default();
+        diagnostics.feed(&frame);
+        let summary = diagnostics.summary();
+        assert!(summary.contains("MEDIA_HEADER:1/130B"));
+        assert!(summary.contains("frame_complete=true"));
+    }
+
+    #[test]
+    fn reports_incomplete_payload_without_buffering_the_payload() {
+        let mut diagnostics = UmpStreamDiagnostics::default();
+        diagnostics.feed(&[21, 5, 0, 1]);
+        let summary = diagnostics.summary();
+        assert!(summary.contains("MEDIA:1/5B"));
+        assert!(summary.contains("frame_complete=false"));
+        assert!(summary.contains("payload_remaining=3"));
+    }
+}
+
+                || ch == '_'
+                || ch.is_ascii_alphanumeric() && (index > 0 || !ch.is_ascii_digit())
+        })
+    {
+        first_parameter.to_owned()
+    } else {
+        "this".to_owned()
+    };
+    let hook = format!(
+        r#"typeof window!=="undefined"&&window.__interceptRecordSabrRecovery&&window.__interceptRecordSabrRecovery("{phase}",{{controller_owner_present:!!({owner}&&typeof {owner}==="object"),controller_active:!!({owner}&&{owner}.K),token_generation_pending:!!({owner}&&{owner}.C),release_pending:!!({owner}&&{owner}.D)}});"#
+    );
+    source.insert_str(body_open + 1, &hook);
+    true
+}
+
+fn inject_youtube_recovery_function_entry(
+    source: &mut String,
+    marker: &str,
+    phase: &str,
+) -> bool {
+    let Some(start) = source.find(marker) else {
+        return false;
+    };
+    inject_youtube_recovery_function_entry_at(source, start, phase)
+}
+
+fn inject_youtube_recovery_class_method_entry(
+    source: &mut String,
+    class_marker: &str,
+    method_marker: &str,
+    phase: &str,
+) -> bool {
+    let Some(class_start) = source.find(class_marker) else {
+        return false;
+    };
+    let Some(method_rel) = source[class_start..].find(method_marker) else {
+        return false;
+    };
+    inject_youtube_recovery_function_entry_at(source, class_start + method_rel, phase)
+}
+
 fn instrument_youtube_sabr_recovery(source: &str) -> String {
     let mut instrumented = source.to_owned();
+
+    let controller_init_hook = inject_youtube_recovery_function_entry(
+        &mut instrumented,
+        "F0a=function",
+        "token_controller_init_enter",
+    );
+    let controller_start_hook = inject_youtube_recovery_function_entry(
+        &mut instrumented,
+        "iT=function",
+        "token_controller_start_enter",
+    );
+    let controller_dispose_hook = inject_youtube_recovery_function_entry(
+        &mut instrumented,
+        "Upb.prototype.ka=function",
+        "token_controller_dispose_enter",
+    ) || inject_youtube_recovery_class_method_entry(
+        &mut instrumented,
+        "Upb=class",
+        "ka()",
+        "token_controller_dispose_enter",
+    );
 
     let spsumpreject_hook = replace_youtube_recovery_source_once(
         &mut instrumented,
