@@ -10,6 +10,21 @@ const inFlight = new Map();
 let pendingEvents = [];
 let flushTimer = null;
 let flushActive = false;
+let activeSession = null;
+let sessionChangeRevision = 0;
+const sessionReady = browser.storage.local.get("nativeSession").then(stored => {
+  if (sessionChangeRevision === 0) activeSession = stored.nativeSession || null;
+}).catch(() => {});
+
+browser.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !Object.prototype.hasOwnProperty.call(changes, "nativeSession")) return;
+  sessionChangeRevision++;
+  activeSession = changes.nativeSession.newValue || null;
+  if (!activeSession) {
+    pendingEvents = [];
+    inFlight.clear();
+  }
+});
 
 function uuid() {
   return (globalThis.crypto && typeof crypto.randomUUID === "function")
@@ -42,8 +57,8 @@ function safeTarget(url) {
   return {target: host + "/" + label, operation: operation || label, host};
 }
 async function activeSessionFor(details) {
-  const stored = await browser.storage.local.get("nativeSession");
-  const session = stored.nativeSession;
+  await sessionReady;
+  const session = activeSession;
   if (!session || !Number.isInteger(session.tabId) || details.tabId !== session.tabId) return null;
   return session;
 }
