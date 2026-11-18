@@ -53,9 +53,7 @@
       ],
       "run_at": "document_start",
       "world": "MAIN"
-    }
-  ],
-  "content_scripts": [
+    },
     {
       "matches": [
         "https://youtube.com/*",
