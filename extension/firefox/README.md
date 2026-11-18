@@ -26,17 +26,17 @@ The comparison includes:
 
 - Page origin characteristics: protocol, sanitized host/origin classes, port, path class, and sanitized document-domain class.
 - Security context: secure-context status, cross-origin isolation, top-level-frame status, document visibility/readiness, and cookie-enabled boolean.
-- Worker capabilities: Worker, SharedWorker, ServiceWorker API/controller, and Worklet availability.
+- Worker capabilities: Worker, SharedWorker, ServiceWorker API/controller, and Worklet availability; sanitized ServiceWorker registration scopes and script URLs; controller/registration states; and early document-created Worker/SharedWorker constructor observations.
 - Network capabilities: Fetch, XHR, Request/Response, streams, AbortController, WebSocket, and WebTransport availability.
 - Media capabilities: MediaSource, EME, MediaCapabilities, WebCodecs, video canPlayType, and Media Session availability.
 - Storage capabilities: local/session storage access, IndexedDB, and StorageManager availability.
-- Resource timing aggregates grouped by initiator type, sanitized host class, and sanitized path class.
+- Document Resource Timing aggregates grouped by initiator type, sanitized host class, and sanitized path class, with duration/transfer-size totals and a timing window. Worker-constructor observations are reported separately so they are not misrepresented as worker-internal Resource Timing.
 
 After capturing both modes, choose **EXPORT COMPARISON**. The timestamped JSON contains the snapshots and a field-by-field comparison of the latest native and proxy captures. The popup also shows a short list of differences. Capture both modes at comparable points in page load/playback for more useful resource-timing comparisons.
 
-This is a diagnostic comparison, not a complete browser fingerprint or a proof of causation. The extension executes the snapshot function in the page MAIN world, but it does not instrument worker globals or inspect worker memory. Worker script activity is represented only indirectly through resource timing and the existing request lifecycle observer. API availability does not prove that a particular API was used successfully.
+This is a diagnostic comparison, not a complete browser fingerprint or a proof of causation. A document-start MAIN-world probe records sanitized dedicated/shared Worker constructor calls; page scripts can detect or interfere with MAIN-world instrumentation. It does not instrument worker globals, inspect worker memory, or read worker-local Performance timelines. The document Resource Timing snapshot describes only the document's timeline. API availability does not prove that a particular API was used successfully.
 
-The snapshot deliberately excludes full URLs, query strings, fragments, page text, video identifiers, cookies, tokens, request/response bodies, and arbitrary header values. Resource entries are reduced to counts; no resource URL is exported. Snapshots stay in Firefox extension storage until cleared through Firefox's extension storage controls or replaced by later captures (five per mode are retained).
+The snapshot deliberately excludes full URLs, query strings, fragments, page text, video identifiers, cookies, tokens, request/response bodies, arbitrary header values, and SharedWorker names. Resource entries are reduced to sanitized host/path classes and aggregate timing/size values; no resource URL or worker script URL is exported. Snapshots stay in Firefox extension storage until cleared through Firefox's extension storage controls or replaced by later captures (five per mode are retained).
 
 ## What is observed
 
