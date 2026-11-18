@@ -148,7 +148,7 @@
         if (capture.directory && capture.filename) {
           try { await capture.directory.removeEntry(capture.filename); } catch (_) {}
         }
-        status.state = status.enabled ? "armed" : "disabled";
+        status.state = capture.writeError ? "error" : (status.enabled ? "armed" : "disabled");
         status.error = capture.writeError || null;
         status.filename = null;
         return;
