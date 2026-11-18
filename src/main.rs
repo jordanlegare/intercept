@@ -8318,8 +8318,14 @@ mod ump_stream_diagnostics_tests {
         assert!(stored.len() > 300);
         assert!(stored.ends_with("last_rpc_response_status=200 last_rpc_response_ago_ms=42"));
 
-        let watchdog = clean_field("x".repeat(1_000), event_detail_limit("youtube_player_watchdog"));
-        assert_eq!(watchdog.len(), 900);
+        let watchdog = clean_field("x".repeat(1_500), event_detail_limit("youtube_player_watchdog"));
+        assert_eq!(watchdog.len(), 1_100);
+
+        let player_state = clean_field("x".repeat(1_500), event_detail_limit("youtube_player_state"));
+        assert_eq!(player_state.len(), 1_100);
+
+        let media_mutation = clean_field("x".repeat(1_500), event_detail_limit("youtube_player_media_mutation"));
+        assert_eq!(media_mutation.len(), 1_100);
 
         let ordinary = clean_field("x".repeat(400), event_detail_limit("ajax_response"));
         assert_eq!(ordinary.len(), 300);
