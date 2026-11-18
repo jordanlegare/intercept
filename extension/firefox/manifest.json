@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Intercept · Native Origin",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Observe YouTube request metadata and compare native-origin and reverse-proxy execution environments.",
   "permissions": [
     "storage",
@@ -9,7 +9,8 @@
     "tabs",
     "scripting",
     "webRequest",
-    "activeTab"
+    "activeTab",
+    "downloads"
   ],
   "host_permissions": [
     "https://youtube.com/*",
@@ -47,10 +48,22 @@
         "http://127.0.0.1/*"
       ],
       "js": [
-        "worker_probe.js"
+        "worker_probe.js",
+        "video_download.js"
       ],
       "run_at": "document_start",
       "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://youtube.com/*",
+        "https://*.youtube.com/*"
+      ],
+      "js": [
+        "download_bridge.js"
+      ],
+      "run_at": "document_start",
+      "world": "ISOLATED"
     }
   ]
 }

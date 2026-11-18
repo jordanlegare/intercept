@@ -2,6 +2,7 @@
 const byId = id => document.getElementById(id);
 const serverInput = byId("server"), targetInput = byId("target");
 const startButton = byId("start"), activePanel = byId("active"), message = byId("message");
+const downloadToggle = byId("download-toggle"), downloadStatus = byId("download-status");
 
 async function capturePageEnvironment() {
   const safe = fn => { try { return fn(); } catch (_) { return "unavailable"; } };
@@ -356,6 +357,97 @@ async function capturePageEnvironment() {
     video: videoDiagnostics
   };
 }
+async function executePlaybackDownloadCommand(session, action, enabled) {
+  if (!session || !Number.isInteger(session.tabId)) throw new Error("No active native-origin YouTube tab is registered.");
+  const results = await browser.scripting.executeScript({
+    target: {tabId: session.tabId},
+    world: "MAIN",
+    func: function(command, value) {
+      const api = globalThis.__interceptPlaybackDownloadV1;
+      if (!api) return {state: "unavailable", error: "Playback capture is not installed in this YouTube document. Reload the YouTube tab and try again."};
+      return command === "set" ? api.setEnabled(value) : api.getStatus();
+    },
+    args: [action, enabled]
+  });
+  const status = results && results[0] && results[0].result;
+  if (!status) throw new Error("The YouTube tab did not return playback-download status.");
+  if (status.state === "unavailable") throw new Error(status.error || "Playback capture is unavailable.");
+  return status;
+}
+
+function renderPlaybackDownloadStatus(status) {
+  if (!status) {
+    downloadStatus.textContent = "Playback capture status is unavailable.";
+    return;
+  }
+  const bytes = Number(status.bytes_written || 0);
+  const size = bytes >= 1024 * 1024
+    ? (bytes / (1024 * 1024)).toFixed(1) + " MiB"
+    : Math.round(bytes / 1024) + " KiB";
+  switch (status.state) {
+    case "disabled":
+      downloadStatus.textContent = "OFF · no playback is being captured.";
+      break;
+    case "armed":
+      downloadStatus.textContent = "ARMED · waiting for the YouTube player to start.";
+      break;
+    case "preparing":
+      downloadStatus.textContent = "PREPARING · opening temporary playback storage.";
+      break;
+    case "recording":
+      downloadStatus.textContent = "RECORDING · " + size + " written to temporary storage.";
+      break;
+    case "finalizing":
+      downloadStatus.textContent = "FINALIZING · closing the completed WebM file.";
+      break;
+    case "download_started":
+      downloadStatus.textContent = "DOWNLOAD STARTED · " + (status.filename || "playback.webm") + " · " + size + ".";
+      break;
+    case "error":
+      downloadStatus.textContent = "ERROR · " + (status.error || "Playback capture failed.");
+      break;
+    default:
+      downloadStatus.textContent = String(status.state || "unknown").toUpperCase();
+  }
+}
+
+async function refreshPlaybackDownloadStatus() {
+  const stored = await browser.storage.local.get("nativeSession");
+  const session = stored.nativeSession;
+  if (!session) {
+    downloadToggle.checked = false;
+    downloadToggle.disabled = true;
+    downloadStatus.textContent = "Start a native-origin session to enable playback download.";
+    return;
+  }
+  downloadToggle.disabled = false;
+  downloadToggle.checked = session.downloadEnabled === true;
+  try {
+    renderPlaybackDownloadStatus(await executePlaybackDownloadCommand(session, "get", false));
+  } catch (error) {
+    downloadStatus.textContent = error.message || String(error);
+  }
+}
+
+async function setPlaybackDownloadEnabled(enabled) {
+  const stored = await browser.storage.local.get("nativeSession");
+  const session = stored.nativeSession;
+  if (!session) throw new Error("Start a native-origin session before enabling downloads.");
+  downloadToggle.disabled = true;
+  try {
+    const status = await executePlaybackDownloadCommand(session, "set", enabled);
+    session.downloadEnabled = !!enabled;
+    await browser.storage.local.set({nativeSession: session});
+    downloadToggle.checked = !!enabled;
+    renderPlaybackDownloadStatus(status);
+    message.textContent = enabled
+      ? "Playback download armed. A WebM download will start when the video ends."
+      : "Playback download disabled. Any in-progress capture was discarded.";
+  } finally {
+    downloadToggle.disabled = false;
+  }
+}
+
 function normalizeServer(value) {
   const url = new URL(value);
   if (!["http:", "https:"].includes(url.protocol)
@@ -700,7 +792,11 @@ async function stopSession() {
   if (!session) return;
   await apiRequest(session, "", {method: "DELETE"});
   await browser.storage.local.remove("nativeSession");
+  try { await executePlaybackDownloadCommand(session, "set", false); } catch (_) {}
   activePanel.hidden = true; startButton.disabled = false;
+  downloadToggle.checked = false;
+  downloadToggle.disabled = true;
+  downloadStatus.textContent = "Playback download is off.";
   message.textContent = "Observation stopped. The YouTube tab remains open and continues directly to YouTube.";
 }
 async function loadState() {
@@ -709,7 +805,17 @@ async function loadState() {
   if (stored.nativeSession) {
     activePanel.hidden = false; startButton.disabled = true;
     byId("session-id").textContent = "SESSION " + stored.nativeSession.id + " · TAB " + stored.nativeSession.tabId;
+    downloadToggle.disabled = false;
+    downloadToggle.checked = stored.nativeSession.downloadEnabled === true;
+    try {
+      const status = await executePlaybackDownloadCommand(stored.nativeSession, "set", downloadToggle.checked);
+      renderPlaybackDownloadStatus(status);
+    } catch (error) {
+      downloadStatus.textContent = error.message || String(error);
+    }
     try { await refreshEvents(); } catch (error) { message.textContent = error.message || String(error); }
+  } else {
+    downloadToggle.disabled = true;
   }
   await renderComparison();
   try {
@@ -745,7 +851,7 @@ startButton.addEventListener("click", async () => {
     const created = await response.json();
     if (!created.native_token || !created.id) throw new Error("Backend did not return a native-session capability. Update and restart the Intercept server.");
     const session = {id: created.id, token: created.native_token, server, target,
-      tabId: blankTab.id, createdAt: Date.now()};
+      tabId: blankTab.id, createdAt: Date.now(), downloadEnabled: false};
     await browser.storage.local.set({nativeSession: session, server});
     await browser.tabs.update(blankTab.id, {url: target});
     activePanel.hidden = false;
@@ -757,6 +863,18 @@ startButton.addEventListener("click", async () => {
     startButton.disabled = false; message.textContent = error.message || String(error);
   }
 });
+downloadToggle.addEventListener("change", async () => {
+  const requested = downloadToggle.checked;
+  try {
+    await setPlaybackDownloadEnabled(requested);
+  } catch (error) {
+    downloadToggle.checked = !requested;
+    message.textContent = error.message || String(error);
+  }
+});
+window.setInterval(() => {
+  if (!activePanel.hidden) void refreshPlaybackDownloadStatus();
+}, 2000);
 byId("refresh").addEventListener("click", async () => {
   try { await refreshEvents(); message.textContent = ""; }
   catch (error) { message.textContent = error.message || String(error); }
