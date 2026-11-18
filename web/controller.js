@@ -1131,6 +1131,7 @@
 
       function report(operation, video, source, before, after, callsite, extra = "") {
         const fields = [
+          "observed_at_unix_ms=" + Date.now(),
           "operation=" + operation,
           "media_element=" + (video ? mediaId(video) : "unattached"),
           source ? "source_element=" + sourceId(source) : "",
@@ -1176,7 +1177,7 @@
               const result = descriptor.set.call(this, value);
               const after = video ? snapshot(video) : null;
               report(operation, video, source, before, after, callsite,
-                "value_present=" + (value !== null && value !== undefined && String(value).length > 0));
+                "value_present=" + (value !== null && value !== undefined && value !== ""));
               return result;
             }
           });
@@ -1457,7 +1458,8 @@
     }
 
     function recordWatchdog(video, eventName, now, state, stalledForMs, extraDetail = "") {
-      const detail = snapshot(video, eventName)
+      const detail = "observed_at_unix_ms=" + Date.now()
+        + " " + snapshot(video, eventName)
         + " last_advance_ago_ms=" + Math.max(0, Math.round(now - state.lastAdvanceAt))
         + " stalled_for_ms=" + Math.max(0, Math.round(stalledForMs || 0))
         + " visibility_state=" + (document.visibilityState || "unknown")
@@ -1625,11 +1627,11 @@
             if (previous !== undefined && now - previous < sampleIntervalMs) return;
             samples.set(eventName, now);
           }
-          record("youtube_player_state", "video", snapshot(video, eventName));
+          record("youtube_player_state", "video", "observed_at_unix_ms=" + Date.now() + " " + snapshot(video, eventName));
         });
       }
       latestYouTubePlayerState = {at: now, detail: attestationPlayerSnapshot(video, "observed")};
-      record("youtube_player_state", "video", latestYouTubePlayerState.detail);
+      record("youtube_player_state", "video", "observed_at_unix_ms=" + Date.now() + " " + latestYouTubePlayerState.detail);
     }
 
     function observeTree(root) {
