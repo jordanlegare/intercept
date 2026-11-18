@@ -342,14 +342,18 @@
         actions.className = "session-actions";
         const meta = document.createElement("span");
         meta.className = "session-meta";
-        meta.textContent = session.policy.toUpperCase() + " · " + session.state;
-        const browse = document.createElement("button");
-        browse.type = "button";
-        browse.className = "browse-cache";
-        browse.textContent = "📁";
-        browse.title = "Browse this session's in-memory cache";
-        browse.setAttribute("aria-label", "Browse cached files for " + session.target_url);
-        browse.addEventListener("click", () => openCacheBrowser(session));
+        meta.textContent = session.mode === "native-origin"
+          ? "NATIVE ORIGIN · OBSERVE ONLY · " + session.state
+          : session.policy.toUpperCase() + " · " + session.state;
+        if (session.mode !== "native-origin") {
+          const browse = document.createElement("button");
+          browse.type = "button";
+          browse.className = "browse-cache";
+          browse.textContent = "📁";
+          browse.title = "Browse this session's in-memory cache";
+          browse.setAttribute("aria-label", "Browse cached files for " + session.target_url);
+          browse.addEventListener("click", () => openCacheBrowser(session));
+        }
 
         const terminate = document.createElement("button");
         terminate.type = "button";
@@ -357,7 +361,10 @@
         terminate.textContent = "KILL";
         terminate.setAttribute("aria-label", "Terminate session for " + session.target_url);
         terminate.addEventListener("click", async () => {
-          if (!window.confirm("Kill this live session? Its in-flight upstream requests will be cancelled and its browser tab will stop working.")) return;
+          const confirmMessage = session.mode === "native-origin"
+            ? "Stop this native-origin observation session? The YouTube tab remains open, but Intercept will stop collecting its request diagnostics."
+            : "Kill this live session? Its in-flight upstream requests will be cancelled and its browser tab will stop working.";
+          if (!window.confirm(confirmMessage)) return;
           terminate.disabled = true;
           terminate.textContent = "KILLING…";
           try {
