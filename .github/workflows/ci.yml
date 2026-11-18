@@ -28,7 +28,7 @@ jobs:
           node --check web/authority.js
           node --check extension/firefox/background.js
           node --check extension/firefox/popup.js
-          node -e 'JSON.parse(require("node:fs").readFileSync("extension/firefox/manifest.json","utf8"))'
+          node -e 'const fs=require("node:fs"); const m=JSON.parse(fs.readFileSync("extension/firefox/manifest.json","utf8")); if(!m.permissions.includes("scripting")) throw new Error("Missing scripting permission"); if(m.browser_specific_settings.gecko.strict_min_version!=="128.0") throw new Error("Unexpected Firefox minimum version"); const html=fs.readFileSync("extension/firefox/popup.html","utf8"); for(const id of ["capture-env","export-comparison","compare-status","differences"]) if(!html.includes("id=\""+id+"\"")) throw new Error("Missing popup control: "+id);'
           node -e 'const fs=require("node:fs"); const html=fs.readFileSync("web/index.html","utf8"); const open=html.indexOf("<script"); const start=open < 0 ? -1 : html.indexOf(">",open)+1; const end=start > 0 ? html.indexOf("</script>",start) : -1; if (start <= 0 || end < start) throw new Error("No inline dashboard script found"); fs.writeFileSync("/tmp/intercept-dashboard-inline.js",html.slice(start,end));'
           node --check /tmp/intercept-dashboard-inline.js
       - name: Test
