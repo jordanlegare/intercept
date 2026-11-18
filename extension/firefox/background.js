@@ -14,7 +14,7 @@ const playbackDownloadJobs = new Map();
 
 function safePlaybackFilename(value) {
   let filename = String(value || "youtube-playback.webm")
-    .replace(/[<>:"/\\|?*\\u0000-\\u001f]/g, "_")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
     .replace(/[\\/]+/g, "_")
     .trim()
     .slice(0, 140);
@@ -36,6 +36,13 @@ browser.downloads.onChanged.addListener(delta => {
 browser.runtime.onConnect.addListener(port => {
   if (!port || port.name !== "intercept-playback-download") return;
   const tabId = port.sender && port.sender.tab && port.sender.tab.id;
+  const frameId = port.sender && Number.isInteger(port.sender.frameId) ? port.sender.frameId : null;
+  const senderUrl = (() => {
+    try { return new URL(port.sender && port.sender.url || ""); } catch (_) { return null; }
+  })();
+  const senderHost = senderUrl ? senderUrl.hostname.toLowerCase() : "";
+  const senderIsYouTube = !!senderUrl && senderUrl.protocol === "https:"
+    && (senderHost === "youtube.com" || senderHost.endsWith(".youtube.com"));
   let accepted = false;
   port.onMessage.addListener(async message => {
     if (accepted || !message || message.type !== "start") return;
@@ -44,8 +51,7 @@ browser.runtime.onConnect.addListener(port => {
       await sessionReady;
       const session = activeSession;
       if (!session || !Number.isInteger(tabId) || tabId !== session.tabId
-          || !session.downloadEnabled || !session.downloadToken
-          || message.token !== session.downloadToken) {
+          || frameId !== 0 || !senderIsYouTube || !session.downloadEnabled) {
         throw new Error("The active native session did not authorize this playback download.");
       }
       const blob = message.blob;
