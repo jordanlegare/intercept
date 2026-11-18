@@ -1480,7 +1480,8 @@
     // one-shot/periodic timers that are more discriminating candidates.
     const lastByTimer = new Map();
     for (const entry of recent) lastByTimer.set(entry.timer, entry);
-    const entries = Array.from(lastByTimer.values());
+    const entries = Array.from(lastByTimer.values())
+      .sort((left, right) => left.firedAt - right.firedAt);
     const activeEntry = activeTimer
       ? (lastByTimer.get(activeTimer) || {timer: activeTimer, firedAt: activeTimer.lastFiredAt})
       : null;
