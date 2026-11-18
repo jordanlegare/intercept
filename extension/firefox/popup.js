@@ -712,6 +712,15 @@ async function loadState() {
     try { await refreshEvents(); } catch (error) { message.textContent = error.message || String(error); }
   }
   await renderComparison();
+  try {
+    const [tab] = await browser.tabs.query({active: true, currentWindow: true});
+    if (tab && Number.isInteger(tab.id)) {
+      const trace = await browser.runtime.sendMessage({
+        type: "intercept-media-trace:snapshot", tabId: tab.id
+      });
+      renderMediaTraceStatus(trace);
+    }
+  } catch (_) {}
 }
 startButton.addEventListener("click", async () => {
   startButton.disabled = true; message.textContent = "Creating native-origin observation session…";
