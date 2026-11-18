@@ -74,7 +74,7 @@ async function exportObservations() {
       event_count: events.length,
       events
     };
-    const blob = new Blob([JSON.stringify(payload, null, 2) + "\\n"], {
+    const blob = new Blob([JSON.stringify(payload, null, 2) + "\n"], {
       type: "application/json;charset=utf-8"
     });
     const objectUrl = URL.createObjectURL(blob);
