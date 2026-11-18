@@ -24,7 +24,7 @@ The **ENVIRONMENT COMPARISON** panel captures the currently active tab in the pa
 
 The comparison includes:
 
-- Page origin characteristics: protocol, sanitized host class, port, path class, window.origin, self.origin, and document.domain.
+- Page origin characteristics: protocol, sanitized host/origin classes, port, path class, and sanitized document-domain class.
 - Security context: secure-context status, cross-origin isolation, top-level-frame status, document visibility/readiness, and cookie-enabled boolean.
 - Worker capabilities: Worker, SharedWorker, ServiceWorker API/controller, and Worklet availability.
 - Network capabilities: Fetch, XHR, Request/Response, streams, AbortController, WebSocket, and WebTransport availability.
