@@ -26,7 +26,7 @@ The comparison includes:
 
 - Page origin characteristics: protocol, sanitized host class, port, path class, window.origin, self.origin, and document.domain.
 - Security context: secure-context status, cross-origin isolation, top-level-frame status, document visibility/readiness, and cookie-enabled boolean.
-- Worker capabilities: Worker, SharedWorker, ServiceWorker API/controller, Worklet, and WorkerGlobalScope availability.
+- Worker capabilities: Worker, SharedWorker, ServiceWorker API/controller, and Worklet availability.
 - Network capabilities: Fetch, XHR, Request/Response, streams, AbortController, WebSocket, and WebTransport availability.
 - Media capabilities: MediaSource, EME, MediaCapabilities, WebCodecs, video canPlayType, and Media Session availability.
 - Storage capabilities: local/session storage access, IndexedDB, and StorageManager availability.
