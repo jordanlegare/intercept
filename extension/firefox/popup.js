@@ -73,7 +73,6 @@ function capturePageEnvironment() {
       service_worker_controller_present: !!(navigator.serviceWorker && navigator.serviceWorker.controller),
       service_worker_container_constructor: typeof ServiceWorkerContainer === "function",
       worklet_api: typeof Worklet === "function",
-      worker_global_scope_constructor: typeof WorkerGlobalScope === "function"
     },
     network: {
       fetch: typeof fetch === "function",
