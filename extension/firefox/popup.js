@@ -59,8 +59,8 @@ function capturePageEnvironment() {
       document_domain: safe(() => document.domain)
     },
     security: {
-      is_secure_context: !!isSecureContext,
-      cross_origin_isolated: !!crossOriginIsolated,
+      is_secure_context: !!globalThis.isSecureContext,
+      cross_origin_isolated: !!globalThis.crossOriginIsolated,
       top_level_frame: safe(() => window.top === window.self),
       document_visibility: document.visibilityState,
       document_ready_state: document.readyState,
