@@ -460,8 +460,10 @@ async function exportComparison() {
       latest_comparison: comparison.differences,
       notes: [
         "Snapshots execute in the page MAIN world.",
+        "Dedicated/shared Worker constructor calls are observed by an early MAIN-world probe; page scripts can interfere with this instrumentation.",
+        "Resource entries are document Performance timeline aggregates; worker-local Performance timelines are not exposed.",
         "Resource entries are aggregated by initiator type, sanitized host class, and sanitized path class.",
-        "No full URLs, query strings, cookies, tokens, request bodies, or response bodies are recorded.",
+        "No full URLs, query strings, worker names, cookies, tokens, request bodies, or response bodies are recorded.",
         "Differences identify environment variance; they do not by themselves prove causation."
       ]
     });
