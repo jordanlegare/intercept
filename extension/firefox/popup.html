@@ -13,6 +13,14 @@
   <button id="start" type="button">OPEN NATIVE-ORIGIN SESSION</button>
   <section id="active" hidden><div class="status"><span class="dot"></span><strong>SESSION ACTIVE</strong></div>
     <div id="session-id" class="session-id"></div>
+    <div class="download-setting">
+      <label class="download-label" for="download-toggle">
+        <input id="download-toggle" type="checkbox">
+        <span>DOWNLOAD WHEN VIDEO COMPLETES</span>
+      </label>
+      <p class="download-copy">Captures the rendered playback into a temporary WebM file and starts a download at the end. Enable before playback to capture the full video.</p>
+      <div id="download-status" class="muted" aria-live="polite">Download capture is off.</div>
+    </div>
     <div class="actions"><button id="refresh" type="button" class="secondary">REFRESH EVENTS</button><button id="export" type="button" class="secondary">EXPORT JSON</button><button id="stop" type="button" class="danger">STOP SESSION</button></div>
     <div id="event-count" class="muted"></div><ol id="events" aria-live="polite"></ol>
   </section>
@@ -38,5 +46,5 @@
     <div id="media-trace-status" class="muted" aria-live="polite">No media trace is armed for this tab.</div>
   </section>
   <div id="message" role="status" aria-live="polite"></div>
-  <footer>Environment capture executes in the page's main world. Only sanitized capability and resource metadata is saved; no cookies, tokens, query strings, or request bodies.</footer>
+  <footer>Playback download records the rendered media stream as WebM; it is not an export of Firefox's internal HTTP cache or YouTube's original media bytes. DRM-protected playback may not be capturable. Environment diagnostics never save cookies, tokens, query strings, or request bodies.</footer>
 </main></body></html>
