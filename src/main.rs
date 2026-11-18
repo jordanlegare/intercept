@@ -1202,7 +1202,7 @@ async fn create_session(
     }
     if input.native_origin {
         let host = target.host_str().unwrap_or_default().to_ascii_lowercase();
-        if target.scheme() != "https:"
+        if target.scheme() != "https"
             || !(host == "youtube.com" || host.ends_with(".youtube.com"))
         {
             return Err((StatusCode::BAD_REQUEST, "Native-origin mode is limited to HTTPS YouTube URLs".into()));
