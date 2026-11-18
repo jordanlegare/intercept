@@ -2069,13 +2069,23 @@ struct YouTubeStatus3Observation {
 }
 
 #[derive(Clone)]
+struct YouTubeGenerateItAfterStatus3RequestObservation {
+    status3_request_id: String,
+    status3_waa_id: Option<String>,
+    status3_waa_age_ms: Option<u64>,
+    correlation_id: Option<String>,
+    elapsed_since_status3_request_ms: u64,
+}
+
+#[derive(Clone)]
 struct YouTubeGenerateItAfterStatus3Observation {
     status3_request_id: String,
     status3_waa_id: Option<String>,
     status3_waa_age_ms: Option<u64>,
     correlation_id: Option<String>,
     correlation_changed: bool,
-    observed_at: Instant,
+    elapsed_since_status3_request_ms: u64,
+    request_to_response_ms: u64,
 }
 
 struct YouTubeSabrMediaAfterStatus3Observation {
@@ -2143,11 +2153,28 @@ impl YouTubeAttestationTiming {
         operation: &'static str,
         correlation_id: Option<&str>,
         observed_at: Instant,
-    ) {
+    ) -> Option<YouTubeGenerateItAfterStatus3RequestObservation> {
         self.proxy_request_count = self.proxy_request_count.saturating_add(1);
         self.last_operation = Some(operation);
         self.last_correlation_id = correlation_id.map(str::to_owned);
         self.last_request_at = Some(observed_at);
+
+        if operation != "GenerateIT" {
+            return None;
+        }
+        self.last_status3_observation.as_ref().and_then(|status3| {
+            (observed_at >= status3.observed_at).then(|| {
+                YouTubeGenerateItAfterStatus3RequestObservation {
+                    status3_request_id: status3.request_id.clone(),
+                    status3_waa_id: status3.waa_id.clone(),
+                    status3_waa_age_ms: status3.waa_age_ms,
+                    correlation_id: correlation_id.map(str::to_owned),
+                    elapsed_since_status3_request_ms: duration_millis(
+                        observed_at.saturating_duration_since(status3.observed_at),
+                    ),
+                }
+            })
+        })
     }
 
     fn observe_proxy_resource_request(
@@ -2177,11 +2204,16 @@ impl YouTubeAttestationTiming {
         correlation_id: Option<&str>,
         status: u16,
         response_metadata: YouTubeAttestationResponseMetadata,
+        request_started_at: Instant,
         observed_at: Instant,
     ) -> Option<YouTubeGenerateItAfterStatus3Observation> {
         let generate_it_after_status3 = if operation == "GenerateIT" && status == 200 {
             self.last_status3_observation.as_ref().and_then(|status3| {
-                (observed_at >= status3.observed_at).then(|| {
+                // Count a refresh only when this RPC actually reached the
+                // proxy after status 3. A request that started beforehand
+                // must not qualify merely because its response arrived later.
+                (request_started_at >= status3.observed_at
+                    && observed_at >= request_started_at).then(|| {
                     let correlation_id = correlation_id.map(str::to_owned);
                     YouTubeGenerateItAfterStatus3Observation {
                         status3_request_id: status3.request_id.clone(),
@@ -2190,7 +2222,12 @@ impl YouTubeAttestationTiming {
                         correlation_changed: correlation_id.is_some()
                             && correlation_id != status3.waa_id,
                         correlation_id,
-                        observed_at,
+                        elapsed_since_status3_request_ms: duration_millis(
+                            request_started_at.saturating_duration_since(status3.observed_at),
+                        ),
+                        request_to_response_ms: duration_millis(
+                            observed_at.saturating_duration_since(request_started_at),
+                        ),
                     }
                 })
             })
@@ -3837,6 +3874,7 @@ async fn ajax_passthrough(
                     content_length: response_content_length.clone(),
                     content_encoding: response_content_encoding.clone(),
                 },
+                request_started,
                 Instant::now(),
             )
         };
@@ -3846,7 +3884,7 @@ async fn ajax_passthrough(
                 "youtube_attestation_freshness",
                 format!("{upstream_host}{upstream_path}"),
                 format!(
-                    "rid={request_id} rpc={attestation_rpc_id} phase=generateit_after_status3 status={} status3_rid={} status3_waa_id={} status3_waa_age_ms={} status3_age_band={} new_waa_id={} correlation_changed={} elapsed_since_status3_ms={}",
+                    "rid={request_id} rpc={attestation_rpc_id} phase=generateit_after_status3 status={} status3_rid={} status3_waa_id={} status3_waa_age_ms={} status3_age_band={} new_waa_id={} correlation_changed={} elapsed_since_status3_request_ms={} request_to_response_ms={}",
                     status.as_u16(),
                     refresh.status3_request_id,
                     refresh.status3_waa_id.as_deref().unwrap_or("unmatched"),
@@ -3854,7 +3892,8 @@ async fn ajax_passthrough(
                     youtube_attestation_age_band(refresh.status3_waa_age_ms),
                     refresh.correlation_id.as_deref().unwrap_or("unmatched"),
                     refresh.correlation_changed,
-                    duration_millis(Instant::now().saturating_duration_since(refresh.observed_at)),
+                    refresh.elapsed_since_status3_request_ms,
+                    refresh.request_to_response_ms,
                 ),
             ).await;
         }
@@ -4330,15 +4369,31 @@ async fn proxy(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "worker" | "sharedworker" | "serviceworker"));
     if let Some(operation) = attestation_operation {
-        {
+        let generate_it_after_status3_request = {
             let playback_context_id = youtube_attestation_context_key(&parts.headers);
             let mut contexts = session.youtube_attestation_timing.lock()
                 .unwrap_or_else(|error| error.into_inner());
             youtube_attestation_context_mut(&mut contexts, &playback_context_id).observe_proxy_request(
                 operation,
                 youtube_attestation_correlation_id(&parts.headers),
-                Instant::now(),
-            );
+                request_started,
+            )
+        };
+        if let Some(refresh_request) = generate_it_after_status3_request {
+            push_event(
+                &session,
+                "youtube_attestation_freshness",
+                format!("{}{}", upstream_url.host_str().unwrap_or_default(), upstream_url.path()),
+                format!(
+                    "rid={request_id} rpc={attestation_rpc_id} phase=generateit_after_status3_request status3_rid={} status3_waa_id={} status3_waa_age_ms={} status3_age_band={} new_waa_id={} elapsed_since_status3_request_ms={}",
+                    refresh_request.status3_request_id,
+                    refresh_request.status3_waa_id.as_deref().unwrap_or("unmatched"),
+                    refresh_request.status3_waa_age_ms.map(|value| value.to_string()).unwrap_or_else(|| "unobserved".to_owned()),
+                    youtube_attestation_age_band(refresh_request.status3_waa_age_ms),
+                    refresh_request.correlation_id.as_deref().unwrap_or("unmatched"),
+                    refresh_request.elapsed_since_status3_request_ms,
+                ),
+            ).await;
         }
         let declared_length = parts.headers.get(header::CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
@@ -8220,6 +8275,7 @@ mod ump_stream_diagnostics_tests {
                 content_encoding: "identity".to_owned(),
             },
             observed_at,
+            observed_at,
         );
         assert!(refresh.is_none());
         let snapshot = timing.snapshot(observed_at + Duration::from_millis(37));
@@ -8279,6 +8335,15 @@ mod ump_stream_diagnostics_tests {
         assert!(!old_media.new_generate_it_after_status3);
         assert_eq!(old_media.status3_request_id, "sabr-status3");
 
+        let request_started_at = start + Duration::from_millis(1_000);
+        let request_observation = timing.observe_proxy_request(
+            "GenerateIT",
+            Some("waa-new"),
+            request_started_at,
+        ).expect("GenerateIT request should be observed after status 3");
+        assert_eq!(request_observation.status3_request_id, "sabr-status3");
+        assert_eq!(request_observation.elapsed_since_status3_request_ms, 1_000);
+
         let refresh = timing.observe_proxy_response(
             "GenerateIT",
             Some("waa-new"),
@@ -8288,12 +8353,15 @@ mod ump_stream_diagnostics_tests {
                 content_length: "absent".to_owned(),
                 content_encoding: "absent".to_owned(),
             },
+            request_started_at,
             start + Duration::from_millis(2_000),
-        ).expect("new GenerateIT response after status 3");
+        ).expect("new GenerateIT request and response after status 3");
         assert_eq!(refresh.status3_request_id, "sabr-status3");
         assert_eq!(refresh.status3_waa_id.as_deref(), Some("waa-old"));
         assert_eq!(refresh.correlation_id.as_deref(), Some("waa-new"));
         assert!(refresh.correlation_changed);
+        assert_eq!(refresh.elapsed_since_status3_request_ms, 1_000);
+        assert_eq!(refresh.request_to_response_ms, 1_000);
 
         let refreshed_request = YouTubeSabrAttestationRequestSnapshot {
             operation: Some("GenerateIT"),
@@ -8316,6 +8384,50 @@ mod ump_stream_diagnostics_tests {
         assert_eq!(recovery.elapsed_since_status3_ms, 3_000);
         assert!(recovery.po_present);
         assert!(recovery.pc_present);
+    }
+
+    #[test]
+    fn does_not_count_generateit_request_started_before_status3_as_refresh() {
+        let start = Instant::now();
+        let mut timing = YouTubeAttestationTiming::default();
+        let status3_request = YouTubeSabrAttestationRequestSnapshot {
+            operation: Some("GenerateIT"),
+            correlation_id: Some("waa-before".to_owned()),
+            response_status: Some(200),
+            response_age_ms: Some(42_000),
+            po_present: true,
+            pc_present: true,
+        };
+        timing.observe_sabr_status3(
+            "sabr-status3",
+            &status3_request,
+            start + Duration::from_millis(1_000),
+        );
+
+        let in_flight_before_status3 = timing.observe_proxy_response(
+            "GenerateIT",
+            Some("waa-before-status3-request"),
+            200,
+            YouTubeAttestationResponseMetadata {
+                content_type: "application/json+protobuf".to_owned(),
+                content_length: "absent".to_owned(),
+                content_encoding: "absent".to_owned(),
+            },
+            start + Duration::from_millis(500),
+            start + Duration::from_millis(2_000),
+        );
+        assert!(
+            in_flight_before_status3.is_none(),
+            "a response completing after status 3 must not qualify if its request began before status 3"
+        );
+
+        let after_status3 = timing.observe_proxy_request(
+            "GenerateIT",
+            Some("waa-after-status3-request"),
+            start + Duration::from_millis(2_500),
+        ).expect("request received after status 3 should be marked");
+        assert_eq!(after_status3.status3_request_id, "sabr-status3");
+        assert_eq!(after_status3.elapsed_since_status3_request_ms, 1_500);
     }
 
     #[test]
@@ -8482,7 +8594,7 @@ mod ump_stream_diagnostics_tests {
         assert_eq!(never_seen.last_att_log_correlation_id, None);
         assert_eq!(never_seen.last_att_log_request_ago_ms, None);
 
-        timing.observe_proxy_request("GenerateIT", Some("mwl2lpxu-1"), start);
+        let _ = timing.observe_proxy_request("GenerateIT", Some("mwl2lpxu-1"), start);
         timing.observe_proxy_resource_request("AttGet", Some("attget-1"), start + Duration::from_millis(25));
         timing.observe_proxy_resource_request("AttLog", Some("attlog-1"), start + Duration::from_millis(50));
         let observed = timing.snapshot(start + Duration::from_millis(125));
