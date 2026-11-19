@@ -256,6 +256,7 @@
     return {
       ...status,
       elapsed_ms: session ? session.elapsedMs : status.elapsed_ms,
+      capture_id: activeCapture ? activeCapture.id : null,
       session_state: session ? session.state : null,
       can_pause: !!(activeCapture && activeCapture.recorder && activeCapture.recorder.state === "recording"),
       can_resume: !!(activeCapture && activeCapture.recorder && activeCapture.recorder.state === "paused"),
@@ -280,11 +281,11 @@
     ));
   }
 
-  function currentVideoContext(video) {
+  function currentVideoContext(video, titleOverride) {
     const heading = document.querySelector("h1.ytd-watch-metadata, ytd-watch-metadata h1");
-    const title = heading && heading.textContent && heading.textContent.trim()
+    const title = titleOverride || (heading && heading.textContent && heading.textContent.trim()
       ? heading.textContent.trim()
-      : document.title;
+      : document.title);
     return Core.buildVideoIdentity({
       href: location.href,
       title,
@@ -452,9 +453,10 @@
     }
   }
 
-  async function startCapture(video) {
-    if (!status.enabled || navigationInProgress || activeCapture || !video || !video.isConnected || video.ended || isAdvertisement(video)) return;
-    const identity = currentVideoContext(video);
+  async function startCapture(video, titleOverride) {
+    if (activeCapture) return activeCapture.video === video ? statusSnapshot() : null;
+    if (!status.enabled || navigationInProgress || !video || !video.isConnected || video.ended || isAdvertisement(video)) return null;
+    const identity = currentVideoContext(video, titleOverride);
     const captureMethod = typeof video.captureStream === "function"
       ? video.captureStream.bind(video)
       : typeof video.mozCaptureStream === "function" ? video.mozCaptureStream.bind(video) : null;
@@ -573,6 +575,7 @@
       status.mime_type = mimeType;
       appendEvent(capture, "recording_started", {mimeType});
       await patchHistory(capture.id, {status: "recording", mimeType}, null);
+      return statusSnapshot();
     } catch (error) {
       capture.writeError = String(error && error.message || error || "Could not start playback capture.");
       capture.preparationFinished = true;
@@ -582,6 +585,7 @@
         capture.finalSession = sessionManager.finish("error", Date.now());
       }
       void finalizeCapture(capture);
+      return statusSnapshot();
     }
   }
 
@@ -765,6 +769,50 @@
     return statusSnapshot();
   }
 
+
+  async function waitForPlayerVideo(timeoutMs = 30000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const video = document.querySelector("#movie_player video.html5-main-video, #movie_player video, video.html5-main-video, ytd-reel-video-renderer video");
+      if (video && video.isConnected && video.readyState >= 1) return video;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    throw new Error("YouTube did not create a playable video element within 30 seconds.");
+  }
+
+  async function recordRequestedVideo(payload) {
+    const videoId = String(payload && payload.videoId || "");
+    if (!/^[A-Za-z0-9_-]{1,24}$/.test(videoId) || Core.extractVideoId(location.href) !== videoId) {
+      throw new Error("The background player loaded a different video than the one selected.");
+    }
+    const title = String(payload && payload.title || "").trim().slice(0, 180);
+    status.enabled = true;
+    status.error = null;
+    const video = await waitForPlayerVideo();
+    if (isAdvertisement(video)) throw new Error("YouTube is showing an advertisement; recording will begin when the selected video is available.");
+    if (video.ended) {
+      try { video.currentTime = 0; } catch (_) {}
+    }
+    if (video.paused) {
+      try {
+        await Promise.resolve(video.play());
+      } catch (error) {
+        const reason = String(error && error.message || error || "Autoplay was blocked.");
+        throw new Error("Firefox or YouTube blocked background autoplay. Allow autoplay for youtube.com, then retry. " + reason);
+      }
+    }
+    if (!activeCapture) await startCapture(video, title);
+    const deadline = Date.now() + 25000;
+    while (Date.now() < deadline) {
+      if (activeCapture && activeCapture.video === video
+          && activeCapture.recorder && activeCapture.recorder.state === "recording") return statusSnapshot();
+      if (status.state === "error") throw new Error(status.error || "The recorder could not start.");
+      if (!video.isConnected) throw new Error("The YouTube player was replaced before recording began.");
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    throw new Error("The video did not enter the recording state. Check autoplay permissions and retry.");
+  }
+
   async function getDashboardSnapshot() {
     const video = document.querySelector("#movie_player video.html5-main-video, #movie_player video, video.html5-main-video, ytd-reel-video-renderer video");
     const heading = document.querySelector("h1.ytd-watch-metadata, ytd-watch-metadata h1");
@@ -806,6 +854,7 @@
   async function runCommand(command, payload) {
     switch (command) {
       case "snapshot": return getDashboardSnapshot();
+      case "record-video": return recordRequestedVideo(payload);
       case "get": return statusSnapshot();
       case "set": return setEnabled(!!payload);
       case "pause": return pauseCapture();

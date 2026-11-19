@@ -53,6 +53,12 @@
     ".section{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:13px 0 6px;color:#baff60;font:800 8px ui-monospace,SFMono-Regular,monospace;letter-spacing:.14em}",
     ".count{color:#87947f;font-weight:500}",
     ".history{max-height:190px;overflow:auto;border-top:1px solid #303a2a}",
+    ".queue{max-height:170px;overflow:auto;border-top:1px solid #303a2a}",
+    ".job{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #283124}",
+    ".job-main{min-width:0;flex:1}",
+    ".job-title{color:#edf3e8;font-size:9px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+    ".job-state{margin-top:3px;color:#a3af98;font:7px ui-monospace,SFMono-Regular,monospace;text-transform:uppercase}",
+    ".job-stop{border:1px solid #70483e;background:#301916;color:#ffb6aa;border-radius:3px;padding:5px 7px;font:700 7px ui-monospace,SFMono-Regular,monospace;cursor:pointer}",
     ".record{padding:8px 0;border-bottom:1px solid #283124}",
     ".record:last-child{border-bottom:0}",
     ".record-top{display:flex;justify-content:space-between;gap:8px;align-items:start}",
@@ -72,7 +78,7 @@
     "@media(prefers-reduced-motion:reduce){*{transition:none!important}}"
   ].join("\n");
   const markup = '<section class="panel">' +
-    '<div class="head"><span class="mark"></span><span class="brand">PLAYBACK CAPTURE</span><span class="ver">1.2.0 · DARK</span>' +
+    '<div class="head"><span class="mark"></span><span class="brand">PLAYBACK CAPTURE</span><span class="ver">1.3.0 · DARK</span>' +
     '<button class="icon" id="minimize" title="Minimize" aria-label="Minimize">−</button>' +
     '<button class="icon" id="close" title="Close overlay" aria-label="Close">×</button></div>' +
     '<div class="body">' +
@@ -88,6 +94,8 @@
     '<button class="action" id="split" disabled>SPLIT FILE</button><button class="action" id="stop" disabled>STOP &amp; SAVE</button>' +
     '<button class="action danger" id="discard" disabled>DISCARD</button></div>' +
     '<p class="hint">Dark, page-adjacent controls synchronized with YouTube playback. Switching videos creates a separate WebM.</p>' +
+    '<div class="section"><span>BACKGROUND RECORD QUEUE</span><span class="count" id="job-count">0 ACTIVE</span></div>' +
+    '<div class="queue" id="jobs"><div class="empty">No background recordings queued.</div></div>' +
     '<div class="section"><span>CAPTURE TIMELINE</span><span class="count" id="history-count">0 RECORDS</span></div>' +
     '<div class="history" id="history"><div class="empty">Capture history will appear here.</div></div>' +
     '<div class="notice" id="notice" aria-live="polite"></div>' +
@@ -207,6 +215,36 @@
     }
   }
 
+
+  async function renderJobs() {
+    const container=$("jobs");
+    const jobs=await send("jobs");
+    container.replaceChildren();
+    const active=(jobs||[]).filter(job=>!["completed","failed","cancelled","interrupted"].includes(job.state));
+    $("job-count").textContent=active.length+" ACTIVE";
+    if(!active.length) {
+      const empty=document.createElement("div");empty.className="empty";empty.textContent="No background recordings queued.";container.append(empty);return;
+    }
+    for(const job of active.slice(0,12)) {
+      const row=document.createElement("div");row.className="job";
+      const main=document.createElement("div");main.className="job-main";
+      const title=document.createElement("div");title.className="job-title";title.textContent=job.title||job.videoId;
+      const state=document.createElement("div");state.className="job-state";state.textContent=(job.state||"unknown").toUpperCase()+" · "+job.videoId;
+      main.append(title,state);row.append(main);
+      if(["recording","queued","opening","starting"].includes(job.state)) {
+        const stop=document.createElement("button");stop.className="job-stop";stop.textContent=job.state==="recording"?"STOP":"CANCEL";
+        stop.addEventListener("click",async()=>{
+          const response=await browser.runtime.sendMessage({type:"playback-capture:inline-stop",job_id:job.id});
+          if(!response||!response.ok) setNotice(response&&response.error||"Could not stop capture.",true);
+          else setNotice("Capture stop requested.");
+          await renderJobs();
+        });
+        row.append(stop);
+      }
+      container.append(row);
+    }
+  }
+
   function renderSnapshot(snapshot) {
     const state = snapshot.status || {};
     const page = snapshot.video || {};
@@ -253,6 +291,7 @@
     try {
       const snapshot = await send("snapshot");
       renderSnapshot(snapshot);
+      await renderJobs();
       if (snapshot.video && snapshot.video.videoId) {
         root.setAttribute("data-video-id", snapshot.video.videoId);
       }

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Playback Capture",
-  "version": "1.2.0",
-  "description": "Capture YouTube playback with a dark in-page recording dashboard and recovery history.",
+  "version": "1.3.0",
+  "description": "Capture YouTube playback with per-video record controls, concurrent background recording jobs, and a dark capture dashboard.",
   "permissions": [
     "activeTab",
     "scripting",
@@ -44,6 +44,16 @@
         "download_bridge.js"
       ],
       "run_at": "document_start",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
+        "inline_record.js"
+      ],
+      "run_at": "document_idle",
       "world": "ISOLATED"
     }
   ]

@@ -1,12 +1,21 @@
-# Playback Capture for Firefox 1.2.0
+# Playback Capture for Firefox 1.3.0
 
 An independent Firefox add-on that captures decoded playback output from YouTube and saves it as WebM files. It has its own capture session manager, local capture library, recovery flow, toolbar dashboard, and download bridge. It does not connect to the Intercept Rust server.
 
-## What changed in 1.2.0
+## What changed in 1.3.0
+
+- Per-video record buttons: red `REC` controls appear on video thumbnails across YouTube browse/search/channel surfaces, and immediately before the like controls on a watch page.
+- Background recording queue: selecting a thumbnail opens an inactive YouTube player tab, starts ordinary playback, streams the decoded player output through MediaRecorder into extension-managed OPFS storage, then asks Firefox Downloads to save the WebM. The helper tab closes after the download finishes.
+- Concurrent jobs: the background scheduler runs up to three capture tabs concurrently and queues additional selections. Each capture has an independent page recorder and file writer; the dark overlay shows active jobs and allows stop/cancel.
+- Autoplay handling: background playback depends on Firefox and YouTube autoplay permissions. When autoplay is blocked, the job is marked failed with an explanation; the extension does not report a recording as active.
 
 - In-page controls: click the toolbar icon on a regular HTTPS `www.youtube.com` page to bootstrap the capture runtime if the tab predates installation, then inject a video-adjacent overlay. It exposes arm/disarm, pause, resume, split, stop/save, discard, history, recovery and deletion without a toolbar popup.
 - Dark mode: the overlay uses a fixed dark palette in an isolated Shadow DOM, so YouTube's theme and page styles do not leak into its controls.
 - Live page synchronization: the isolated overlay communicates through the extension background to the capture API in the page's main world. It refreshes on player events, YouTube SPA navigation and DOM changes, with a 1.2-second polling fallback. Overlay messages are accepted only from a top-level `www.youtube.com` tab.
+
+## Earlier 1.2.0 improvements
+
+- On-demand dark overlay, Shadow DOM isolation, SPA refresh synchronization and toolbar bootstrap for tabs open before installation.
 
 ## Earlier 1.1.0 improvements
 
@@ -18,9 +27,11 @@ An independent Firefox add-on that captures decoded playback output from YouTube
 
 ## Use
 
-1. Open an HTTPS YouTube video in Firefox.
-2. Open the Playback Capture toolbar popup and choose ARM CAPTURE before playback begins.
-3. Play the video. The extension captures the audio/video tracks exposed by the player.
+1. Open YouTube in Firefox. Red `REC` controls appear on supported video cards; on a watch page, the control sits immediately before the like button.
+2. Click a card's `REC` control to queue that video without changing the active tab. The extension opens an inactive player tab and attempts to start playback.
+3. While recording, the button pulses red. Click it again to stop and save; completed videos also finalize automatically when playback ends.
+4. Use the toolbar action to open the dark dashboard and view the background job queue, capture history and recovery actions.
+5. On a watch page, the `REC` button records the video already open.
 4. Playback pauses suspend recording; use the popup controls to pause, resume, split, stop and save, or discard.
 5. When a video changes, the outgoing capture is finalized as its own WebM and a new capture starts for the selected video when playback is active.
 7. Use the overlay's Capture Timeline to retry interrupted/failed downloads or remove history entries.
@@ -54,8 +65,11 @@ Temporary installations are removed when Firefox restarts. Standard Firefox rele
 - video_download.js — media-element capture, OPFS file lifecycle, session state, IndexedDB history and recovery API.
 - download_bridge.js — isolated-world bridge for Firefox download lifecycle messages.
 - background.js — validates the source tab and saves WebM blobs through Firefox Downloads.
-- overlay.js — on-demand in-page dark dashboard, mount lifecycle and player/SPA refresh handling.
+- overlay.js — on-demand in-page dark dashboard, background capture queue, mount lifecycle and player/SPA refresh handling.
+- inline_record.js — per-video red `REC` buttons, card discovery, watch-page like-row placement and job-state synchronization.
 - popup.html, popup.css, popup.js — retained extension-page dashboard assets; the toolbar action now activates the in-page overlay.
 - tests/capture_core.test.js — Node unit tests for the session manager and identity rules.
+
+Background playback requires autoplay permission for YouTube. A job that cannot autoplay is reported as failed rather than saved as an empty file. Up to three background capture workers run concurrently. YouTube browse cards do not expose a reusable media stream, so each selected card is played in a separate inactive tab; the watch-page button records the existing player instead.
 
 The XPI is built from the standalone source with the manifest at the archive root.
