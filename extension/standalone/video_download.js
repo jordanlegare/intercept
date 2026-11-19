@@ -41,45 +41,6 @@
     catch (_) { return false; }
   }
 
-  function clickMainVideoPlayer(video) {
-    const target = document.querySelector(
-      "#movie_player .ytp-large-play-button, #movie_player .ytp-play-button[aria-label*='Play'], #movie_player button[aria-label*='Play']"
-    ) || video;
-    if (!target || typeof target.click !== "function") return false;
-    try {
-      const view = target.ownerDocument && target.ownerDocument.defaultView || window;
-      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
-        const EventType = type.startsWith("pointer") && typeof view.PointerEvent === "function"
-          ? view.PointerEvent : view.MouseEvent;
-        target.dispatchEvent(new EventType(type, {
-          bubbles: true, cancelable: true, view,
-          pointerId: 1, pointerType: "mouse", button: 0, buttons: type.endsWith("down") ? 1 : 0
-        }));
-      }
-      target.click();
-      return true;
-    } catch (_) { return false; }
-  }
-
-  function scheduleMainVideoClickAtWindowLoad() {
-    if (!isBackgroundCaptureTab()) return;
-    const attempt = () => {
-      const video = document.querySelector(
-        "#movie_player video.html5-main-video, #movie_player video, video.html5-main-video"
-      );
-      if (video) clickMainVideoPlayer(video);
-      else {
-        const playButton = document.querySelector("#movie_player .ytp-large-play-button");
-        if (playButton) clickMainVideoPlayer(null);
-      }
-    };
-    if (document.readyState === "complete") {
-      setTimeout(attempt, 0);
-      return;
-    }
-    window.addEventListener("load", attempt, {once: true});
-  }
-
   function withCaptureTimeout(promise, timeoutMs, message) {
     let timer;
     return Promise.race([
@@ -849,7 +810,6 @@
       try { video.currentTime = 0; } catch (_) {}
     }
     if (video.paused) {
-      clickMainVideoPlayer(video);
       try {
         await withCaptureTimeout(
           Promise.resolve(video.play()),
@@ -857,7 +817,17 @@
           "The play request did not resolve within 12 seconds. Firefox may be blocking background autoplay."
         );
       } catch (error) {
-        throw new Error("YouTube did not start playback in the background. The extension tried clicking the player on window load, but Firefox autoplay permission may still be blocking it. " + String(error && error.message || error));
+        const errorName = String(error && error.name || "");
+        const detail = String(error && error.message || error || "Playback was rejected.");
+        if (errorName === "NotAllowedError" || /not allowed|autoplay/i.test(detail)) {
+          throw new Error(
+            "Firefox blocked background playback (NotAllowedError). A scripted click cannot create real user activation, and the extension cannot override Firefox's autoplay policy. " +
+            "Allow Audio and Video for youtube.com in Firefox Settings > Privacy & Security > Permissions > Autoplay. " +
+            "For inactive-tab playback, also set about:config preference media.block-autoplay-until-in-foreground to false. " +
+            "Then click REC again; the existing helper tab will be reused. " + detail
+          );
+        }
+        throw new Error("YouTube could not start playback in the inactive helper tab: " + detail);
       }
     }
     try {
@@ -983,7 +953,6 @@
     queueMicrotask(finishYouTubeNavigation);
   });
 
-  scheduleMainVideoClickAtWindowLoad();
   scanVideos();
   void cleanupExpiredCaptures();
   if (typeof MutationObserver === "function" && document.documentElement) {
