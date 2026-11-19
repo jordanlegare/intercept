@@ -4,9 +4,8 @@ const downloadJobs = new Map();
 
 function safeFilename(value) {
   let filename = String(value || "youtube-playback.webm");
-  for (const character of ["<", ">", ":", "\\\"", "/", "\\\\", "|", "?", "*"]) {
-    filename = filename.split(character).join("_");
-  }
+  const invalid = ["<", ">", ":", String.fromCharCode(34), "/", String.fromCharCode(92), "|", "?", "*"];
+  for (const character of invalid) filename = filename.split(character).join("_");
   filename = Array.from(filename, character => character.charCodeAt(0) < 32 ? "_" : character)
     .join("").trim().slice(0, 140);
   if (!filename) filename = "youtube-playback";
