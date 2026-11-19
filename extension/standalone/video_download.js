@@ -152,6 +152,7 @@
       const now = Date.now();
       const records = await listHistory();
       for (const record of records) {
+        if (activeCapture && record.id === activeCapture.id) continue;
         const orphan = Core.reconcileInterruptedCapture(record.status, await captureFileExists(record.filename));
         if (orphan) {
           await patchHistory(record.id, {...orphan, endedAt: record.endedAt || now}, {
