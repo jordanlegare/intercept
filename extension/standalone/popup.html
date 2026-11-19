@@ -3,37 +3,61 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Playback Capture</title>
+  <title>Playback Capture 1.1.0</title>
   <link rel="stylesheet" href="popup.css">
   <script src="popup.js" defer></script>
 </head>
 <body>
   <main>
     <header>
-      <div class="topline"><span class="mark"></span><span>INDEPENDENT FIREFOX TOOL</span><span class="version">01 / WEBM</span></div>
+      <div class="topline"><span class="mark"></span><span>INDEPENDENT FIREFOX TOOL</span><span class="version">1.1.0 / WEBM</span></div>
       <h1>PLAYBACK<br><span>CAPTURE</span></h1>
-      <p class="intro">Capture the media your player renders. Firefox saves the finished recording when playback ends.</p>
+      <p class="intro">A video-aware recording manager. Each YouTube video gets its own capture, history entry and recoverable file.</p>
     </header>
+
     <section class="target-card">
       <div class="section-kicker">ACTIVE TAB</div>
       <div class="target-row"><span id="target-dot" class="target-dot"></span><strong id="target-state">CHECKING TAB</strong></div>
       <p id="target-detail">Looking for a supported YouTube page…</p>
     </section>
+
     <section class="control-card">
-      <div class="section-kicker">CAPTURE CONTROL</div>
-      <button id="arm-button" type="button" disabled>ARM DOWNLOAD</button>
+      <div class="section-kicker">CURRENT VIDEO</div>
+      <h2 id="video-title">No active video</h2>
+      <p id="video-id" class="video-id">Video identity will appear here.</p>
+      <div class="stats">
+        <div><span>ELAPSED</span><strong id="elapsed">00:00</strong></div>
+        <div><span>CAPTURE SIZE</span><strong id="file-size">0 B</strong></div>
+        <div><span>FORMAT</span><strong id="mime-type">WEBM</strong></div>
+      </div>
       <div class="status-line"><span id="status-dot" class="status-dot"></span><span id="capture-status" aria-live="polite">Checking capture status…</span></div>
       <div class="meter"><span id="meter-fill"></span></div>
-      <p class="hint">Arm before pressing Play to capture the full video. The capture pauses with playback and finalizes at the end.</p>
+      <div class="controls">
+        <button id="arm-button" class="primary" type="button" disabled>ARM CAPTURE</button>
+        <button id="pause-button" type="button" disabled>PAUSE</button>
+        <button id="resume-button" type="button" disabled>RESUME</button>
+        <button id="split-button" type="button" disabled>SPLIT FILE</button>
+        <button id="stop-button" type="button" disabled>STOP &amp; SAVE</button>
+        <button id="discard-button" class="danger" type="button" disabled>DISCARD</button>
+      </div>
+      <p class="hint">Player pauses pause the recording automatically. Manual pause/resume, split, stop and discard are also available.</p>
     </section>
+
+    <section class="history-card">
+      <div class="history-heading"><div><div class="section-kicker">CAPTURE LIBRARY</div><h2>History &amp; recovery</h2></div><span id="history-count" class="count">0 ITEMS</span></div>
+      <p id="history-empty" class="empty">Completed and interrupted recordings will appear here.</p>
+      <ol id="timeline" class="timeline"></ol>
+    </section>
+
     <section class="notes">
-      <div class="note-heading">OUTPUT</div>
-      <p><strong>WEBM</strong> · Recorded playback output, named from the video title and downloaded through Firefox.</p>
+      <div class="note-heading">LOCAL STORAGE</div>
+      <p>Capture files stay in Firefox origin-private storage until downloaded copies have aged out. Failed or interrupted downloads remain available for recovery for up to seven days.</p>
       <div class="rule"></div>
       <div class="note-heading">LIMITS</div>
-      <p>This records the rendered player output, not the original source stream or browser cache. DRM-protected playback may not expose capturable tracks. No DRM bypass is performed.</p>
+      <p>This records decoded playback output, not the original source stream. DRM-protected playback may not expose capturable tracks. No DRM bypass is performed.</p>
     </section>
     <footer><span>PLAYBACK CAPTURE</span><span>LOCAL · NO SERVER</span></footer>
+    <p id="notice" class="notice" role="status" aria-live="polite"></p>
   </main>
 </body>
 </html>
