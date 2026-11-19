@@ -345,6 +345,11 @@ browser.action.onClicked.addListener(async tab => {
     await browser.scripting.executeScript({
       target,
       world: "ISOLATED",
+      files: ["inline_record.js"]
+    });
+    await browser.scripting.executeScript({
+      target,
+      world: "ISOLATED",
       files: ["overlay.js"]
     });
     await browser.action.setTitle({
