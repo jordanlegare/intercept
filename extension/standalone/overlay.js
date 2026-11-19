@@ -345,7 +345,7 @@
       watched.add(video);
       for (const eventName of [
         "play", "playing", "pause", "ended", "emptied", "loadedmetadata",
-        "durationchange", "ratechange", "seeking", "seeked", "timeupdate"
+        "durationchange", "ratechange", "seeking", "seeked"
       ]) {
         video.addEventListener(eventName, scheduleRefresh);
       }
@@ -366,6 +366,7 @@
     attachPlayerListeners();
     scheduleRefresh();
   });
+  attachPlayerListeners();
 
   const observer = new MutationObserver(() => {
     mountOverlay();

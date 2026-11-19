@@ -4,7 +4,7 @@ An independent Firefox add-on that captures decoded playback output from YouTube
 
 ## What changed in 1.2.0
 
-- In-page controls: click the toolbar icon on a regular HTTPS `www.youtube.com` page to inject a video-adjacent overlay. It exposes arm/disarm, pause, resume, split, stop/save, discard, history, recovery and deletion without a toolbar popup.
+- In-page controls: click the toolbar icon on a regular HTTPS `www.youtube.com` page to bootstrap the capture runtime if the tab predates installation, then inject a video-adjacent overlay. It exposes arm/disarm, pause, resume, split, stop/save, discard, history, recovery and deletion without a toolbar popup.
 - Dark mode: the overlay uses a fixed dark palette in an isolated Shadow DOM, so YouTube's theme and page styles do not leak into its controls.
 - Live page synchronization: the isolated overlay communicates through the extension background to the capture API in the page's main world. It refreshes on player events, YouTube SPA navigation and DOM changes, with a 1.2-second polling fallback. Overlay messages are accepted only from a top-level `www.youtube.com` tab.
 

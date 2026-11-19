@@ -125,8 +125,35 @@ browser.action.onClicked.addListener(async tab => {
   }
 
   try {
+    const target = {tabId: tab.id};
+    const readiness = await browser.scripting.executeScript({
+      target,
+      world: "MAIN",
+      func: function() {
+        return {
+          core: !!globalThis.__standalonePlaybackCoreV1,
+          runtime: !!globalThis.__standalonePlaybackDownloadV1
+        };
+      }
+    });
+    const ready = readiness && readiness[0] && readiness[0].result || {};
+    if (!ready.core) {
+      await browser.scripting.executeScript({
+        target,
+        world: "MAIN",
+        files: ["capture_core.js"]
+      });
+    }
+    if (!ready.runtime) {
+      await browser.scripting.executeScript({
+        target,
+        world: "MAIN",
+        files: ["video_download.js"]
+      });
+    }
     await browser.scripting.executeScript({
-      target: {tabId: tab.id},
+      target,
+      world: "ISOLATED",
       files: ["overlay.js"]
     });
     await browser.action.setTitle({
