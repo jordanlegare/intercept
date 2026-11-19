@@ -34,7 +34,7 @@ function finishJob(downloadId, state) {
     captureJob.updatedAt = Date.now();
     captureJob.slot = false;
     if (captureJob.ownedTab && Number.isInteger(captureJob.tabId)) {
-      void browser.tabs.remove(captureJob.tabId).catch(() => {});
+      setTimeout(() => { void browser.tabs.remove(captureJob.tabId).catch(() => {}); }, 1200);
     }
     void pumpCaptureQueue();
   }
@@ -274,7 +274,7 @@ async function stopCaptureJob(message) {
 }
 
 browser.tabs.onRemoved.addListener(tabId=>{
-  const job=Array.from(captureJobs.values()).find(item=>item.tabId===tabId&&item.ownedTab&&item.slot);
+  const job=Array.from(captureJobs.values()).find(item=>item.tabId===tabId&&item.slot);
   if(!job) return;
   if(!["completed","failed","cancelled"].includes(job.state)) {
     job.state="interrupted";
