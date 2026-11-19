@@ -92,3 +92,99 @@ browser.runtime.onConnect.addListener(port => {
     }
   });
 });
+
+
+function isSupportedOverlayTab(tab) {
+  try {
+    const url = new URL(tab && tab.url || "");
+    return url.protocol === "https:"
+      && url.hostname.toLowerCase() === "www.youtube.com"
+      && (!url.port || url.port === "443")
+      && !url.username && !url.password
+      && Number.isInteger(tab && tab.id);
+  } catch (_) { return false; }
+}
+
+const OVERLAY_COMMANDS = new Set([
+  "snapshot", "set", "pause", "resume", "split", "stop", "discard",
+  "history", "recover", "delete"
+]);
+
+browser.action.onClicked.addListener(async tab => {
+  if (!isSupportedOverlayTab(tab)) {
+    if (tab && Number.isInteger(tab.id)) {
+      try {
+        await browser.action.setTitle({
+          tabId: tab.id,
+          title: "Playback Capture requires HTTPS www.youtube.com."
+        });
+        await browser.action.setBadgeText({tabId: tab.id, text: ""});
+      } catch (_) {}
+    }
+    return;
+  }
+
+  try {
+    await browser.scripting.executeScript({
+      target: {tabId: tab.id},
+      files: ["overlay.js"]
+    });
+    await browser.action.setTitle({
+      tabId: tab.id,
+      title: "Playback Capture dark overlay is active"
+    });
+    await browser.action.setBadgeBackgroundColor({tabId: tab.id, color: "#9BE24B"});
+    await browser.action.setBadgeText({tabId: tab.id, text: "ON"});
+  } catch (error) {
+    try {
+      await browser.action.setBadgeText({tabId: tab.id, text: "ERR"});
+      await browser.action.setTitle({
+        tabId: tab.id,
+        title: String(error && error.message || error || "Could not inject Playback Capture overlay.")
+      });
+    } catch (_) {}
+  }
+});
+
+browser.runtime.onMessage.addListener((message, sender) => {
+  if (!message || message.type !== "playback-capture:overlay-command") return undefined;
+  const senderUrl = (() => {
+    try { return new URL(sender && sender.url || ""); }
+    catch (_) { return null; }
+  })();
+  const trusted = !!senderUrl
+    && senderUrl.protocol === "https:"
+    && senderUrl.hostname.toLowerCase() === "www.youtube.com"
+    && (!senderUrl.port || senderUrl.port === "443")
+    && sender && sender.frameId === 0
+    && sender.tab && Number.isInteger(sender.tab.id);
+  if (!trusted) {
+    return Promise.resolve({ok: false, error: "Overlay commands are accepted only from a top-level www.youtube.com tab."});
+  }
+  if (!OVERLAY_COMMANDS.has(message.command)) {
+    return Promise.resolve({ok: false, error: "Unsupported Playback Capture command."});
+  }
+
+  return browser.scripting.executeScript({
+    target: {tabId: sender.tab.id},
+    world: "MAIN",
+    func: async function(command, payload) {
+      const api = globalThis.__standalonePlaybackDownloadV1;
+      if (!api || typeof api.runCommand !== "function") {
+        return {ok: false, error: "Playback Capture is not ready. Reload this YouTube tab and activate the extension again."};
+      }
+      try {
+        return {ok: true, result: await api.runCommand(command, payload)};
+      } catch (error) {
+        return {ok: false, error: String(error && error.message || error || "Playback Capture command failed.")};
+      }
+    },
+    args: [message.command, message.payload]
+  }).then(results => {
+    const result = results && results[0] && results[0].result;
+    return result || {ok: false, error: "The YouTube tab did not return a capture response."};
+  }).catch(error => ({
+    ok: false,
+    error: String(error && error.message || error || "Could not communicate with the YouTube capture runtime.")
+  }));
+});

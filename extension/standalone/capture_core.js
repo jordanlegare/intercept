@@ -50,6 +50,15 @@
     });
   }
 
+  function isSupportedOverlayUrl(href) {
+    let url;
+    try { url = new URL(href); } catch (_) { return false; }
+    return url.protocol === "https:"
+      && url.hostname.toLowerCase() === "www.youtube.com"
+      && (!url.port || url.port === "443")
+      && !url.username && !url.password;
+  }
+
   function sameVideoIdentity(a, b) {
     if (!a || !b) return false;
     if (a.videoId && b.videoId) return a.videoId === b.videoId;
@@ -190,7 +199,7 @@
   }
 
   return Object.freeze({
-    safeTitle, extractVideoId, buildVideoIdentity, sameVideoIdentity,
+    safeTitle, extractVideoId, buildVideoIdentity, sameVideoIdentity, isSupportedOverlayUrl,
     shouldSaveStopReason, reconcileInterruptedCapture, SerializedChunkWriter, CaptureSessionManager
   });
 });

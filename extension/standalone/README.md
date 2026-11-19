@@ -1,8 +1,14 @@
-# Playback Capture for Firefox 1.1.0
+# Playback Capture for Firefox 1.2.0
 
 An independent Firefox add-on that captures decoded playback output from YouTube and saves it as WebM files. It has its own capture session manager, local capture library, recovery flow, toolbar dashboard, and download bridge. It does not connect to the Intercept Rust server.
 
-## What changed in 1.1.0
+## What changed in 1.2.0
+
+- In-page controls: click the toolbar icon on a regular HTTPS `www.youtube.com` page to inject a video-adjacent overlay. It exposes arm/disarm, pause, resume, split, stop/save, discard, history, recovery and deletion without a toolbar popup.
+- Dark mode: the overlay uses a fixed dark palette in an isolated Shadow DOM, so YouTube's theme and page styles do not leak into its controls.
+- Live page synchronization: the isolated overlay communicates through the extension background to the capture API in the page's main world. It refreshes on player events, YouTube SPA navigation and DOM changes, with a 1.2-second polling fallback. Overlay messages are accepted only from a top-level `www.youtube.com` tab.
+
+## Earlier 1.1.0 improvements
 
 - Video-aware sessions: every capture is bound to a stable YouTube video identity (watch, Shorts, Live and embed paths). YouTube SPA navigation, back/forward navigation, and player replacement split sessions at the video boundary. Outgoing recordings retain their original title and ID.
 - Capture history and recovery: metadata and a timestamped event timeline are stored in IndexedDB. Closed WebM files remain in Firefox origin-private storage until a successful download has aged out. Interrupted or failed downloads can be retried from the popup for up to seven days. A tab close during recording is reconciled on the next visit; any retained partial file is clearly marked as potentially incomplete.
@@ -17,7 +23,7 @@ An independent Firefox add-on that captures decoded playback output from YouTube
 3. Play the video. The extension captures the audio/video tracks exposed by the player.
 4. Playback pauses suspend recording; use the popup controls to pause, resume, split, stop and save, or discard.
 5. When a video changes, the outgoing capture is finalized as its own WebM and a new capture starts for the selected video when playback is active.
-6. Use History & recovery to retry interrupted/failed downloads or remove history entries.
+7. Use the overlay's Capture Timeline to retry interrupted/failed downloads or remove history entries.
 
 ## Independent operation and permissions
 
@@ -48,7 +54,8 @@ Temporary installations are removed when Firefox restarts. Standard Firefox rele
 - video_download.js — media-element capture, OPFS file lifecycle, session state, IndexedDB history and recovery API.
 - download_bridge.js — isolated-world bridge for Firefox download lifecycle messages.
 - background.js — validates the source tab and saves WebM blobs through Firefox Downloads.
-- popup.html, popup.css, popup.js — capture dashboard and history UI.
+- overlay.js — on-demand in-page dark dashboard, mount lifecycle and player/SPA refresh handling.
+- popup.html, popup.css, popup.js — retained extension-page dashboard assets; the toolbar action now activates the in-page overlay.
 - tests/capture_core.test.js — Node unit tests for the session manager and identity rules.
 
 The XPI is built from the standalone source with the manifest at the archive root.

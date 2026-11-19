@@ -166,3 +166,14 @@ test("discard aborts the serialized recording writer after queued chunks settle"
   await writer.abort("user discarded");
   assert.deepEqual(written, ["partial-chunk", "aborted:user discarded"]);
 });
+
+
+test("overlay activation accepts only HTTPS www.youtube.com tabs", () => {
+  assert.equal(Core.isSupportedOverlayUrl("https://www.youtube.com/watch?v=abc"), true);
+  assert.equal(Core.isSupportedOverlayUrl("https://www.youtube.com/shorts/abc"), true);
+  assert.equal(Core.isSupportedOverlayUrl("http://www.youtube.com/watch?v=abc"), false);
+  assert.equal(Core.isSupportedOverlayUrl("https://youtube.com/watch?v=abc"), false);
+  assert.equal(Core.isSupportedOverlayUrl("https://m.youtube.com/watch?v=abc"), false);
+  assert.equal(Core.isSupportedOverlayUrl("https://music.youtube.com/watch?v=abc"), false);
+  assert.equal(Core.isSupportedOverlayUrl("https://www.youtube.com:444/watch?v=abc"), false);
+});

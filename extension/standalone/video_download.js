@@ -765,8 +765,47 @@
     return statusSnapshot();
   }
 
+  async function getDashboardSnapshot() {
+    const video = document.querySelector("#movie_player video.html5-main-video, #movie_player video, video.html5-main-video, ytd-reel-video-renderer video");
+    const heading = document.querySelector("h1.ytd-watch-metadata, ytd-watch-metadata h1");
+    const title = heading && heading.textContent && heading.textContent.trim()
+      ? heading.textContent.trim()
+      : document.title.replace(/\s+-\s+YouTube\s*$/i, "");
+    const identity = Core.buildVideoIdentity({
+      href: location.href,
+      title,
+      mediaSource: video && (video.currentSrc || video.src) || "",
+      at: new Date()
+    });
+    const history = await getHistory().catch(error => [{
+      id: "history-error",
+      title: "Capture history unavailable",
+      status: "error",
+      error: String(error && error.message || error),
+      fileAvailable: false,
+      events: []
+    }]);
+    return {
+      status: statusSnapshot(),
+      video: {
+        title: identity.title,
+        videoId: identity.videoId,
+        canonicalUrl: identity.canonicalUrl,
+        href: location.href,
+        paused: video ? video.paused : true,
+        ended: video ? video.ended : false,
+        currentTime: video && Number.isFinite(video.currentTime) ? video.currentTime : 0,
+        duration: video && Number.isFinite(video.duration) ? video.duration : 0,
+        playbackRate: video ? video.playbackRate : 1,
+        hasPlayer: !!video
+      },
+      history
+    };
+  }
+
   async function runCommand(command, payload) {
     switch (command) {
+      case "snapshot": return getDashboardSnapshot();
       case "get": return statusSnapshot();
       case "set": return setEnabled(!!payload);
       case "pause": return pauseCapture();
