@@ -354,7 +354,6 @@
     capture.finalized = true;
     if (activeCapture === capture) status.state = "finalizing";
     try {
-      await capture.writeQueue;
       const shouldSave = !capture.writeError && Core.shouldSaveStopReason(capture.stopReason);
       if (capture.chunkWriter) {
         if (!shouldSave) {

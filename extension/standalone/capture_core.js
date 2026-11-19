@@ -95,7 +95,14 @@
     async close() {
       if (this.closed) return;
       this.closed = true;
-      await this.queue;
+      try {
+        await this.queue;
+      } catch (error) {
+        if (typeof this.writer.abort === "function") {
+          try { await this.writer.abort(error); } catch (_) {}
+        }
+        throw error;
+      }
       await this.writer.close();
     }
 
