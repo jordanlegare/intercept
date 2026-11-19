@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Playback Capture",
+  "version": "1.0.0",
+  "description": "Capture YouTube playback and save the rendered result as a WebM download.",
+  "permissions": ["activeTab", "scripting", "downloads"],
+  "background": {"scripts": ["background.js"]},
+  "action": {"default_title": "Playback Capture", "default_popup": "popup.html"},
+  "browser_specific_settings": {
+    "gecko": {"id": "playback-capture@jordanlegare", "strict_min_version": "128.0"}
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://youtube.com/*", "https://*.youtube.com/*"],
+      "js": ["video_download.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://youtube.com/*", "https://*.youtube.com/*"],
+      "js": ["download_bridge.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    }
+  ]
+}
