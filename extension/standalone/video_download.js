@@ -35,6 +35,61 @@
   const downloadIdToCapture = new Map();
   const watchedVideos = new WeakSet();
 
+
+  function isBackgroundCaptureTab() {
+    try { return new URL(location.href).searchParams.get("__playback_capture_job") === "1"; }
+    catch (_) { return false; }
+  }
+
+  function clickMainVideoPlayer(video) {
+    const target = document.querySelector(
+      "#movie_player .ytp-large-play-button, #movie_player .ytp-play-button[aria-label*='Play'], #movie_player button[aria-label*='Play']"
+    ) || video;
+    if (!target || typeof target.click !== "function") return false;
+    try {
+      const view = target.ownerDocument && target.ownerDocument.defaultView || window;
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
+        const EventType = type.startsWith("pointer") && typeof view.PointerEvent === "function"
+          ? view.PointerEvent : view.MouseEvent;
+        target.dispatchEvent(new EventType(type, {
+          bubbles: true, cancelable: true, view,
+          pointerId: 1, pointerType: "mouse", button: 0, buttons: type.endsWith("down") ? 1 : 0
+        }));
+      }
+      target.click();
+      return true;
+    } catch (_) { return false; }
+  }
+
+  function scheduleMainVideoClickAtWindowLoad() {
+    if (!isBackgroundCaptureTab()) return;
+    const attempt = () => {
+      const video = document.querySelector(
+        "#movie_player video.html5-main-video, #movie_player video, video.html5-main-video"
+      );
+      if (video) clickMainVideoPlayer(video);
+      else {
+        const playButton = document.querySelector("#movie_player .ytp-large-play-button");
+        if (playButton) clickMainVideoPlayer(null);
+      }
+    };
+    if (document.readyState === "complete") {
+      setTimeout(attempt, 0);
+      return;
+    }
+    window.addEventListener("load", attempt, {once: true});
+  }
+
+  function withCaptureTimeout(promise, timeoutMs, message) {
+    let timer;
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      })
+    ]).finally(() => clearTimeout(timer));
+  }
+
   function randomId() {
     return globalThis.crypto && typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
@@ -189,8 +244,8 @@
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         pendingDownloads.delete(requestId);
-        reject(new Error("Firefox did not acknowledge the download request."));
-      }, 20_000);
+        reject(new Error("The one-at-a-time Firefox download queue did not acknowledge this file within six hours."));
+      }, 6 * 60 * 60 * 1000);
       pendingDownloads.set(requestId, {resolve, reject, timeout, captureId});
       window.postMessage({
         type: "standalone-playback-download:request",
@@ -794,15 +849,29 @@
       try { video.currentTime = 0; } catch (_) {}
     }
     if (video.paused) {
+      clickMainVideoPlayer(video);
       try {
-        await Promise.resolve(video.play());
+        await withCaptureTimeout(
+          Promise.resolve(video.play()),
+          12000,
+          "The play request did not resolve within 12 seconds. Firefox may be blocking background autoplay."
+        );
       } catch (error) {
-        const reason = String(error && error.message || error || "Autoplay was blocked.");
-        throw new Error("Firefox or YouTube blocked background autoplay. Allow autoplay for youtube.com, then retry. " + reason);
+        throw new Error("YouTube did not start playback in the background. The extension tried clicking the player on window load, but Firefox autoplay permission may still be blocking it. " + String(error && error.message || error));
       }
     }
-    if (!activeCapture) await startCapture(video, title);
-    const deadline = Date.now() + 25000;
+    try {
+      if (!activeCapture) {
+        await withCaptureTimeout(
+          startCapture(video, title),
+          20000,
+          "The recorder did not initialize within 20 seconds. Check Firefox storage and MediaRecorder support."
+        );
+      }
+    } catch (error) {
+      throw new Error("Recorder startup failed: " + String(error && error.message || error));
+    }
+    const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
       if (activeCapture && activeCapture.video === video
           && activeCapture.recorder && activeCapture.recorder.state === "recording") return statusSnapshot();
@@ -914,6 +983,7 @@
     queueMicrotask(finishYouTubeNavigation);
   });
 
+  scheduleMainVideoClickAtWindowLoad();
   scanVideos();
   void cleanupExpiredCaptures();
   if (typeof MutationObserver === "function" && document.documentElement) {

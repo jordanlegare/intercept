@@ -4,7 +4,10 @@ const downloadJobs = new Map();
 const captureJobs = new Map();
 const captureQueue = [];
 const MAX_PARALLEL_CAPTURE_JOBS = 3;
-const ACTIVE_CAPTURE_STATES = new Set(["opening", "starting", "recording", "saving", "downloading"]);
+const ACTIVE_CAPTURE_STATES = new Set(["opening", "starting", "recording", "saving", "download_queued", "downloading"]);
+const pendingDownloadQueue = [];
+let activeDownloadId = null;
+let downloadQueueStarting = false;
 
 function safeFilename(value) {
   let filename = String(value || "youtube-playback.webm");
@@ -26,6 +29,7 @@ function finishJob(downloadId, state) {
   const captureJob = Array.from(captureJobs.values()).find(item =>
     item.tabId === job.captureTabId && (!item.captureId || item.captureId === job.captureId)
   );
+  if (activeDownloadId === downloadId) activeDownloadId = null;
   if (captureJob) {
     captureJob.state = state === "complete" ? "completed" : "failed";
     captureJob.error = state === "complete" ? null : "Firefox interrupted the WebM download.";
@@ -38,6 +42,7 @@ function finishJob(downloadId, state) {
     }
     void pumpCaptureQueue();
   }
+  void pumpDownloadQueue();
 }
 
 browser.downloads.onChanged.addListener(delta => {
@@ -78,31 +83,22 @@ browser.runtime.onConnect.addListener(port => {
         throw new Error("The captured WebM file has an invalid type or size.");
       }
 
-      const objectUrl = URL.createObjectURL(blob);
-      let downloadId;
-      try {
-        downloadId = await browser.downloads.download({
-          url: objectUrl,
-          filename: safeFilename(message.filename),
-          conflictAction: "uniquify",
-          saveAs: false
-        });
-      } catch (error) {
-        URL.revokeObjectURL(objectUrl);
-        throw error;
-      }
-
-      downloadJobs.set(downloadId, {objectUrl, port, captureId: message.capture_id || null, requestId: message.request_id || null, captureTabId});
       const captureJob = Array.from(captureJobs.values()).find(item => item.tabId === captureTabId && (!item.captureId || item.captureId === message.capture_id));
-      if (captureJob) { captureJob.captureId = message.capture_id || captureJob.captureId; captureJob.downloadId = downloadId; captureJob.state = "downloading"; captureJob.updatedAt = Date.now(); }
-      port.postMessage({type: "playback-download:started", download_id: downloadId});
-      try {
-        const matches = await browser.downloads.search({id: downloadId});
-        const item = matches && matches[0];
-        if (item && (item.state === "complete" || item.state === "interrupted")) {
-          finishJob(downloadId, item.state);
-        }
-      } catch (_) {}
+      if (captureJob) {
+        captureJob.captureId = message.capture_id || captureJob.captureId;
+        captureJob.state = "download_queued";
+        captureJob.phase = "Waiting for the previous WebM download to finish";
+        captureJob.updatedAt = Date.now();
+      }
+      pendingDownloadQueue.push({
+        blob,
+        filename: safeFilename(message.filename),
+        port,
+        captureId: message.capture_id || null,
+        requestId: message.request_id || null,
+        captureTabId
+      });
+      void pumpDownloadQueue();
     } catch (error) {
       try {
         port.postMessage({
@@ -117,12 +113,77 @@ browser.runtime.onConnect.addListener(port => {
 
 
 
+
+async function pumpDownloadQueue() {
+  if (activeDownloadId !== null || downloadQueueStarting || pendingDownloadQueue.length === 0) return;
+  downloadQueueStarting = true;
+  const item = pendingDownloadQueue.shift();
+  let objectUrl = null;
+  let downloadId = null;
+  try {
+    objectUrl = URL.createObjectURL(item.blob);
+    downloadId = await browser.downloads.download({
+      url: objectUrl,
+      filename: item.filename,
+      conflictAction: "uniquify",
+      saveAs: false
+    });
+    activeDownloadId = downloadId;
+    downloadJobs.set(downloadId, {
+      objectUrl,
+      port: item.port,
+      captureId: item.captureId,
+      requestId: item.requestId,
+      captureTabId: item.captureTabId
+    });
+    const captureJob = Array.from(captureJobs.values()).find(job =>
+      job.tabId === item.captureTabId && (!job.captureId || job.captureId === item.captureId)
+    );
+    if (captureJob) {
+      captureJob.state = "downloading";
+      captureJob.phase = "Firefox is downloading this WebM";
+      captureJob.downloadId = downloadId;
+      captureJob.updatedAt = Date.now();
+    }
+    item.port.postMessage({type: "playback-download:started", download_id: downloadId});
+    const matches = await browser.downloads.search({id: downloadId});
+    const found = matches && matches[0];
+    if (found && (found.state === "complete" || found.state === "interrupted")) {
+      finishJob(downloadId, found.state);
+    }
+  } catch (error) {
+    if (objectUrl) {
+      try { URL.revokeObjectURL(objectUrl); } catch (_) {}
+    }
+    const message = String(error && error.message || error || "Firefox could not start the queued WebM download.");
+    try { item.port.postMessage({type: "playback-download:failed", error: message}); } catch (_) {}
+    try { item.port.disconnect(); } catch (_) {}
+    const captureJob = Array.from(captureJobs.values()).find(job => job.tabId === item.captureTabId);
+    if (captureJob) {
+      captureJob.state = "failed";
+      captureJob.phase = "Download start failed";
+      captureJob.error = message;
+      captureJob.completedAt = Date.now();
+      captureJob.updatedAt = Date.now();
+      captureJob.slot = false;
+      if (captureJob.ownedTab && Number.isInteger(captureJob.tabId)) {
+        void browser.tabs.remove(captureJob.tabId).catch(() => {});
+      }
+      void pumpCaptureQueue();
+    }
+    if (downloadId !== null && activeDownloadId === downloadId) activeDownloadId = null;
+  } finally {
+    downloadQueueStarting = false;
+    if (activeDownloadId === null) void pumpDownloadQueue();
+  }
+}
+
 function makeJobId() {
   return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
 }
 
 function publicCaptureJob(job) {
-  return {id:job.id,videoId:job.videoId,title:job.title,url:job.url,state:job.state,
+  return {id:job.id,videoId:job.videoId,title:job.title,url:job.url,state:job.state,phase:job.phase||null,
     createdAt:job.createdAt,updatedAt:job.updatedAt,startedAt:job.startedAt||null,
     completedAt:job.completedAt||null,downloadId:job.downloadId||null,error:job.error||null};
 }
@@ -173,30 +234,47 @@ async function runCaptureCommand(tabId, command, payload) {
 async function launchCaptureJob(job) {
   job.slot=true;
   job.state="opening";
+  job.phase="Opening the inactive YouTube tab";
   job.updatedAt=Date.now();
   try {
-    if(job.currentTab) job.tabId=job.sourceTabId;
-    else {
-      const tab=await browser.tabs.create({url:job.url,active:false});
+    if(job.currentTab) {
+      job.tabId=job.sourceTabId;
+    } else {
+      const targetUrl = job.url + (job.url.includes("?") ? "&" : "?") + "__playback_capture_job=1";
+      const tab=await browser.tabs.create({url:targetUrl,active:false});
       job.tabId=tab.id;
       job.ownedTab=true;
+      job.phase="Waiting for YouTube's window load event";
+      job.updatedAt=Date.now();
       await waitForTabComplete(tab.id);
     }
     job.state="starting";
+    job.phase="Clicking the player and initializing MediaRecorder";
     job.updatedAt=Date.now();
-    const result=await runCaptureCommand(job.tabId,"record-video",{videoId:job.videoId,title:job.title});
+    const startup = runCaptureCommand(job.tabId,"record-video",{videoId:job.videoId,title:job.title});
+    const result = await Promise.race([
+      startup,
+      new Promise((_,reject)=>setTimeout(()=>reject(new Error(
+        "Startup timed out after 45 seconds. YouTube did not begin playback or MediaRecorder did not initialize. Check Firefox's autoplay permission for youtube.com."
+      )),45000))
+    ]);
     job.captureId=result&&result.capture_id||null;
     job.startedAt=Date.now();
     job.state="recording";
+    job.phase="Capturing decoded playback to the temporary WebM file";
     job.updatedAt=Date.now();
     if(job.stopRequested) await stopCaptureJob({job_id:job.id});
   } catch(error) {
     job.state="failed";
+    job.phase="Startup failed";
     job.error=String(error&&error.message||error||"Could not start this capture.");
     job.completedAt=Date.now();
     job.updatedAt=Date.now();
     job.slot=false;
-    if(job.ownedTab&&Number.isInteger(job.tabId)) await browser.tabs.remove(job.tabId).catch(()=>{});
+    if(Number.isInteger(job.tabId)) {
+      if(job.ownedTab) await browser.tabs.remove(job.tabId).catch(()=>{});
+      else await runCaptureCommand(job.tabId,"stop",null).catch(()=>{});
+    }
     void pumpCaptureQueue();
   }
 }
@@ -262,7 +340,7 @@ async function stopCaptureJob(message) {
     return publicCaptureJob(job);
   }
   if(!Number.isInteger(job.tabId)) throw new Error("The capture tab is not available.");
-  job.state="saving";job.updatedAt=Date.now();
+  job.state="saving";job.phase="Finalizing the WebM file";job.updatedAt=Date.now();
   try { await runCaptureCommand(job.tabId,"stop",null); }
   catch(error) {
     job.error=String(error&&error.message||error||"Could not stop the recording.");

@@ -79,7 +79,7 @@
     if(!job) {button.textContent="● REC";button.title="Record this video in a background YouTube tab";return;}
     const labels={queued:"QUEUED",opening:"OPENING",starting:"STARTING",recording:"● REC",saving:"SAVING",downloading:"SAVING",completed:"SAVED",failed:"RETRY",interrupted:"RETRY",cancelled:"● REC"};
     button.textContent=labels[job.state]||"● REC";
-    button.title=job.error||(job.state==="recording"?"Recording to a WebM file. Click to stop and save.":"Capture state: "+job.state);
+    button.title=job.error||job.phase||(job.state==="recording"?"Recording to a WebM file. Click to stop and save.":"Capture state: "+job.state);
     if(job.state==="recording") button.className="recording";
     else if(["queued","opening","starting"].includes(job.state)) button.className="pending";
     else if(["saving","downloading"].includes(job.state)) button.className="saving";
