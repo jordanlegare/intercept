@@ -134,3 +134,35 @@ test("a document reload reconciles in-flight captures into explicit recoverable 
 
   assert.equal(Core.reconcileInterruptedCapture("downloaded", true), null);
 });
+
+
+test("serialized recording writer flushes the final recorder chunk before closing", async () => {
+  const written = [];
+  const fakeWriter = {
+    async write(chunk) {
+      await Promise.resolve();
+      written.push(chunk.label);
+    },
+    async close() { written.push("closed"); },
+    async abort(reason) { written.push("aborted:" + reason); }
+  };
+  const writer = new Core.SerializedChunkWriter(fakeWriter);
+  writer.enqueue({size: 10, label: "periodic-chunk"});
+  writer.enqueue({size: 5, label: "final-dataavailable-chunk"});
+  await writer.close();
+  assert.deepEqual(written, ["periodic-chunk", "final-dataavailable-chunk", "closed"]);
+  await assert.rejects(writer.enqueue({size: 1, label: "too-late"}), /already closed/);
+});
+
+test("discard aborts the serialized recording writer after queued chunks settle", async () => {
+  const written = [];
+  const fakeWriter = {
+    async write(chunk) { written.push(chunk.label); },
+    async close() { written.push("closed"); },
+    async abort(reason) { written.push("aborted:" + reason); }
+  };
+  const writer = new Core.SerializedChunkWriter(fakeWriter);
+  writer.enqueue({size: 7, label: "partial-chunk"});
+  await writer.abort("user discarded");
+  assert.deepEqual(written, ["partial-chunk", "aborted:user discarded"]);
+});

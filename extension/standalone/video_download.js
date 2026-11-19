@@ -343,7 +343,7 @@
     }
     capture.bytesWritten += blob.size;
     if (activeCapture === capture) status.bytes_written = capture.bytesWritten;
-    capture.writeQueue = capture.writeQueue.then(() => capture.writer.write(blob)).catch(error => {
+    capture.chunkWriter.enqueue(blob).catch(error => {
       capture.writeError = String(error && error.message || error || "Could not write playback cache.");
       stopCapture(capture, "error");
     });
@@ -356,11 +356,11 @@
     try {
       await capture.writeQueue;
       const shouldSave = !capture.writeError && Core.shouldSaveStopReason(capture.stopReason);
-      if (capture.writer) {
+      if (capture.chunkWriter) {
         if (!shouldSave) {
-          try { await capture.writer.abort(capture.writeError || "Capture discarded."); } catch (_) {}
+          await capture.chunkWriter.abort(capture.writeError || "Capture discarded.");
         } else {
-          await capture.writer.close();
+          await capture.chunkWriter.close();
           capture.writerClosed = true;
         }
       }
@@ -474,12 +474,12 @@
     const startedAt = Date.now();
     const capture = {
       id: randomId(), video, identity, recorder: null, stream: null,
-      writer: null, fileHandle: null, directory: null,
+      writer: null, chunkWriter: null, fileHandle: null, directory: null,
       filename: identity.filename, videoKey: identity.key,
       videoId: identity.videoId, videoTitle: identity.title,
       canonicalUrl: identity.canonicalUrl, mimeType,
       bytesWritten: 0, maxBytes: MAX_CAPTURE_BYTES,
-      writeQueue: Promise.resolve(), writeError: null,
+      writeError: null,
       stopReason: null, stopRequested: false, finalized: false,
       preparationFinished: false, writerClosed: false,
       manualPaused: false, playerPaused: false,
@@ -536,6 +536,7 @@
       capture.directory = opened.directory;
       capture.fileHandle = opened.fileHandle;
       capture.writer = opened.writer;
+      capture.chunkWriter = new Core.SerializedChunkWriter(opened.writer);
       await patchHistory(capture.id, {fileAvailable: true}, {type: "temporary_file_opened", at: Date.now()});
 
       if (!status.enabled || activeCapture !== capture || capture.stopRequested || navigationInProgress

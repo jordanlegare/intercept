@@ -71,6 +71,42 @@
     };
   }
 
+  class SerializedChunkWriter {
+    constructor(writer) {
+      if (!writer || typeof writer.write !== "function") {
+        throw new TypeError("A writable file stream is required.");
+      }
+      this.writer = writer;
+      this.queue = Promise.resolve();
+      this.closed = false;
+    }
+
+    enqueue(chunk) {
+      if (this.closed) return Promise.reject(new Error("The capture writer is already closed."));
+      if (!chunk || !Number.isFinite(chunk.size) || chunk.size <= 0) return this.queue;
+      this.queue = this.queue.then(() => this.writer.write(chunk));
+      return this.queue;
+    }
+
+    flush() {
+      return this.queue;
+    }
+
+    async close() {
+      if (this.closed) return;
+      this.closed = true;
+      await this.queue;
+      await this.writer.close();
+    }
+
+    async abort(reason) {
+      if (this.closed) return;
+      this.closed = true;
+      try { await this.queue; } catch (_) {}
+      if (typeof this.writer.abort === "function") await this.writer.abort(reason);
+    }
+  }
+
   class CaptureSessionManager {
     constructor() {
       this.active = null;
@@ -148,6 +184,6 @@
 
   return Object.freeze({
     safeTitle, extractVideoId, buildVideoIdentity, sameVideoIdentity,
-    shouldSaveStopReason, reconcileInterruptedCapture, CaptureSessionManager
+    shouldSaveStopReason, reconcileInterruptedCapture, SerializedChunkWriter, CaptureSessionManager
   });
 });
