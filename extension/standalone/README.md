@@ -5,7 +5,7 @@ An independent Firefox add-on that captures decoded playback output from YouTube
 ## What changed in 1.1.0
 
 - Video-aware sessions: every capture is bound to a stable YouTube video identity (watch, Shorts, Live and embed paths). YouTube SPA navigation, back/forward navigation, and player replacement split sessions at the video boundary. Outgoing recordings retain their original title and ID.
-- Capture history and recovery: metadata and a timestamped event timeline are stored in IndexedDB. Closed WebM files remain in Firefox origin-private storage until a successful download has aged out. Interrupted or failed downloads can be retried from the popup for up to seven days.
+- Capture history and recovery: metadata and a timestamped event timeline are stored in IndexedDB. Closed WebM files remain in Firefox origin-private storage until a successful download has aged out. Interrupted or failed downloads can be retried from the popup for up to seven days. A tab close during recording is reconciled on the next visit; any retained partial file is clearly marked as potentially incomplete.
 - Expanded controls: arm/disarm, manual pause/resume, split into a second WebM, stop and save, and discard.
 - Capture dashboard: current title and video ID, elapsed recording time, bytes written, codec, live state, and a recent capture timeline with recovery/delete actions.
 - Automated tests: Node's test runner covers video identity extraction, SPA video transitions, filename isolation, session pause/resume accounting, split/stop/discard save policy, and rapid consecutive video changes.
@@ -23,7 +23,7 @@ An independent Firefox add-on that captures decoded playback output from YouTube
 
 The extension does not connect to Intercept, create an Intercept session, inspect media network requests, rewrite traffic, or depend on the original Intercept extension. It requests activeTab, scripting, and downloads; content scripts are restricted to HTTPS YouTube domains.
 
-Capture files use the browser's origin-private file system (OPFS); their history records use IndexedDB. A downloaded temporary copy is retained for up to 24 hours to support recovery. Failed and interrupted files are retained for up to seven days. Deleting a history item also deletes its temporary file.
+Capture files use the browser's origin-private file system (OPFS); their history records use IndexedDB. A downloaded temporary copy is retained for up to 24 hours to support recovery. Failed and interrupted files are retained for up to seven days. If a tab closes before MediaRecorder writes its finalization data, a retained partial recording is offered for best-effort recovery and may not play correctly. Deleting a history item also deletes its temporary file.
 
 ## Technical limits
 

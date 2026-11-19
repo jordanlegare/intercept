@@ -119,3 +119,18 @@ test("rapid consecutive video changes cannot merge session identities", () => {
   assert.equal(new Set(sessions.map(session => session.id)).size, 4);
   assert.deepEqual(sessions.map(session => session.videoId), ["A","B","C","D"]);
 });
+
+
+test("a document reload reconciles in-flight captures into explicit recoverable or interrupted states", () => {
+  const withFile = Core.reconcileInterruptedCapture("recording", true);
+  assert.equal(withFile.status, "failed");
+  assert.equal(withFile.fileAvailable, true);
+  assert.match(withFile.error, /may be incomplete/);
+
+  const withoutFile = Core.reconcileInterruptedCapture("finalizing", false);
+  assert.equal(withoutFile.status, "interrupted");
+  assert.equal(withoutFile.fileAvailable, false);
+  assert.match(withoutFile.error, /recoverable recording file/);
+
+  assert.equal(Core.reconcileInterruptedCapture("downloaded", true), null);
+});

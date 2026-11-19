@@ -60,6 +60,17 @@
     return ["complete", "source_changed", "manual_stop", "split"].includes(reason);
   }
 
+  function reconcileInterruptedCapture(status, fileAvailable) {
+    if (!["preparing", "recording", "finalizing", "downloading"].includes(status)) return null;
+    return {
+      status: fileAvailable ? "failed" : "interrupted",
+      fileAvailable: !!fileAvailable,
+      error: fileAvailable
+        ? "The tab closed before recording finalization. The retained file may be incomplete."
+        : "The tab closed before a recoverable recording file was finalized."
+    };
+  }
+
   class CaptureSessionManager {
     constructor() {
       this.active = null;
@@ -137,6 +148,6 @@
 
   return Object.freeze({
     safeTitle, extractVideoId, buildVideoIdentity, sameVideoIdentity,
-    shouldSaveStopReason, CaptureSessionManager
+    shouldSaveStopReason, reconcileInterruptedCapture, CaptureSessionManager
   });
 });

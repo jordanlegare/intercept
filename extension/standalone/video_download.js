@@ -152,7 +152,17 @@
       const now = Date.now();
       const records = await listHistory();
       for (const record of records) {
-        const age = now - Number(record.endedAt || record.startedAt || now);
+        const orphan = Core.reconcileInterruptedCapture(record.status, await captureFileExists(record.filename));
+        if (orphan) {
+          await patchHistory(record.id, {...orphan, endedAt: record.endedAt || now}, {
+            type: "capture_interrupted_by_tab_close", at: now
+          });
+          continue;
+        }
+        const retentionBase = record.status === "downloaded"
+          ? (record.downloadedAt || record.endedAt || record.startedAt)
+          : (record.endedAt || record.startedAt);
+        const age = now - Number(retentionBase || now);
         const removeDownloaded = record.status === "downloaded" && age > DOWNLOADED_FILE_RETENTION_MS;
         const removeExpired = age > HISTORY_RETENTION_MS;
         if ((removeDownloaded || removeExpired) && record.fileAvailable) {
@@ -199,6 +209,7 @@
     try {
       await patchHistory(captureId, {
         status: completed ? "downloaded" : "download_failed",
+        downloadedAt: completed ? Date.now() : null,
         downloadId: data.download_id || null,
         error: completed ? null : "Firefox interrupted the download. The temporary recording is available to retry.",
         fileAvailable: true
