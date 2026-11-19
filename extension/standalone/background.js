@@ -17,7 +17,7 @@ function finishJob(downloadId, state) {
   if (!job) return;
   downloadJobs.delete(downloadId);
   try { URL.revokeObjectURL(job.objectUrl); } catch (_) {}
-  try { job.port.postMessage({type: "playback-download:finished", state}); } catch (_) {}
+  try { job.port.postMessage({type: "playback-download:finished", state, download_id: downloadId, capture_id: job.captureId, request_id: job.requestId}); } catch (_) {}
   try { job.port.disconnect(); } catch (_) {}
 }
 
@@ -72,7 +72,7 @@ browser.runtime.onConnect.addListener(port => {
         throw error;
       }
 
-      downloadJobs.set(downloadId, {objectUrl, port});
+      downloadJobs.set(downloadId, {objectUrl, port, captureId: message.capture_id || null, requestId: message.request_id || null});
       port.postMessage({type: "playback-download:started", download_id: downloadId});
       try {
         const matches = await browser.downloads.search({id: downloadId});

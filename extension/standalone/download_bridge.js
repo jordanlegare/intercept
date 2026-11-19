@@ -48,6 +48,16 @@
         fail(message.error);
         return;
       }
+      if (message.type === "playback-download:finished") {
+        window.postMessage({
+          type: RESULT_TYPE,
+          request_id: message.request_id || data.request_id,
+          download_id: message.download_id,
+          capture_id: message.capture_id || data.capture_id,
+          download_state: message.state
+        }, location.origin);
+        return;
+      }
       if (message.type !== "playback-download:started") return;
       acknowledged = true;
       window.postMessage({
@@ -65,6 +75,7 @@
       port.postMessage({
         type: "start",
         request_id: data.request_id,
+        capture_id: data.capture_id,
         filename: data.filename,
         blob: data.blob
       });
