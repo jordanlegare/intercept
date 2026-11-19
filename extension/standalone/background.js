@@ -243,13 +243,22 @@ async function launchCaptureJob(job) {
     if(job.currentTab) {
       job.tabId=job.sourceTabId;
     } else {
-      const targetUrl = job.url + (job.url.includes("?") ? "&" : "?") + "__playback_capture_job=1";
-      const tab=await browser.tabs.create({url:targetUrl,active:false});
-      job.tabId=tab.id;
-      job.ownedTab=true;
-      job.phase="Waiting for YouTube's window load event";
-      job.updatedAt=Date.now();
-      await waitForTabComplete(tab.id);
+      const existingTab = job.ownedTab && Number.isInteger(job.tabId)
+        ? await browser.tabs.get(job.tabId).catch(()=>null)
+        : null;
+      if(existingTab) {
+        job.phase="Reusing the inactive YouTube tab after autoplay was enabled";
+        job.updatedAt=Date.now();
+        await waitForTabComplete(existingTab.id);
+      } else {
+        const targetUrl = job.url + (job.url.includes("?") ? "&" : "?") + "__playback_capture_job=1";
+        const tab=await browser.tabs.create({url:targetUrl,active:false});
+        job.tabId=tab.id;
+        job.ownedTab=true;
+        job.phase="Waiting for YouTube's window load event";
+        job.updatedAt=Date.now();
+        await waitForTabComplete(tab.id);
+      }
     }
     job.state="starting";
     job.phase="Clicking the player and initializing MediaRecorder";
