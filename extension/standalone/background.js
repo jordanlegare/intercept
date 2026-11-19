@@ -145,8 +145,11 @@ async function pumpDownloadQueue() {
       captureJob.downloadId = downloadId;
       captureJob.updatedAt = Date.now();
     }
-    item.port.postMessage({type: "playback-download:started", download_id: downloadId});
-    const matches = await browser.downloads.search({id: downloadId});
+    // Once Firefox returns a download ID, keep the single-download lock until
+    // downloads.onChanged reports completion or interruption. A disconnected page
+    // must never release the lock and allow another download to overlap this one.
+    try { item.port.postMessage({type: "playback-download:started", download_id: downloadId}); } catch (_) {}
+    const matches = await browser.downloads.search({id: downloadId}).catch(() => []);
     const found = matches && matches[0];
     if (found && (found.state === "complete" || found.state === "interrupted")) {
       finishJob(downloadId, found.state);
@@ -265,15 +268,23 @@ async function launchCaptureJob(job) {
     job.updatedAt=Date.now();
     if(job.stopRequested) await stopCaptureJob({job_id:job.id});
   } catch(error) {
-    job.state="failed";
-    job.phase="Startup failed";
     job.error=String(error&&error.message||error||"Could not start this capture.");
-    job.completedAt=Date.now();
     job.updatedAt=Date.now();
     job.slot=false;
-    if(Number.isInteger(job.tabId)) {
-      if(job.ownedTab) await browser.tabs.remove(job.tabId).catch(()=>{});
-      else await runCaptureCommand(job.tabId,"stop",null).catch(()=>{});
+    const autoplayBlocked = /NotAllowedError|background playback|autoplay permission/i.test(job.error);
+    if(autoplayBlocked && job.ownedTab && Number.isInteger(job.tabId)) {
+      job.state="awaiting_autoplay";
+      job.phase="Firefox blocked background playback; allow YouTube autoplay and click REC to retry";
+      // Keep the inactive helper tab so a retry can reuse the loaded player instead of
+      // repeatedly opening and closing tabs at STARTING.
+    } else {
+      job.state="failed";
+      job.phase="Startup failed";
+      job.completedAt=Date.now();
+      if(Number.isInteger(job.tabId)) {
+        if(job.ownedTab) await browser.tabs.remove(job.tabId).catch(()=>{});
+        else await runCaptureCommand(job.tabId,"stop",null).catch(()=>{});
+      }
     }
     void pumpCaptureQueue();
   }
@@ -297,6 +308,27 @@ async function startInlineCapture(message,sender) {
   const videoId=String(message.video_id||"");
   if(!trusted) throw new Error("Per-video recording is available only from a top-level www.youtube.com page.");
   if(!/^[A-Za-z0-9_-]{1,24}$/.test(videoId)) throw new Error("The selected YouTube video ID is invalid.");
+  const blocked=Array.from(captureJobs.values()).find(job =>
+    job.videoId===videoId && job.state==="awaiting_autoplay" && job.ownedTab && Number.isInteger(job.tabId)
+  );
+  if(blocked) {
+    const tab=await browser.tabs.get(blocked.tabId).catch(()=>null);
+    if(tab) {
+      blocked.state="queued";
+      blocked.phase="Retrying playback in the existing YouTube tab";
+      blocked.error=null;
+      blocked.updatedAt=Date.now();
+      captureQueue.push(blocked.id);
+      void pumpCaptureQueue();
+      return publicCaptureJob(blocked);
+    }
+    blocked.state="failed";
+    blocked.phase="The helper tab was closed";
+    blocked.error="The inactive YouTube helper tab was closed. Click REC to open a fresh one.";
+    blocked.completedAt=Date.now();
+    blocked.updatedAt=Date.now();
+    blocked.tabId=null;
+  }
   const existing=Array.from(captureJobs.values()).find(job =>
     job.videoId===videoId&&!["completed","failed","cancelled","interrupted"].includes(job.state)
   );
@@ -352,8 +384,18 @@ async function stopCaptureJob(message) {
 }
 
 browser.tabs.onRemoved.addListener(tabId=>{
-  const job=Array.from(captureJobs.values()).find(item=>item.tabId===tabId&&item.slot);
+  const job=Array.from(captureJobs.values()).find(item=>item.tabId===tabId);
   if(!job) return;
+  if(job.state==="awaiting_autoplay") {
+    job.state="failed";
+    job.phase="The helper tab was closed";
+    job.error="The inactive YouTube helper tab was closed. Click REC to open a fresh one.";
+    job.completedAt=Date.now();
+    job.updatedAt=Date.now();
+    job.tabId=null;
+    return;
+  }
+  if(!job.slot) return;
   if(!["completed","failed","cancelled"].includes(job.state)) {
     job.state="interrupted";
     job.error="The background recording tab was closed before the download completed.";
