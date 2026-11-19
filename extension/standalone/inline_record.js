@@ -37,16 +37,18 @@
     host.dataset.videoId=videoId;
     host.dataset.mode=mode;
     host.style.cssText=placement==="thumbnail"
-      ?"position:absolute;left:8px;bottom:8px;z-index:2147483000;display:inline-flex;"
+      ?"position:absolute;top:8px;left:8px;z-index:2147483647;display:inline-flex;pointer-events:auto;"
       :"display:inline-flex;vertical-align:middle;margin:0 6px 0 0;position:relative;z-index:2147483000;";
     const shadow=host.attachShadow({mode:"open"});
     const style=document.createElement("style");
-    style.textContent="@keyframes playback-capture-pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,40,40,.55);opacity:1}50%{box-shadow:0 0 0 6px rgba(255,40,40,0);opacity:.72}}button{all:initial;display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:28px;padding:0 10px;border:1px solid #ff5353;border-radius:5px;background:#351313;color:#fff;font:800 10px/1.1 system-ui,sans-serif;letter-spacing:.04em;white-space:nowrap;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.35);user-select:none}button:hover{background:#581818;border-color:#ff7777}button.recording{background:#e21f2b;border-color:#ff6971;animation:playback-capture-pulse 1.15s infinite}button.pending{background:#593a0d;border-color:#e7a83d;color:#ffe3a6}button.saving{background:#333;border-color:#aaa;color:#fff}button.done{background:#16351e;border-color:#50a86b;color:#bdf6c9}button.error{background:#3d1919;border-color:#ff6969;color:#ffd1d1}button:disabled{opacity:.65;cursor:wait}@media(prefers-reduced-motion:reduce){button.recording{animation:none}}";
+    style.textContent="@keyframes playback-capture-pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,40,40,.55);opacity:1}50%{box-shadow:0 0 0 6px rgba(255,40,40,0);opacity:.72}}button{all:initial;pointer-events:auto;position:relative;z-index:1;display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:28px;padding:0 10px;border:1px solid #ff5353;border-radius:5px;background:#351313;color:#fff;font:800 10px/1.1 system-ui,sans-serif;letter-spacing:.04em;white-space:nowrap;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.35);user-select:none}button:hover{background:#581818;border-color:#ff7777}button.recording{background:#e21f2b;border-color:#ff6971;animation:playback-capture-pulse 1.15s infinite}button.pending{background:#593a0d;border-color:#e7a83d;color:#ffe3a6}button.saving{background:#333;border-color:#aaa;color:#fff}button.done{background:#16351e;border-color:#50a86b;color:#bdf6c9}button.error{background:#3d1919;border-color:#ff6969;color:#ffd1d1}button:disabled{opacity:.65;cursor:wait}@media(prefers-reduced-motion:reduce){button.recording{animation:none}}";
     const button=document.createElement("button");
     button.type="button";button.textContent="● REC";button.setAttribute("aria-label","Record "+title);
     button.title="Record this video in a background YouTube tab";
     button.addEventListener("click",async event=>{
-      event.preventDefault();event.stopPropagation();
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
       const known=jobsByVideo.get(videoId);
       if(known&&ACTIVE_STATES.has(known.state)) {
         button.disabled=true;button.textContent="STOPPING…";
@@ -89,19 +91,26 @@
 
   function mountCard(card) {
     if(!(card instanceof Element)) return;
-    const link=card.querySelector('a#thumbnail[href],a[href*="/watch?v="],a[href*="/shorts/"],a[href*="/live/"]');
+    // YouTube's thumbnail is itself inside the link that opens the player.
+    // Mount the small REC control as an absolute overlay child of that link,
+    // rather than beside the thumbnail or inside a nested thumbnail wrapper.
+    // The host only covers the button's footprint, so the rest of the link
+    // remains a normal YouTube "open player" target.
+    if(card.querySelector("[data-playback-capture-control]")) return;
+    const thumbnail=card.querySelector("ytd-thumbnail,.ytThumbnailViewModelImage,.yt-lockup-view-model__content-image");
+    const thumbnailLink=(thumbnail&&thumbnail.closest('a[href]'))
+      ||card.querySelector('a#thumbnail[href]');
+    const link=thumbnailLink||card.querySelector('a[href*="/watch?v="],a[href*="/shorts/"],a[href*="/live/"]');
     if(!link) return;
     const videoId=extractVideoId(link.href||link.getAttribute("href"));
     if(!videoId) return;
-    const thumbnail=card.querySelector("ytd-thumbnail,#thumbnail,.ytThumbnailViewModelImage,.yt-lockup-view-model__content-image");
-    if(thumbnail&&thumbnail.querySelector("[data-playback-capture-control]")) return;
-    if(!thumbnail&&card.querySelector("[data-playback-capture-control]")) return;
     const title=titleFor(card,link);
-    const control=createControl(videoId,title,"background",thumbnail?"thumbnail":"row");
+    const useThumbnailOverlay=!!thumbnailLink;
+    const control=createControl(videoId,title,"background",useThumbnailOverlay?"thumbnail":"row");
     const job=jobsByVideo.get(videoId);if(job) applyState(control,job);
-    if(thumbnail) {
-      if(getComputedStyle(thumbnail).position==="static") thumbnail.style.position="relative";
-      thumbnail.append(control);
+    if(useThumbnailOverlay) {
+      if(getComputedStyle(thumbnailLink).position==="static") thumbnailLink.style.position="relative";
+      thumbnailLink.append(control);
     } else {
       const menu=card.querySelector("#menu,ytd-menu-renderer");
       if(menu&&menu.parentNode) menu.parentNode.insertBefore(control,menu);else card.append(control);
