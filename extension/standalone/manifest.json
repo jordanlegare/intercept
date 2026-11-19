@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Playback Capture",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Capture YouTube playback and save the rendered result as a WebM download.",
   "permissions": ["activeTab", "scripting", "downloads"],
   "background": {"scripts": ["background.js"]},
@@ -12,7 +12,7 @@
   "content_scripts": [
     {
       "matches": ["https://youtube.com/*", "https://*.youtube.com/*"],
-      "js": ["video_download.js"],
+      "js": ["capture_core.js", "video_download.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },
