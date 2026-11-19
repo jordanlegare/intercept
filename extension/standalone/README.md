@@ -9,7 +9,7 @@ An independent Firefox add-on that extracts only the playback-download capabilit
 3. Play the video. The add-on captures the audio/video tracks exposed by the page's media element with Firefox's MediaRecorder.
 4. When playback ends, the add-on finalizes a WebM file and hands it to Firefox's Downloads API.
 
-Pauses suspend recording and playback resumes it. Disarming during a capture discards the in-progress recording. The capture is scoped to the current YouTube document and starts disabled after navigation or reload.
+Pauses suspend recording and playback resumes it. Disarming during a capture discards the in-progress recording. Each recording is bound to the selected YouTube video ID. YouTube single-page navigation finalizes the outgoing recording as its own WebM (retaining that video's title and ID) and starts a fresh file for the newly selected video. The capture starts disabled after a full navigation or reload.
 
 ## Independent operation
 

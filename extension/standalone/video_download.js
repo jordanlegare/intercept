@@ -19,6 +19,8 @@
     completed_at_ms: null
   };
   let activeCapture = null;
+  let navigationInProgress = false;
+  let navigationSnapshot = null;
   const pendingDownloads = new Map();
   const watchedVideos = new WeakSet();
 
@@ -83,15 +85,26 @@
       .slice(0, 110) || "youtube-playback";
   }
 
-  function currentFilename() {
+  function currentVideoContext(video) {
+    let url;
+    try { url = new URL(location.href); }
+    catch (_) { url = new URL("https://www.youtube.com/"); }
+
+    const pathVideoId = url.pathname.match(/^\/(?:shorts|live|embed)\/([A-Za-z0-9_-]{1,24})/i);
+    const rawVideoId = url.searchParams.get("v") || (pathVideoId && pathVideoId[1]) || "";
+    const videoId = /^[A-Za-z0-9_-]{1,24}$/.test(rawVideoId) ? rawVideoId : "";
+    const mediaSource = String(video && (video.currentSrc || video.src) || "");
+    const key = videoId
+      ? "youtube:" + videoId
+      : "page:" + url.origin + url.pathname + "|media:" + mediaSource;
     const heading = document.querySelector("h1.ytd-watch-metadata, ytd-watch-metadata h1");
-    const title = heading && heading.textContent ? heading.textContent : document.title;
-    const videoId = (() => {
-      try { return new URL(location.href).searchParams.get("v") || ""; }
-      catch (_) { return ""; }
-    })();
-    const suffix = videoId && /^[A-Za-z0-9_-]{1,24}$/.test(videoId) ? "-" + videoId : "";
-    return safeFilename(title) + suffix + "-" + new Date().toISOString().replace(/[:.]/g, "-") + ".webm";
+    const titleText = heading && heading.textContent && heading.textContent.trim()
+      ? heading.textContent.trim()
+      : document.title;
+    const title = safeFilename(titleText);
+    const suffix = videoId ? "-" + videoId : "";
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    return {key, videoId, title, mediaSource, filename: title + suffix + "-" + timestamp + ".webm"};
   }
 
   async function openCaptureFile(filename) {
@@ -168,8 +181,10 @@
     status.bytes_written = capture.bytesWritten;
     try {
       await capture.writeQueue;
+      const shouldSave = !capture.writeError
+        && (capture.stopReason === "complete" || capture.stopReason === "source_changed");
       if (capture.writer) {
-        if (capture.writeError || capture.stopReason !== "complete") {
+        if (!shouldSave) {
           try { await capture.writer.abort(capture.writeError || "Playback capture discarded."); } catch (_) {}
         } else {
           await capture.writer.close();
@@ -181,7 +196,7 @@
         }
       }
 
-      if (capture.writeError || capture.stopReason !== "complete") {
+      if (!shouldSave) {
         if (capture.directory && capture.filename) {
           try { await capture.directory.removeEntry(capture.filename); } catch (_) {}
         }
@@ -192,7 +207,14 @@
       }
 
       const file = await capture.fileHandle.getFile();
-      if (file.size === 0) throw new Error("The completed playback capture is empty.");
+      if (file.size === 0) {
+        if (capture.directory && capture.filename) {
+          try { await capture.directory.removeEntry(capture.filename); } catch (_) {}
+        }
+        status.state = status.enabled ? "armed" : "disabled";
+        status.filename = null;
+        return;
+      }
       await requestBrowserDownload(file, capture.filename);
       status.state = "download_started";
       status.bytes_written = file.size;
@@ -218,7 +240,8 @@
   }
 
   async function startCapture(video) {
-    if (!status.enabled || activeCapture || !video || !video.isConnected || video.ended || isAdvertisement(video)) return;
+    if (!status.enabled || navigationInProgress || activeCapture || !video || !video.isConnected || video.ended || isAdvertisement(video)) return;
+    const videoContext = currentVideoContext(video);
     const captureMethod = typeof video.captureStream === "function"
       ? video.captureStream.bind(video)
       : typeof video.mozCaptureStream === "function" ? video.mozCaptureStream.bind(video) : null;
@@ -241,7 +264,11 @@
       writer: null,
       fileHandle: null,
       directory: null,
-      filename: currentFilename(),
+      filename: videoContext.filename,
+      videoKey: videoContext.key,
+      videoId: videoContext.videoId,
+      mediaSource: videoContext.mediaSource,
+      videoTitle: videoContext.title,
       mimeType,
       bytesWritten: 0,
       maxBytes: MAX_CAPTURE_BYTES,
@@ -271,7 +298,8 @@
           throw new Error("Not enough available browser storage for a video capture.");
         }
       }
-      if (!status.enabled || activeCapture !== capture || capture.stopRequested || video.ended || !video.isConnected) {
+      if (!status.enabled || activeCapture !== capture || capture.stopRequested || navigationInProgress
+          || currentVideoContext(video).key !== capture.videoKey || video.ended || !video.isConnected) {
         capture.preparationFinished = true;
         if (!capture.stopRequested) {
           capture.stopRequested = true;
@@ -284,7 +312,8 @@
       capture.directory = opened.directory;
       capture.fileHandle = opened.fileHandle;
       capture.writer = opened.writer;
-      if (!status.enabled || activeCapture !== capture || capture.stopRequested || video.ended || !video.isConnected) {
+      if (!status.enabled || activeCapture !== capture || capture.stopRequested || navigationInProgress
+          || currentVideoContext(video).key !== capture.videoKey || video.ended || !video.isConnected) {
         capture.preparationFinished = true;
         if (!capture.stopRequested) {
           capture.stopRequested = true;
@@ -328,18 +357,25 @@
   }
 
   function onPlaying(video) {
-    if (!isPlayerVideo(video) || isAdvertisement(video) || !status.enabled) return;
-    if (activeCapture && activeCapture.video === video) {
-      if (activeCapture.recorder && activeCapture.recorder.state === "paused") {
-        try { activeCapture.recorder.resume(); } catch (_) {}
-      }
-      return;
-    }
+    if (!isPlayerVideo(video) || isAdvertisement(video) || !status.enabled || navigationInProgress) return;
+    const incomingContext = currentVideoContext(video);
     if (activeCapture) {
       const previous = activeCapture;
+      const sameVideo = previous.video === video && previous.videoKey === incomingContext.key;
+      if (sameVideo && !previous.stopRequested) {
+        if (previous.recorder && previous.recorder.state === "paused") {
+          try { previous.recorder.resume(); } catch (_) {}
+        }
+        return;
+      }
+      // A YouTube SPA transition can reuse the same video element. A changed
+      // video ID is still a hard boundary between independent capture files.
       stopCapture(previous, "source_changed");
       void previous.finished.then(() => {
-        if (status.enabled && !video.paused && video.isConnected) void startCapture(video);
+        if (status.enabled && !navigationInProgress && !video.paused && !video.ended
+            && video.isConnected && currentVideoContext(video).key === incomingContext.key) {
+          void startCapture(video);
+        }
       });
       return;
     }
@@ -359,7 +395,10 @@
     });
     video.addEventListener("ended", () => {
       if (activeCapture && activeCapture.video === video) {
-        stopCapture(activeCapture, isAdvertisement(video) ? "ad" : "complete");
+        const reason = isAdvertisement(video)
+          ? "ad"
+          : currentVideoContext(video).key === activeCapture.videoKey ? "complete" : "source_changed";
+        stopCapture(activeCapture, reason);
       }
     });
     video.addEventListener("emptied", () => {
@@ -410,6 +449,47 @@
       writable: false
     });
   } catch (_) {}
+
+  function beginYouTubeNavigation() {
+    navigationInProgress = true;
+    navigationSnapshot = activeCapture ? {
+      video: activeCapture.video,
+      videoKey: activeCapture.videoKey,
+      mediaSource: activeCapture.video.currentSrc || activeCapture.mediaSource || ""
+    } : null;
+    if (activeCapture) stopCapture(activeCapture, "source_changed");
+  }
+
+  function finishYouTubeNavigation() {
+    navigationInProgress = false;
+    scanVideos();
+    const outgoing = navigationSnapshot;
+    navigationSnapshot = null;
+    if (!outgoing) return;
+    const videos = document.querySelectorAll("#movie_player video, video.html5-main-video, ytd-reel-video-renderer video");
+    for (const candidate of videos) {
+      if (!candidate.isConnected || candidate.paused || candidate.ended || !isPlayerVideo(candidate)) continue;
+      const context = currentVideoContext(candidate);
+      const source = String(candidate.currentSrc || candidate.src || "");
+      if (context.key === outgoing.videoKey) continue;
+      if (candidate === outgoing.video && source === outgoing.mediaSource) continue;
+      onPlaying(candidate);
+      break;
+    }
+  }
+
+  // Split the outgoing recording before YouTube swaps its SPA page data.
+  document.addEventListener("yt-navigate-start", beginYouTubeNavigation, true);
+  document.addEventListener("yt-navigate-finish", finishYouTubeNavigation, true);
+  document.addEventListener("yt-page-data-updated", () => {
+    if (activeCapture && currentVideoContext(activeCapture.video).key !== activeCapture.videoKey) {
+      stopCapture(activeCapture, "source_changed");
+    }
+  }, true);
+  window.addEventListener("popstate", () => {
+    beginYouTubeNavigation();
+    queueMicrotask(finishYouTubeNavigation);
+  });
 
   scanVideos();
   if (typeof MutationObserver === "function" && document.documentElement) {
