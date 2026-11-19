@@ -37,7 +37,7 @@
     host.dataset.videoId=videoId;
     host.dataset.mode=mode;
     host.style.cssText=placement==="thumbnail"
-      ?"position:absolute;right:8px;bottom:8px;z-index:2147483000;display:inline-flex;"
+      ?"position:absolute;left:8px;bottom:8px;z-index:2147483000;display:inline-flex;"
       :"display:inline-flex;vertical-align:middle;margin:0 6px 0 0;position:relative;z-index:2147483000;";
     const shadow=host.attachShadow({mode:"open"});
     const style=document.createElement("style");
