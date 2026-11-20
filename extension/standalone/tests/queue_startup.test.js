@@ -34,8 +34,11 @@ test("transient startup failures retain the helper tab and reserve the queue slo
   assert.match(background, /if\(job\.state==="queued" \|\| job\.state==="awaiting_autoplay" \|\| job\.state==="awaiting_retry"\)/);
 });
 
-test("the startup path retries once in-place and waits for a pre-roll ad", () => {
+test("startup has no deadline and waits for player initialization and pre-roll ads", () => {
   assert.match(background, /for \(let attempt = 1; attempt <= 2; attempt\+\+\)/);
+  assert.match(background, /await runCaptureCommand\(job\.tabId,"record-video"/);
+  assert.match(background, /Deliberately wait without a startup deadline/);
+  assert.doesNotMatch(background, /Startup timed out after|150000|Promise\.race\(\[/);
   assert.match(background, /retrying in the same helper tab/);
   assert.match(downloader, /async function waitForAdvertisementToFinish/);
   assert.match(downloader, /video = await waitForAdvertisementToFinish\(video\)/);
