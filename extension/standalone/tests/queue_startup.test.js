@@ -67,3 +67,13 @@ test("elapsed timer stays hidden during standby and player initialization", () =
   assert.match(popupHtml, /id="elapsed-stat"/);
   assert.match(popupCss, /\.stats\.without-elapsed/);
 });
+
+test("Firefox autoplay rejection exposes the native permission control and retries the same job", () => {
+  assert.match(background, /keepHelperActiveForAutoplay/);
+  assert.match(background, /autoplayPermissionHelpOpenedAt/);
+  assert.match(background, /Firefox's autoplay-blocked address-bar icon/);
+  assert.match(background, /browser\\.tabs\\.update\\(tab\\.id,\\{active:true\\}\\)/);
+  assert.match(inline, /awaiting_autoplay:job\\.autoplayPermissionHelpOpened\\?"RETRY":"SET AUTOPLAY"/);
+  assert.match(overlay, /job-allow/);
+  assert.match(overlay, /SET AUTOPLAY/);
+});
