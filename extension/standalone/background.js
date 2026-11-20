@@ -296,7 +296,8 @@ function publicCaptureJob(job) {
     selectedPath:job.selectedPath||null,sourceUrl:job.sourceUrl||null,sourcePath:job.sourcePath||null,
     state:job.state,phase:job.phase||null,queuePosition:job.queuePosition||null,
     createdAt:job.createdAt,updatedAt:job.updatedAt,startedAt:job.startedAt||null,
-    completedAt:job.completedAt||null,downloadId:job.downloadId||null,error:job.error||null};
+    completedAt:job.completedAt||null,downloadId:job.downloadId||null,error:job.error||null,
+    autoplayPermissionHelpOpened:!!job.autoplayPermissionHelpOpenedAt};
 }
 
 function captureJobSnapshot() {
@@ -385,6 +386,7 @@ async function launchCaptureJob(job) {
     const returnTabId = activeBefore[0] && activeBefore[0].id !== job.tabId
       ? activeBefore[0].id : null;
     let helperActivated = false;
+    let keepHelperActiveForAutoplay = false;
     try {
       const helper = await browser.tabs.get(job.tabId);
       if (!helper.active) {
@@ -408,6 +410,7 @@ async function launchCaptureJob(job) {
           startupError = error;
           const detail = String(error && error.message || error || "");
           const autoplayBlocked = /NotAllowedError|autoplay permission|autoplay is blocked/i.test(detail);
+          if (autoplayBlocked) keepHelperActiveForAutoplay = true;
           if (attempt >= 2 || autoplayBlocked) break;
           job.phase = "YouTube player is still initializing; retrying in the same helper tab (attempt 2 of 2)";
           job.error = detail;
@@ -429,7 +432,7 @@ async function launchCaptureJob(job) {
       await persistCaptureState();
       if(job.stopRequested) await stopCaptureJob({job_id:job.id});
     } finally {
-      if (helperActivated && Number.isInteger(returnTabId)) {
+      if (!keepHelperActiveForAutoplay && helperActivated && Number.isInteger(returnTabId)) {
         const activeNow = await browser.tabs.query({active:true,lastFocusedWindow:true}).catch(()=>[]);
         // Do not override a user's own tab switch made while the player was starting.
         if (activeNow[0] && activeNow[0].id === job.tabId) {
@@ -450,11 +453,17 @@ async function launchCaptureJob(job) {
       job.slot=false;
       if (helperTab) await browser.tabs.remove(job.tabId).catch(()=>{});
     } else if (helperTab) {
+      if (autoplayBlocked) {
+        // Keep the blocked helper tab visible so Firefox exposes its native autoplay
+        // permission control in the address bar for this exact YouTube origin.
+        job.autoplayPermissionHelpOpenedAt = null;
+        await browser.tabs.update(job.tabId,{active:true}).catch(()=>{});
+      }
       // Preserve the warmed YouTube player after a transient startup failure.
       // The REC button can retry against this same tab instead of opening a new one.
       job.state=autoplayBlocked ? "awaiting_autoplay" : "awaiting_retry";
       job.phase=autoplayBlocked
-        ? "Firefox blocked background playback; enable Allow Audio and Video for youtube.com, then click ALLOW PLAY"
+        ? "Firefox blocked playback. Click SET AUTOPLAY to focus this helper tab, use Firefox's autoplay-blocked address-bar icon to allow Audio and Video for www.youtube.com, then click RETRY."
         : "Startup did not complete; helper tab retained. Click RETRY to resume this same selection";
       job.slot=true;
     } else {
@@ -510,9 +519,19 @@ async function startInlineCapture(message,sender) {
     const tab=await browser.tabs.get(blocked.tabId).catch(()=>null);
     if(tab) {
       const retryingAutoplayBlock = blocked.state === "awaiting_autoplay";
+      if (retryingAutoplayBlock && !blocked.autoplayPermissionHelpOpenedAt) {
+        blocked.autoplayPermissionHelpOpenedAt = Date.now();
+        blocked.phase = "Helper tab opened. Click Firefox's autoplay-blocked icon beside the address bar and choose Allow Audio and Video for www.youtube.com. Return here and click RETRY.";
+        blocked.error = null;
+        blocked.updatedAt = Date.now();
+        await persistCaptureState();
+        await browser.tabs.update(tab.id,{active:true});
+        return publicCaptureJob(blocked);
+      }
+      if (retryingAutoplayBlock) blocked.autoplayPermissionHelpOpenedAt = null;
       blocked.state="queued";
       blocked.phase=retryingAutoplayBlock
-        ? "Retrying after YouTube autoplay permission was changed"
+        ? "Retrying after the YouTube autoplay site permission was changed"
         : "Retrying playback in the retained YouTube helper tab";
       blocked.error=null;
       blocked.slot=false;
