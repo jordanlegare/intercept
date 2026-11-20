@@ -455,7 +455,7 @@ async function startInlineCapture(message,sender) {
       blocked.error=null;
       blocked.slot=false;
       blocked.updatedAt=Date.now();
-      if(!captureQueue.includes(blocked.id)) captureQueue.push(blocked.id);
+      if(!captureQueue.includes(blocked.id)) captureQueue.unshift(blocked.id);
       await persistCaptureState();
       void pumpCaptureQueue();
       return publicCaptureJob(blocked);
