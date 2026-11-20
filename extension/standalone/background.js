@@ -456,14 +456,14 @@ async function launchCaptureJob(job) {
       if (autoplayBlocked) {
         // Keep the blocked helper tab visible so Firefox exposes its native autoplay
         // permission control in the address bar for this exact YouTube origin.
-        job.autoplayPermissionHelpOpenedAt = null;
+        job.autoplayPermissionHelpOpenedAt = Date.now();
         await browser.tabs.update(job.tabId,{active:true}).catch(()=>{});
       }
       // Preserve the warmed YouTube player after a transient startup failure.
       // The REC button can retry against this same tab instead of opening a new one.
       job.state=autoplayBlocked ? "awaiting_autoplay" : "awaiting_retry";
       job.phase=autoplayBlocked
-        ? "Firefox blocked playback. Click SET AUTOPLAY to focus this helper tab, use Firefox's autoplay-blocked address-bar icon to allow Audio and Video for www.youtube.com, then click RETRY."
+        ? "Firefox blocked autoplay. The helper tab is active; click Firefox's autoplay-blocked address-bar icon and choose Allow Audio and Video for www.youtube.com. Return here and click RETRY."
         : "Startup did not complete; helper tab retained. Click RETRY to resume this same selection";
       job.slot=true;
     } else {
