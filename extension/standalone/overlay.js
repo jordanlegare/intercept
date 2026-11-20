@@ -231,7 +231,7 @@
       const main=document.createElement("div");main.className="job-main";
       const title=document.createElement("div");title.className="job-title";title.textContent=job.title||job.videoId;
       const source=document.createElement("div");source.className="job-state";
-      source.textContent=(job.state||"unknown").replace(/_/g," ").toUpperCase()+" · "+job.videoId;
+      source.textContent=(job.state==="queued"&&job.queuePosition?"QUEUED #"+job.queuePosition:(job.state||"unknown").replace(/_/g," ").toUpperCase())+" · "+job.videoId;
       main.append(title,source);
       if(job.selectedPath) {
         const selected=document.createElement("div");selected.className="job-state";selected.textContent="SELECTED "+job.selectedPath;
@@ -240,7 +240,8 @@
       if(job.sourcePath) {
         const origin=document.createElement("div");origin.className="job-state";origin.textContent="CLICKED FROM "+job.sourcePath;
         main.append(origin);
-      }row.append(main);
+      }
+      row.append(main);
       if(["recording","queued","opening","starting","awaiting_autoplay"].includes(job.state)) {
         const stop=document.createElement("button");stop.className="job-stop";stop.textContent=job.state==="recording"?"STOP":"CANCEL";
         stop.addEventListener("click",async()=>{
