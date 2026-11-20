@@ -1,6 +1,14 @@
-# Playback Capture for Firefox 1.3.7
+# Playback Capture for Firefox 1.3.8
 
 Playback Capture is a standalone Firefox add-on that queues selected YouTube videos, starts playback through YouTube's exposed player API, and records the decoded player output to WebM files. It has its own background queue, capture session manager, temporary file library, recovery flow, toolbar dashboard, and Firefox download bridge. It does not connect to the Intercept Rust server.
+
+## 1.3.8 — Queue startup recovery
+
+- The queue explicitly injects and verifies the native player API adapter before invoking the recorder, including when reusing an already-open helper tab.
+- Player startup gets one bounded retry in the same helper tab for transient initialization failures.
+- A pre-roll advertisement is allowed to finish before MediaRecorder attaches to the selected video's playback.
+- Startup failures no longer immediately destroy an owned helper tab. The queue retains it and exposes **RETRY** (or **ALLOW PLAY** for a Firefox autoplay rejection); retry reuses the same YouTube player rather than opening a second tab.
+- Retained retry jobs survive background-worker restarts and can be cancelled from either the card button or dashboard.
 
 ## 1.3.7 — Native YouTube player API
 
@@ -22,7 +30,7 @@ Recommended site-specific setup:
 
 You can instead set **Default for all websites → Allow Audio and Video** in the Autoplay settings. That is a broader permission and affects other sites too; a specific YouTube site permission takes precedence over the default.
 
-When this permission is blocked, a queued job may stop in the `ALLOW PLAY` state. That label means the first automatic playback attempt was rejected and the job is waiting for a retry. Clicking it requeues the job and retries startup with the helper tab foregrounded; it does **not** grant Firefox autoplay permission. Change the permission first, then click `ALLOW PLAY` to retry the waiting job. New queue selections should then start automatically, subject to YouTube/player readiness and network conditions.
+When this permission is blocked, a queued job may stop in the `ALLOW PLAY` state. That label means the automatic playback request was rejected and the job is waiting for a retry. Clicking it retries playback in the retained helper tab; it does **not** grant Firefox autoplay permission. Change the permission first, then click `ALLOW PLAY`. Other transient startup failures show `RETRY`, also reusing the same helper tab. Pre-roll advertisements are allowed to finish before recording begins.
 
 ## Use
 
@@ -61,7 +69,7 @@ If a job remains at `ALLOW PLAY`, verify the site-specific autoplay permission f
 
 ## Install for testing
 
-1. Download [youtube-playback-download-1.3.7.xpi](../youtube-playback-download-1.3.7.xpi).
+1. Download [youtube-playback-download-1.3.8.xpi](../youtube-playback-download-1.3.7.xpi).
 2. Open `about:debugging#/runtime/this-firefox`.
 3. Choose **Load Temporary Add-on** and select the downloaded XPI.
 4. Reload any YouTube tab that was already open.
@@ -97,4 +105,4 @@ Capture files use the browser's origin-private file system (OPFS), and history r
 - `tests/capture_core.test.js` — capture-session and identity tests.
 - `tests/youtube_player_api.test.js` — player readiness, API startup, playback confirmation, and autoplay-rejection tests.
 
-The XPI is built from this directory with the manifest at the archive root.
+The queue has one active capture slot. An autoplay rejection or transient startup failure retains its helper tab and reserves the slot until the job is retried or cancelled. The XPI is built from this directory with the manifest at the archive root.
