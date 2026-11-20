@@ -78,7 +78,7 @@
     "@media(prefers-reduced-motion:reduce){*{transition:none!important}}"
   ].join("\n");
   const markup = '<section class="panel">' +
-    '<div class="head"><span class="mark"></span><span class="brand">PLAYBACK CAPTURE</span><span class="ver">1.3.7 · DARK</span>' +
+    '<div class="head"><span class="mark"></span><span class="brand">PLAYBACK CAPTURE</span><span class="ver">1.3.8 · DARK</span>' +
     '<button class="icon" id="minimize" title="Minimize" aria-label="Minimize">−</button>' +
     '<button class="icon" id="close" title="Close overlay" aria-label="Close">×</button></div>' +
     '<div class="body">' +
@@ -242,7 +242,7 @@
         main.append(origin);
       }
       row.append(main);
-      if(["recording","queued","opening","starting","awaiting_autoplay"].includes(job.state)) {
+      if(["recording","queued","opening","starting","awaiting_autoplay","awaiting_retry"].includes(job.state)) {
         const stop=document.createElement("button");stop.className="job-stop";stop.textContent=job.state==="recording"?"STOP":"CANCEL";
         stop.addEventListener("click",async()=>{
           const response=await browser.runtime.sendMessage({type:"playback-capture:inline-stop",job_id:job.id});
