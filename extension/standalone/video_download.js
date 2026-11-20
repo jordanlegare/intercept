@@ -41,16 +41,6 @@
     catch (_) { return false; }
   }
 
-  function withCaptureTimeout(promise, timeoutMs, message) {
-    let timer;
-    return Promise.race([
-      promise,
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-      })
-    ]).finally(() => clearTimeout(timer));
-  }
-
   function randomId() {
     return globalThis.crypto && typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
@@ -786,45 +776,41 @@
   }
 
 
-  async function waitForPlayerVideo(timeoutMs = 30000) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+  async function waitForPlayerVideo() {
+    while (true) {
       const video = document.querySelector("#movie_player video.html5-main-video, #movie_player video, video.html5-main-video, ytd-reel-video-renderer video");
       if (video && video.isConnected && video.readyState >= 1) return video;
       await new Promise(resolve => setTimeout(resolve, 200));
     }
-    throw new Error("YouTube did not create a playable video element within 30 seconds.");
   }
 
-  async function waitForAdvertisementToFinish(video, timeoutMs = 90000) {
-    const deadline = Date.now() + timeoutMs;
+  async function waitForAdvertisementToFinish(video) {
     let currentVideo = video;
     let playerApi = null;
     const bridge = globalThis.__standaloneYouTubePlayerApiV1;
-    while (Date.now() < deadline) {
+    while (true) {
       if (!currentVideo || !currentVideo.isConnected) {
-        currentVideo = await waitForPlayerVideo(Math.min(10000, Math.max(1000, deadline - Date.now())));
+        currentVideo = await waitForPlayerVideo();
         playerApi = null;
       }
       if (!isAdvertisement(currentVideo)) return currentVideo;
       if (!bridge) throw new Error("The YouTube player API adapter is missing while waiting for the advertisement to finish.");
-      if (!playerApi) playerApi = await bridge.waitForPlayerApi(document, "", 20000);
+      if (!playerApi) playerApi = await bridge.waitForPlayerApi(document, "");
       if (currentVideo.paused || currentVideo.ended) {
         // Let a pre-roll ad play out before MediaRecorder attaches to the
         // selected video's decoded playback stream.
-        await bridge.startPlayback(playerApi, currentVideo, {timeoutMs:12000});
+        await bridge.startPlayback(playerApi, currentVideo);
       }
       await new Promise(resolve => setTimeout(resolve, 250));
     }
-    throw new Error("YouTube's advertisement did not finish within 90 seconds. The helper tab is retained so this selection can be retried.");
   }
 
   async function startYouTubePlayback(video, videoId) {
     const bridge = globalThis.__standaloneYouTubePlayerApiV1;
     if (!bridge) throw new Error("The YouTube player API adapter is missing; reload the helper tab.");
-    const api = await bridge.waitForPlayerApi(document, videoId, 30000);
+    const api = await bridge.waitForPlayerApi(document, videoId);
     try {
-      await bridge.startPlayback(api, video, {timeoutMs: 15000});
+      await bridge.startPlayback(api, video);
     } catch (error) {
       const detail = String(error && error.message || error || "Playback was rejected.");
       if (/NotAllowedError|autoplay/i.test(detail)) {
@@ -853,24 +839,18 @@
     }
     try {
       if (!activeCapture) {
-        await withCaptureTimeout(
-          startCapture(video, title),
-          20000,
-          "The recorder did not initialize within 20 seconds. Check Firefox storage and MediaRecorder support."
-        );
+        await startCapture(video, title);
       }
     } catch (error) {
       throw new Error("Recorder startup failed: " + String(error && error.message || error));
     }
-    const deadline = Date.now() + 10000;
-    while (Date.now() < deadline) {
+    while (true) {
       if (activeCapture && activeCapture.video === video
           && activeCapture.recorder && activeCapture.recorder.state === "recording") return statusSnapshot();
       if (status.state === "error") throw new Error(status.error || "The recorder could not start.");
       if (!video.isConnected) throw new Error("The YouTube player was replaced before recording began.");
       await new Promise(resolve => setTimeout(resolve, 150));
     }
-    throw new Error("The video did not enter the recording state. Check autoplay permissions and retry.");
   }
 
   async function getDashboardSnapshot() {
