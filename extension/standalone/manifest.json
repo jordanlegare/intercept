@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Playback Capture",
-  "version": "1.4.0",
-  "description": "Queue YouTube selections, wait through ads, and retry transient player startup failures in the same helper tab.",
+  "version": "1.4.1",
+  "description": "Queue YouTube selections, wait through ads, and guide users to Firefox autoplay permissions when background playback is blocked.",
   "permissions": [
     "activeTab",
     "scripting",
