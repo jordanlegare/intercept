@@ -78,7 +78,7 @@
     "@media(prefers-reduced-motion:reduce){*{transition:none!important}}"
   ].join("\n");
   const markup = '<section class="panel">' +
-    '<div class="head"><span class="mark"></span><span class="brand">PLAYBACK CAPTURE</span><span class="ver">1.3.0 · DARK</span>' +
+    '<div class="head"><span class="mark"></span><span class="brand">PLAYBACK CAPTURE</span><span class="ver">1.3.5 · DARK</span>' +
     '<button class="icon" id="minimize" title="Minimize" aria-label="Minimize">−</button>' +
     '<button class="icon" id="close" title="Close overlay" aria-label="Close">×</button></div>' +
     '<div class="body">' +
@@ -220,18 +220,20 @@
     const container=$("jobs");
     const jobs=await send("jobs");
     container.replaceChildren();
-    const active=(jobs||[]).filter(job=>!["completed","failed","cancelled","interrupted"].includes(job.state));
-    $("job-count").textContent=active.length+" ACTIVE";
-    if(!active.length) {
-      const empty=document.createElement("div");empty.className="empty";empty.textContent="No background recordings queued.";container.append(empty);return;
+    const remembered=(jobs||[]);
+    const pending=remembered.filter(job=>!["completed","failed","cancelled","interrupted"].includes(job.state));
+    $("job-count").textContent=pending.length+" PENDING · "+remembered.length+" SAVED/SEEN";
+    if(!remembered.length) {
+      const empty=document.createElement("div");empty.className="empty";empty.textContent="No REC selections yet. Click REC while browsing to build the queue.";container.append(empty);return;
     }
-    for(const job of active.slice(0,12)) {
+    for(const job of remembered.slice(-30)) {
       const row=document.createElement("div");row.className="job";
       const main=document.createElement("div");main.className="job-main";
       const title=document.createElement("div");title.className="job-title";title.textContent=job.title||job.videoId;
-      const state=document.createElement("div");state.className="job-state";state.textContent=(job.state||"unknown").toUpperCase()+" · "+job.videoId;
-      main.append(title,state);row.append(main);
-      if(["recording","queued","opening","starting"].includes(job.state)) {
+      const source=document.createElement("div");source.className="job-state";
+      source.textContent=(job.state||"unknown").replace(/_/g," ").toUpperCase()+" · "+job.videoId+(job.sourcePath?" · FROM "+job.sourcePath:"");
+      main.append(title,source);row.append(main);
+      if(["recording","queued","opening","starting","awaiting_autoplay"].includes(job.state)) {
         const stop=document.createElement("button");stop.className="job-stop";stop.textContent=job.state==="recording"?"STOP":"CANCEL";
         stop.addEventListener("click",async()=>{
           const response=await browser.runtime.sendMessage({type:"playback-capture:inline-stop",job_id:job.id});
