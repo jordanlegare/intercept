@@ -21,7 +21,7 @@ A site-specific block can override the global default. When Firefox rejects star
 
 ### Firefox data collection declaration
 
-Playback Capture declares `required: ["none"]` in Firefox's built-in data consent manifest field. Capture selections, video metadata, queue state, session history, and recordings remain in local browser storage or the local download destination; the extension does not transmit this information to an external service.
+Playback Capture declares `personallyIdentifyingInfo`, `websiteContent`, and `websiteActivity` in Firefox's built-in data consent manifest field because it captures website video/audio and saves WebM recordings through Firefox Downloads. The files and queue/history remain on the user's device; the extension does not upload them to an external analytics or storage service.
 
 ### Install the development XPI
 
