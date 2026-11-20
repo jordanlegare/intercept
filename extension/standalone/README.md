@@ -1,4 +1,10 @@
-# Playback Capture for Firefox 1.3.9
+# Playback Capture for Firefox 1.4.1
+
+## 1.4.1 — Firefox autoplay permission handoff
+
+- When Firefox blocks playback, the helper tab stays foregrounded so Firefox's native autoplay-blocked address-bar control is visible.
+- The REC control changes to **SET AUTOPLAY**. Click it to focus the retained helper tab, use Firefox's blocked-autoplay control to allow **Audio and Video** for `www.youtube.com`, then return and click **RETRY**.
+- The dashboard queue has the same **SET AUTOPLAY / RETRY** action. The extension does not change Firefox preferences or grant autoplay itself; Firefox requires the user to approve the site exception.
 
 ## 1.3.9 — Standby timer visibility
 
@@ -34,11 +40,11 @@ Recommended site-specific setup:
 
 You can instead set **Default for all websites → Allow Audio and Video** in the Autoplay settings. That is a broader permission and affects other sites too; a specific YouTube site permission takes precedence over the default.
 
-When this permission is blocked, a queued job may stop in the `ALLOW PLAY` state. That label means the automatic playback request was rejected and the job is waiting for a retry. Clicking it retries playback in the retained helper tab; it does **not** grant Firefox autoplay permission. Change the permission first, then click `ALLOW PLAY`. Other transient startup failures show `RETRY`, also reusing the same helper tab. Pre-roll advertisements are allowed to finish before recording begins.
+When this permission is blocked, a queued job enters `SET AUTOPLAY`. Click it once to bring the retained helper tab forward. Firefox shows its native autoplay-blocked control beside the address bar; open it and select **Allow Audio and Video** for `www.youtube.com`. Return to the original YouTube tab and click `RETRY` to resume the same queued selection. The extension cannot open or accept Firefox's native permission panel on the user's behalf. Other transient startup failures show `RETRY`, also reusing the same helper tab. Pre-roll advertisements are allowed to finish before recording begins.
 
 ## Use
 
-1. Install the XPI (see **Install for testing** below), set YouTube's autoplay permission as described above, and reload any YouTube tabs that were already open.
+1. Install the XPI (see **Install for testing** below), use `SET AUTOPLAY` if Firefox blocks playback, and reload any YouTube tabs that were already open.
 2. Browse YouTube normally. Red `REC` controls appear on supported video cards and beside the like controls on a watch page.
 3. Click a card's `REC` control to add that video to the persistent FIFO capture queue without navigating the browsing tab. The extension opens a dedicated YouTube helper tab, briefly activates it for playback startup, starts the recording when playback is confirmed, and restores the previously active tab.
 4. Capture jobs run one at a time. Finalized WebM files enter a separate FIFO download queue, with only one Firefox download started at a time.
@@ -73,7 +79,7 @@ If a job remains at `ALLOW PLAY`, verify the site-specific autoplay permission f
 
 ## Install for testing
 
-1. Download [youtube-playback-download-1.4.0.xpi](../youtube-playback-download-1.3.9.xpi).
+1. Download [youtube-playback-download-1.4.1.xpi](../youtube-playback-download-1.4.1.xpi).
 2. Open `about:debugging#/runtime/this-firefox`.
 3. Choose **Load Temporary Add-on** and select the downloaded XPI.
 4. Reload any YouTube tab that was already open.
