@@ -19,7 +19,7 @@ Playback Capture is a standalone Firefox add-on that queues selected YouTube vid
 - Player startup now uses the exposed `#movie_player` API. The extension waits for the selected video ID and the required methods, calls `wakeUpControls()` when available, then calls `playVideo()`.
 - Startup listens for the YouTube `onStateChange` event and verifies both the `PLAYING` state and advancing playback time before initializing MediaRecorder. A visible Play button is no longer the primary startup mechanism.
 - The helper tab is temporarily brought to the foreground during startup and returned to the background after recording is confirmed. The user's own tab switch is respected.
-- Startup and player readiness have bounded timeouts and actionable errors. The one-at-a-time capture queue and serialized Firefox download queue are retained.
+- Startup and player readiness wait without a time limit; actionable errors are still surfaced when YouTube or Firefox explicitly rejects startup. The one-at-a-time capture queue and serialized Firefox download queue are retained.
 
 ### Required Firefox autoplay permission
 
@@ -73,7 +73,7 @@ If a job remains at `ALLOW PLAY`, verify the site-specific autoplay permission f
 
 ## Install for testing
 
-1. Download [youtube-playback-download-1.3.9.xpi](../youtube-playback-download-1.3.9.xpi).
+1. Download [youtube-playback-download-1.4.0.xpi](../youtube-playback-download-1.3.9.xpi).
 2. Open `about:debugging#/runtime/this-firefox`.
 3. Choose **Load Temporary Add-on** and select the downloaded XPI.
 4. Reload any YouTube tab that was already open.
