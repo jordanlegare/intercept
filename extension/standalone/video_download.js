@@ -786,14 +786,96 @@
   }
 
 
+  function isPlayerControlClickable(element) {
+    if (!element || !element.isConnected || element.disabled
+        || element.getAttribute("aria-disabled") === "true") return false;
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden"
+      && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+  }
+
   async function waitForPlayerVideo(timeoutMs = 30000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const video = document.querySelector("#movie_player video.html5-main-video, #movie_player video, video.html5-main-video, ytd-reel-video-renderer video");
       if (video && video.isConnected && video.readyState >= 1) return video;
-      await new Promise(resolve => setTimeout(resolve, 250));
+      await new Promise(resolve => setTimeout(resolve, 200));
     }
     throw new Error("YouTube did not create a playable video element within 30 seconds.");
+  }
+
+  async function waitForYouTubePlayButton(timeoutMs = 12000) {
+    const selectors = [
+      "#movie_player button.ytp-large-play-button",
+      "#movie_player .ytp-large-play-button",
+      "#movie_player button.ytp-play-button",
+      "#movie_player .ytp-play-button"
+    ];
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      for (const selector of selectors) {
+        const candidate = document.querySelector(selector);
+        if (isPlayerControlClickable(candidate)) return candidate;
+      }
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    return null;
+  }
+
+  async function waitForPlaybackToAdvance(video, initialTime, timeoutMs = 15000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!video.isConnected) throw new Error("YouTube replaced the video element while playback was starting.");
+      if (!video.paused && !video.ended && video.currentTime > initialTime + 0.12) return true;
+      if (video.error) throw new Error("The YouTube player reported a media error while starting playback (code "
+        + video.error.code + ").");
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    return false;
+  }
+
+  async function startYouTubePlayback(video) {
+    if (!video.paused && !video.ended) return;
+    const initialTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+    const playButton = await waitForYouTubePlayButton(5000);
+    if (playButton) {
+      // This is a page-level click used to wake YouTube's own player controls.
+      // It is not a trusted WebDriver input; the active helper tab and Firefox's
+      // site autoplay permission are what permit the following playback request.
+      try { playButton.click(); } catch (_) {}
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    const player = document.querySelector("#movie_player");
+    if (video.paused && player && typeof player.playVideo === "function") {
+      try { player.playVideo(); } catch (_) {}
+    }
+
+    if (video.paused) {
+      try {
+        await withCaptureTimeout(
+          Promise.resolve(video.play()),
+          12000,
+          "The YouTube play request did not resolve within 12 seconds."
+        );
+      } catch (error) {
+        const errorName = String(error && error.name || "");
+        const detail = String(error && error.message || error || "Playback was rejected.");
+        if (errorName === "NotAllowedError" || /not allowed|autoplay/i.test(detail)) {
+          throw new Error(
+            "Firefox blocked automatic YouTube playback (NotAllowedError). Allow Audio and Video for youtube.com in Firefox Settings > Privacy & Security > Permissions > Autoplay. " +
+            "The extension activated this helper tab and waited for YouTube's Play control, but a page script cannot manufacture Selenium's trusted WebDriver click. " + detail
+          );
+        }
+        throw new Error("YouTube could not start playback in the helper tab: " + detail);
+      }
+    }
+
+    const advanced = await waitForPlaybackToAdvance(video, initialTime, 15000);
+    if (!advanced) {
+      throw new Error("YouTube's Play control was found, but playback time did not advance. Check the site's autoplay permission, ad/player readiness, and network state.");
+    }
   }
 
   async function recordRequestedVideo(payload) {
@@ -809,27 +891,8 @@
     if (video.ended) {
       try { video.currentTime = 0; } catch (_) {}
     }
-    if (video.paused) {
-      try {
-        await withCaptureTimeout(
-          Promise.resolve(video.play()),
-          12000,
-          "The play request did not resolve within 12 seconds. Firefox may be blocking background autoplay."
-        );
-      } catch (error) {
-        const errorName = String(error && error.name || "");
-        const detail = String(error && error.message || error || "Playback was rejected.");
-        if (errorName === "NotAllowedError" || /not allowed|autoplay/i.test(detail)) {
-          throw new Error(
-            "Firefox blocked background playback (NotAllowedError). A scripted click cannot create real user activation, and the extension cannot override Firefox's autoplay policy. " +
-            "Allow Audio and Video for youtube.com in Firefox Settings > Privacy & Security > Permissions > Autoplay. " +
-            "For inactive-tab playback, also set about:config preference media.block-autoplay-until-in-foreground to false. " +
-            "Then click REC again; the existing helper tab will be reused. " + detail
-          );
-        }
-        throw new Error("YouTube could not start playback in the inactive helper tab: " + detail);
-      }
-    }
+    if (video.paused) await startYouTubePlayback(video);
+    if (video.paused || video.ended) await startYouTubePlayback(video);
     try {
       if (!activeCapture) {
         await withCaptureTimeout(
