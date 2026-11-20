@@ -373,7 +373,7 @@ async function launchCaptureJob(job) {
       }
     }
     job.state="starting";
-    job.phase="Activating helper tab and waiting for YouTube's Play control";
+    job.phase="Activating helper tab and waiting for the YouTube Play control";
     job.updatedAt=Date.now();
     await persistCaptureState();
 
