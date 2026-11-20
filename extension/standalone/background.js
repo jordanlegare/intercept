@@ -292,7 +292,8 @@ function makeJobId() {
 }
 
 function publicCaptureJob(job) {
-  return {id:job.id,videoId:job.videoId,title:job.title,url:job.url,sourceUrl:job.sourceUrl||null,sourcePath:job.sourcePath||null,
+  return {id:job.id,videoId:job.videoId,title:job.title,url:job.url,selectedUrl:job.selectedUrl||job.url,
+    selectedPath:job.selectedPath||null,sourceUrl:job.sourceUrl||null,sourcePath:job.sourcePath||null,
     state:job.state,phase:job.phase||null,queuePosition:job.queuePosition||null,
     createdAt:job.createdAt,updatedAt:job.updatedAt,startedAt:job.startedAt||null,
     completedAt:job.completedAt||null,downloadId:job.downloadId||null,error:job.error||null};
@@ -365,12 +366,14 @@ async function launchCaptureJob(job) {
         job.ownedTab=true;
         job.phase="Waiting for YouTube's window load event";
         job.updatedAt=Date.now();
+        await persistCaptureState();
         await waitForTabComplete(tab.id);
       }
     }
     job.state="starting";
-    job.phase="Clicking the player and initializing MediaRecorder";
+    job.phase="Initializing YouTube playback and MediaRecorder in the inactive tab";
     job.updatedAt=Date.now();
+    await persistCaptureState();
     const startup = runCaptureCommand(job.tabId,"record-video",{videoId:job.videoId,title:job.title});
     const result = await Promise.race([
       startup,
@@ -467,10 +470,20 @@ async function startInlineCapture(message,sender) {
   );
   if(existing) return publicCaptureJob(existing);
   const title=String(message.title||"YouTube video").replace(/\s+/g," ").trim().slice(0,180)||"YouTube video";
+  const canonicalUrl="https://www.youtube.com/watch?v="+videoId;
+  let selectedUrl=canonicalUrl;
+  try {
+    const candidate=new URL(String(message.video_url||canonicalUrl),senderUrl.href);
+    const candidateHost=candidate.hostname.toLowerCase();
+    const pathId=candidate.pathname.match(/^\/(?:shorts|live)\/([A-Za-z0-9_-]{1,24})/);
+    const candidateId=candidate.searchParams.get("v")||(pathId&&pathId[1])||"";
+    if(candidate.protocol==="https:"&&candidateHost==="www.youtube.com"&&candidateId===videoId) selectedUrl=candidate.href;
+  } catch (_) {}
   const sourceUrl=senderUrl.href;
   const sourcePath=senderUrl.pathname+(senderUrl.search||"");
+  const selectedPath=new URL(selectedUrl).pathname+(new URL(selectedUrl).search||"");
   const job={
-    id:makeJobId(),videoId,title,url:"https://www.youtube.com/watch?v="+videoId,
+    id:makeJobId(),videoId,title,url:canonicalUrl,selectedUrl,selectedPath,
     sourceUrl,sourcePath,sourceTabId:sender.tab.id,tabId:null,ownedTab:false,slot:false,
     state:"queued",createdAt:Date.now(),updatedAt:Date.now(),stopRequested:false,error:null
   };
@@ -488,6 +501,7 @@ async function startInlineCapture(message,sender) {
 }
 
 async function stopCaptureJob(message) {
+  await ensureCaptureStateRestored();
   const job=captureJobs.get(String(message&&message.job_id||""));
   if(!job) throw new Error("The selected capture job no longer exists.");
   if(job.state==="queued" || job.state==="awaiting_autoplay") {
@@ -622,7 +636,7 @@ browser.action.onClicked.addListener(async tab => {
 
 browser.runtime.onMessage.addListener((message, sender) => {
   if (!message || typeof message.type !== "string") return undefined;
-  if (message.type === "playback-capture:inline-jobs") return Promise.resolve({ok:true,jobs:captureJobSnapshot()});
+  if (message.type === "playback-capture:inline-jobs") return ensureCaptureStateRestored().then(()=>({ok:true,jobs:captureJobSnapshot()}));
   if (message.type === "playback-capture:inline-start") {
     return startInlineCapture(message,sender).then(job=>({ok:true,job}))
       .catch(error=>({ok:false,error:String(error&&error.message||error||"Could not queue the capture.")}));
@@ -645,7 +659,7 @@ browser.runtime.onMessage.addListener((message, sender) => {
   if (!trusted) {
     return Promise.resolve({ok: false, error: "Overlay commands are accepted only from a top-level www.youtube.com tab."});
   }
-  if (message.command === "jobs") return Promise.resolve({ok: true, result: captureJobSnapshot()});
+  if (message.command === "jobs") return ensureCaptureStateRestored().then(()=>({ok: true, result: captureJobSnapshot()}));
   if (!OVERLAY_COMMANDS.has(message.command)) {
     return Promise.resolve({ok: false, error: "Unsupported Playback Capture command."});
   }
