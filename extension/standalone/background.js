@@ -359,7 +359,7 @@ async function launchCaptureJob(job) {
         ? await browser.tabs.get(job.tabId).catch(()=>null)
         : null;
       if(existingTab) {
-        job.phase="Reusing the inactive YouTube tab after autoplay was enabled";
+        job.phase="Reusing the retained YouTube helper tab for another startup attempt";
         job.updatedAt=Date.now();
         await waitForTabComplete(existingTab.id);
       } else {
@@ -415,7 +415,8 @@ async function launchCaptureJob(job) {
           startupError = error;
           const detail = String(error && error.message || error || "");
           const autoplayBlocked = /NotAllowedError|autoplay permission|autoplay is blocked/i.test(detail);
-          if (attempt >= 2 || autoplayBlocked) break;
+          const startupTimedOut = /Startup timed out after 150 seconds/i.test(detail);
+          if (attempt >= 2 || autoplayBlocked || startupTimedOut) break;
           job.phase = "YouTube player is still initializing; retrying in the same helper tab (attempt 2 of 2)";
           job.error = detail;
           job.updatedAt = Date.now();
