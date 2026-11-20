@@ -78,7 +78,8 @@ test("Firefox autoplay rejection exposes the native permission control and retri
   assert.ok(overlay.includes("SET AUTOPLAY"));
 });
 
-test("Firefox manifest declares no data collection outside the add-on or local browser", () => {
+test("Firefox manifest declares video content, personal information, and download activity", () => {
+  assert.equal(manifest.browser_specific_settings.gecko.strict_min_version, "140.0");
   assert.deepEqual(
     manifest.browser_specific_settings.gecko.data_collection_permissions,
     {required: ["personallyIdentifyingInfo", "websiteContent", "websiteActivity"]}
