@@ -5,7 +5,7 @@
   if(location.protocol!=="https:"||location.hostname.toLowerCase()!==HOST||(location.port&&location.port!=="443")||globalThis[INSTANCE_KEY]) return;
 
   const CARD_SELECTOR=["ytd-video-renderer","ytd-rich-item-renderer","ytd-compact-video-renderer","ytd-grid-video-renderer","ytd-reel-item-renderer","ytd-playlist-panel-video-renderer","yt-lockup-view-model"].join(",");
-  const ACTIVE_STATES=new Set(["queued","opening","starting","recording","saving","downloading"]);
+  const ACTIVE_STATES=new Set(["queued","opening","starting","recording","saving","download_queued","downloading"]);
   const controls=new Set();
   const jobsByVideo=new Map();
   let refreshInFlight=false;
@@ -62,7 +62,7 @@
       }
       button.disabled=true;button.textContent="QUEUED…";button.className="pending";
       const response=await send("playback-capture:inline-start",{
-        video_id:videoId,title,mode,url:"https://www.youtube.com/watch?v="+videoId
+        video_id:videoId,title,mode:"background",url:"https://www.youtube.com/watch?v="+videoId
       });
       button.disabled=false;
       if(!response||!response.ok) {
