@@ -796,10 +796,33 @@
     throw new Error("YouTube did not create a playable video element within 30 seconds.");
   }
 
+  async function waitForAdvertisementToFinish(video, timeoutMs = 90000) {
+    const deadline = Date.now() + timeoutMs;
+    let currentVideo = video;
+    let playerApi = null;
+    const bridge = globalThis.__standaloneYouTubePlayerApiV1;
+    while (Date.now() < deadline) {
+      if (!currentVideo || !currentVideo.isConnected) {
+        currentVideo = await waitForPlayerVideo(Math.min(10000, Math.max(1000, deadline - Date.now())));
+        playerApi = null;
+      }
+      if (!isAdvertisement(currentVideo)) return currentVideo;
+      if (!bridge) throw new Error("The YouTube player API adapter is missing while waiting for the advertisement to finish.");
+      if (!playerApi) playerApi = await bridge.waitForPlayerApi(document, "", 20000);
+      if (currentVideo.paused || currentVideo.ended) {
+        // Let a pre-roll ad play out before MediaRecorder attaches to the
+        // selected video's decoded playback stream.
+        await bridge.startPlayback(playerApi, currentVideo, {timeoutMs:12000});
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    throw new Error("YouTube's advertisement did not finish within 90 seconds. The helper tab is retained so this selection can be retried.");
+  }
+
   async function startYouTubePlayback(video, videoId) {
     const bridge = globalThis.__standaloneYouTubePlayerApiV1;
     if (!bridge) throw new Error("The YouTube player API adapter is missing; reload the helper tab.");
-    const api = await bridge.waitForPlayerApi(document, videoId, 15000);
+    const api = await bridge.waitForPlayerApi(document, videoId, 30000);
     try {
       await bridge.startPlayback(api, video, {timeoutMs: 15000});
     } catch (error) {
@@ -822,8 +845,8 @@
     const title = String(payload && payload.title || "").trim().slice(0, 180);
     status.enabled = true;
     status.error = null;
-    const video = await waitForPlayerVideo();
-    if (isAdvertisement(video)) throw new Error("YouTube is showing an advertisement; recording will begin when the selected video is available.");
+    let video = await waitForPlayerVideo();
+    video = await waitForAdvertisementToFinish(video);
     if (video.paused || video.ended) await startYouTubePlayback(video, videoId);
     if (video.paused || video.ended) {
       throw new Error("YouTube's player API returned without starting the selected video.");
