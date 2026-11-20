@@ -300,7 +300,9 @@ function publicCaptureJob(job) {
 }
 
 function captureJobSnapshot() {
-  return Array.from(captureJobs.values()).sort((a,b)=>a.createdAt-b.createdAt).slice(-100).map(publicCaptureJob);
+  return Array.from(captureJobs.values()).sort((a,b)=>a.createdAt-b.createdAt).map((job,index)=>publicCaptureJob({
+    ...job,queuePosition:job.state==="queued"?captureQueue.indexOf(job.id)+1:null
+  }));
 }
 
 function activeCaptureSlots() {
@@ -490,12 +492,6 @@ async function startInlineCapture(message,sender) {
   captureJobs.set(job.id,job);
   captureQueue.push(job.id);
   await persistCaptureState();
-  if(captureJobs.size>100) {
-    for(const [id,item] of captureJobs) {
-      if(captureJobs.size<=80) break;
-      if(["completed","failed","cancelled","interrupted"].includes(item.state)) captureJobs.delete(id);
-    }
-  }
   void pumpCaptureQueue();
   return publicCaptureJob(job);
 }
