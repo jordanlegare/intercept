@@ -69,11 +69,11 @@ test("elapsed timer stays hidden during standby and player initialization", () =
 });
 
 test("Firefox autoplay rejection exposes the native permission control and retries the same job", () => {
-  assert.match(background, /keepHelperActiveForAutoplay/);
-  assert.match(background, /autoplayPermissionHelpOpenedAt/);
-  assert.match(background, /Firefox's autoplay-blocked address-bar icon/);
-  assert.match(background, /browser\.tabs\.update\\(tab\.id,\\{active:true\\}\\)/);
-  assert.match(inline, /awaiting_autoplay:job\.autoplayPermissionHelpOpened\\?"RETRY":"SET AUTOPLAY"/);
-  assert.match(overlay, /job-allow/);
-  assert.match(overlay, /SET AUTOPLAY/);
+  assert.ok(background.includes("keepHelperActiveForAutoplay"));
+  assert.ok(background.includes("autoplayPermissionHelpOpenedAt"));
+  assert.ok(background.includes("Firefox's autoplay-blocked address-bar icon"));
+  assert.ok(background.includes("browser.tabs.update(tab.id,{active:true})"));
+  assert.ok(inline.includes('awaiting_autoplay:job.autoplayPermissionHelpOpened?"RETRY":"SET AUTOPLAY"'));
+  assert.ok(overlay.includes("job-allow"));
+  assert.ok(overlay.includes("SET AUTOPLAY"));
 });
