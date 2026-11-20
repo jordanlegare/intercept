@@ -1,4 +1,9 @@
-# Playback Capture for Firefox 1.4.1
+# Playback Capture for Firefox 1.4.2
+
+## 1.4.2 — Firefox built-in data collection declaration
+
+- Added Firefox's `browser_specific_settings.gecko.data_collection_permissions` declaration with `required: ["none"]`.
+- Playback Capture keeps the capture queue, video metadata, session history, and WebM data in the local browser and local download destination. It does not transmit this information to an external service.
 
 ## 1.4.1 — Firefox autoplay permission handoff
 
@@ -51,7 +56,7 @@ When this permission is blocked, the helper tab remains foregrounded so Firefox'
 5. While a video is recording, its button pulses red. Click it again to stop and save. A completed video is finalized automatically when playback ends.
 6. Use the Playback Capture toolbar action to open the dark dashboard and view the queue, capture history, timeline, and recovery actions. On a watch page, the `REC` control records the video already open.
 
-If a job remains at `ALLOW PLAY`, verify the site-specific autoplay permission first. If playback still does not start, inspect the job's error/phase in the dashboard; a player error, ad, unavailable video, or network issue can also prevent startup.
+If a job remains at `RETRY` after an autoplay rejection, verify the site-specific autoplay permission first. If playback still does not start, inspect the job's error/phase in the dashboard; a player error, ad, unavailable video, or network issue can also prevent startup.
 
 ## Earlier changes
 
@@ -79,7 +84,7 @@ If a job remains at `ALLOW PLAY`, verify the site-specific autoplay permission f
 
 ## Install for testing
 
-1. Download [youtube-playback-download-1.4.1.xpi](../youtube-playback-download-1.4.1.xpi).
+1. Download [youtube-playback-download-1.4.2.xpi](../youtube-playback-download-1.4.2.xpi).
 2. Open `about:debugging#/runtime/this-firefox`.
 3. Choose **Load Temporary Add-on** and select the downloaded XPI.
 4. Reload any YouTube tab that was already open.
