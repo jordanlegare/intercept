@@ -41,5 +41,5 @@ test("the startup path retries once in-place and waits for a pre-roll ad", () =>
 test("REC and dashboard expose retry and cancellation", () => {
   assert.match(inline, /awaiting_retry:"RETRY"/);
   assert.match(inline, /\["failed","interrupted","awaiting_autoplay","awaiting_retry"\]/);
-  assert.match(overlay, /"awaiting_autoplay","awaiting_retry"\]\)/);
+  assert.match(overlay, /"awaiting_autoplay","awaiting_retry"\]\.includes\(job\.state\)/);
 });
