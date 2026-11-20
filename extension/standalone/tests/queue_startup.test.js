@@ -6,6 +6,7 @@ const path = require("node:path");
 const root = path.join(__dirname, "..");
 const background = fs.readFileSync(path.join(root, "background.js"), "utf8");
 const downloader = fs.readFileSync(path.join(root, "video_download.js"), "utf8");
+const apiSource = fs.readFileSync(path.join(root, "youtube_player_api.js"), "utf8");
 const inline = fs.readFileSync(path.join(root, "inline_record.js"), "utf8");
 const overlay = fs.readFileSync(path.join(root, "overlay.js"), "utf8");
 const popup = fs.readFileSync(path.join(root, "popup.js"), "utf8");
@@ -39,8 +40,12 @@ test("startup has no deadline and waits for player initialization and pre-roll a
   assert.match(background, /await runCaptureCommand\(job\.tabId,"record-video"/);
   assert.match(background, /Deliberately wait without a startup deadline/);
   assert.doesNotMatch(background, /Startup timed out after|150000|Promise\.race\(\[/);
-  assert.match(background, /retrying in the same helper tab/);
-  assert.match(downloader, /async function waitForAdvertisementToFinish/);
+  assert.match(apiSource, /async function waitForPlayerApi\(doc, expectedVideoId\)\s*\{\s*while \(true\)/);
+  assert.match(apiSource, /async function waitForPlaybackToAdvance\(api, video, initialTime, lastEventState\)\s*\{\s*const player = api\.player;\s*while \(true\)/);
+  assert.doesNotMatch(apiSource, /timeoutMs|deadline|timed out/);
+  assert.match(downloader, /async function waitForAdvertisementToFinish\(video\)\s*\{/);
+  assert.match(downloader, /async function waitForPlayerVideo\(\)\s*\{/);
+  assert.doesNotMatch(downloader, /withCaptureTimeout|within 30 seconds|within 90 seconds|within 20 seconds/);
   assert.match(downloader, /video = await waitForAdvertisementToFinish\(video\)/);
 });
 
