@@ -222,7 +222,7 @@
     container.replaceChildren();
     const remembered=(jobs||[]);
     const pending=remembered.filter(job=>!["completed","failed","cancelled","interrupted"].includes(job.state));
-    $("job-count").textContent=pending.length+" PENDING · "+remembered.length+" SAVED/SEEN";
+    $("job-count").textContent=pending.length+" PENDING · "+remembered.length+" TOTAL";
     if(!remembered.length) {
       const empty=document.createElement("div");empty.className="empty";empty.textContent="No REC selections yet. Click REC while browsing to build the queue.";container.append(empty);return;
     }
