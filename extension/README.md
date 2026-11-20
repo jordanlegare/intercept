@@ -4,7 +4,7 @@ This directory contains the Firefox add-ons maintained with Intercept.
 
 ## Playback Capture — standalone YouTube recorder
 
-**Current package:** [Playback Capture 1.3.8](./youtube-playback-download-1.3.8.xpi)
+**Current package:** [Playback Capture 1.3.9](./youtube-playback-download-1.3.9.xpi)
 
 Playback Capture adds per-video `REC` controls to YouTube, queues selected videos, starts playback through YouTube's exposed player API, records decoded playback output as WebM, and downloads completed captures. It runs independently of the Intercept Rust server.
 
@@ -21,7 +21,7 @@ A site-specific block can override the global default. When Firefox rejects star
 
 ### Install the development XPI
 
-1. Download [youtube-playback-download-1.3.7.xpi](./youtube-playback-download-1.3.7.xpi).
+1. Download [youtube-playback-download-1.3.9.xpi](./youtube-playback-download-1.3.9.xpi).
 2. Open `about:debugging#/runtime/this-firefox`.
 3. Select **Load Temporary Add-on** and choose the XPI.
 4. Reload YouTube tabs that were already open.

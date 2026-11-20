@@ -16,6 +16,8 @@ const meterFill = byId("meter-fill");
 const videoTitle = byId("video-title");
 const videoId = byId("video-id");
 const elapsed = byId("elapsed");
+const elapsedStat = byId("elapsed-stat");
+const stats = byId("stats");
 const fileSize = byId("file-size");
 const mimeType = byId("mime-type");
 const timeline = byId("timeline");
@@ -71,6 +73,12 @@ function formatDuration(milliseconds) {
     : [minutes, seconds].map(v => String(v).padStart(2, "0")).join(":");
 }
 
+function shouldShowElapsed(status) {
+  return ["recording", "paused", "finalizing", "download_started", "download_failed"].includes(status && status.state)
+    || Number(status && status.elapsed_ms || 0) > 0
+    || Number(status && status.bytes_written || 0) > 0;
+}
+
 function formatTime(timestamp) {
   if (!timestamp) return "—";
   try { return new Date(timestamp).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}); }
@@ -101,6 +109,9 @@ function renderStatus(status) {
     ? "100%" : "0%";
   videoTitle.textContent = status.video_title || "No active video";
   videoId.textContent = status.video_id ? "YOUTUBE ID · " + status.video_id : "Video identity will appear when capture starts.";
+  const showElapsed = shouldShowElapsed(status);
+  elapsedStat.hidden = !showElapsed;
+  stats.classList.toggle("without-elapsed", !showElapsed);
   elapsed.textContent = formatDuration(status.elapsed_ms);
   fileSize.textContent = formatSize(status.bytes_written);
   mimeType.textContent = String(status.mime_type || "WEBM").toUpperCase();

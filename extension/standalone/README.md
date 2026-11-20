@@ -1,4 +1,8 @@
-# Playback Capture for Firefox 1.3.8
+# Playback Capture for Firefox 1.3.9
+
+## 1.3.9 — Standby timer visibility
+
+- The elapsed-time tile stays hidden while capture is idle, armed, or preparing. It appears after recording starts and remains visible through pause, finalization, and download states.
 
 Playback Capture is a standalone Firefox add-on that queues selected YouTube videos, starts playback through YouTube's exposed player API, and records the decoded player output to WebM files. It has its own background queue, capture session manager, temporary file library, recovery flow, toolbar dashboard, and Firefox download bridge. It does not connect to the Intercept Rust server.
 
@@ -69,7 +73,7 @@ If a job remains at `ALLOW PLAY`, verify the site-specific autoplay permission f
 
 ## Install for testing
 
-1. Download [youtube-playback-download-1.3.8.xpi](../youtube-playback-download-1.3.7.xpi).
+1. Download [youtube-playback-download-1.3.9.xpi](../youtube-playback-download-1.3.9.xpi).
 2. Open `about:debugging#/runtime/this-firefox`.
 3. Choose **Load Temporary Add-on** and select the downloaded XPI.
 4. Reload any YouTube tab that was already open.

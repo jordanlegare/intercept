@@ -8,6 +8,9 @@ const background = fs.readFileSync(path.join(root, "background.js"), "utf8");
 const downloader = fs.readFileSync(path.join(root, "video_download.js"), "utf8");
 const inline = fs.readFileSync(path.join(root, "inline_record.js"), "utf8");
 const overlay = fs.readFileSync(path.join(root, "overlay.js"), "utf8");
+const popup = fs.readFileSync(path.join(root, "popup.js"), "utf8");
+const popupHtml = fs.readFileSync(path.join(root, "popup.html"), "utf8");
+const popupCss = fs.readFileSync(path.join(root, "popup.css"), "utf8");
 const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
 
 test("capture startup injects the native player API before the recorder runtime", () => {
@@ -42,4 +45,17 @@ test("REC and dashboard expose retry and cancellation", () => {
   assert.match(inline, /awaiting_retry:"RETRY"/);
   assert.match(inline, /\["failed","interrupted","awaiting_autoplay","awaiting_retry"\]/);
   assert.match(overlay, /"awaiting_autoplay","awaiting_retry"\]\.includes\(job\.state\)/);
+});
+
+
+test("elapsed timer stays hidden during standby and player initialization", () => {
+  for (const source of [overlay, popup]) {
+    assert.match(source, /function shouldShowElapsed\(status\)/);
+    assert.match(source, /\["recording", "paused", "finalizing", "download_started", "download_failed"\]/);
+  }
+  assert.match(overlay, /\$\("elapsed-stat"\)\.hidden = !showElapsed/);
+  assert.match(popup, /elapsedStat\.hidden = !showElapsed/);
+  assert.match(popup, /stats\.classList\.toggle\("without-elapsed", !showElapsed\)/);
+  assert.match(popupHtml, /id="elapsed-stat"/);
+  assert.match(popupCss, /\.stats\.without-elapsed/);
 });

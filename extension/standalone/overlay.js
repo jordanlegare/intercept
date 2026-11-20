@@ -33,6 +33,8 @@
     ".title{margin:5px 0 3px;color:#f2f6ec;font-size:14px;line-height:1.25;font-weight:750;overflow-wrap:anywhere}",
     ".identity{color:#829179;font:8px ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}",
     ".stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:5px;margin:11px 0}",
+    ".stats.without-elapsed{grid-template-columns:1fr 1fr}",
+    ".stat[hidden]{display:none}",
     ".stat{padding:7px 6px;background:#20271c;border:1px solid #35412d;min-width:0}",
     ".stat span{display:block;color:#89967f;font:7px ui-monospace,SFMono-Regular,monospace;letter-spacing:.08em}",
     ".stat strong{display:block;margin-top:4px;color:#edf4e5;font:700 11px ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}",
@@ -78,13 +80,13 @@
     "@media(prefers-reduced-motion:reduce){*{transition:none!important}}"
   ].join("\n");
   const markup = '<section class="panel">' +
-    '<div class="head"><span class="mark"></span><span class="brand">PLAYBACK CAPTURE</span><span class="ver">1.3.8 · DARK</span>' +
+    '<div class="head"><span class="mark"></span><span class="brand">PLAYBACK CAPTURE</span><span class="ver">1.3.9 · DARK</span>' +
     '<button class="icon" id="minimize" title="Minimize" aria-label="Minimize">−</button>' +
     '<button class="icon" id="close" title="Close overlay" aria-label="Close">×</button></div>' +
     '<div class="body">' +
     '<div class="eyebrow">CURRENT YOUTUBE VIDEO</div><div class="title" id="video-title">Connecting to YouTube…</div>' +
     '<div class="identity" id="video-id">Waiting for player metadata</div>' +
-    '<div class="stats"><div class="stat"><span>ELAPSED</span><strong id="elapsed">00:00</strong></div>' +
+    '<div class="stats" id="stats"><div class="stat" id="elapsed-stat"><span>ELAPSED</span><strong id="elapsed">00:00</strong></div>' +
     '<div class="stat"><span>SIZE</span><strong id="size">0 B</strong></div>' +
     '<div class="stat"><span>PLAYER</span><strong id="player-state">—</strong></div></div>' +
     '<div class="state"><span class="dot" id="dot"></span><span id="status">Connecting to capture manager…</span></div>' +
@@ -122,6 +124,12 @@
     return hours
       ? [hours, minutes, remainder].map(value => String(value).padStart(2, "0")).join(":")
       : [minutes, remainder].map(value => String(value).padStart(2, "0")).join(":");
+  }
+
+  function shouldShowElapsed(status) {
+    return ["recording", "paused", "finalizing", "download_started", "download_failed"].includes(status && status.state)
+      || Number(status && status.elapsed_ms || 0) > 0
+      || Number(status && status.bytes_written || 0) > 0;
   }
 
   function formatClock(timestamp) {
@@ -263,6 +271,9 @@
     $("video-id").textContent = page.videoId
       ? "VIDEO ID · " + page.videoId + " · " + (page.canonicalUrl || "")
       : "No video ID detected on this page";
+    const showElapsed = shouldShowElapsed(state);
+    $("elapsed-stat").hidden = !showElapsed;
+    $("stats").classList.toggle("without-elapsed", !showElapsed);
     $("elapsed").textContent = formatDuration(state.elapsed_ms);
     $("size").textContent = formatSize(state.bytes_written);
     $("player-state").textContent = !page.hasPlayer ? "NO PLAYER"
