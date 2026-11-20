@@ -31,7 +31,7 @@
     return (link&&(link.getAttribute("title")||link.getAttribute("aria-label"))||"YouTube video").replace(/\s+/g," ").slice(0,180);
   }
 
-  function createControl(videoId,title,mode,placement) {
+  function createControl(videoId,title,mode,placement,videoUrl) {
     const host=document.createElement("span");
     host.dataset.playbackCaptureControl="1";
     host.dataset.videoId=videoId;
@@ -62,7 +62,7 @@
       }
       button.disabled=true;button.textContent="QUEUED…";button.className="pending";
       const response=await send("playback-capture:inline-start",{
-        video_id:videoId,title,mode:"background",url:"https://www.youtube.com/watch?v="+videoId
+        video_id:videoId,title,mode:"background",video_url:videoUrl||"https://www.youtube.com/watch?v="+videoId,url:"https://www.youtube.com/watch?v="+videoId
       });
       button.disabled=false;
       if(!response||!response.ok) {
@@ -106,7 +106,7 @@
     if(!videoId) return;
     const title=titleFor(card,link);
     const useThumbnailOverlay=!!thumbnailLink;
-    const control=createControl(videoId,title,"background",useThumbnailOverlay?"thumbnail":"row");
+    const control=createControl(videoId,title,"background",useThumbnailOverlay?"thumbnail":"row",link.href||link.getAttribute("href"));
     const job=jobsByVideo.get(videoId);if(job) applyState(control,job);
     if(useThumbnailOverlay) {
       if(getComputedStyle(thumbnailLink).position==="static") thumbnailLink.style.position="relative";
@@ -124,7 +124,7 @@
     if(!actionRow||actionRow.querySelector("[data-playback-capture-control]")) return;
     const heading=document.querySelector("h1.ytd-watch-metadata,ytd-watch-metadata h1");
     const title=heading&&heading.textContent.trim()?heading.textContent.trim().replace(/\s+/g," ").slice(0,180):document.title.replace(/\s+-\s+YouTube$/i,"");
-    const control=createControl(videoId,title,"current","row");
+    const control=createControl(videoId,title,"background","row",location.href);
     const job=jobsByVideo.get(videoId);if(job) applyState(control,job);
     actionRow.prepend(control);
   }
