@@ -4,7 +4,7 @@ const downloadJobs = new Map();
 const captureJobs = new Map();
 const captureQueue = [];
 const MAX_PARALLEL_CAPTURE_JOBS = 1;
-const ACTIVE_CAPTURE_STATES = new Set(["opening", "starting", "awaiting_autoplay", "recording", "saving", "download_queued", "downloading"]);
+const ACTIVE_CAPTURE_STATES = new Set(["opening", "starting", "awaiting_autoplay", "awaiting_retry", "recording", "saving", "download_queued", "downloading"]);
 const pendingDownloadQueue = [];
 let activeDownloadId = null;
 let downloadQueueStarting = false;
@@ -51,7 +51,7 @@ async function ensureCaptureStateRestored() {
     for (const raw of stored.jobs) {
       if (!raw || typeof raw.id !== "string" || typeof raw.videoId !== "string") continue;
       const job = {...raw, slot: false};
-      const needsTab = ["opening", "starting", "awaiting_autoplay", "recording", "saving", "download_queued", "downloading"].includes(job.state);
+      const needsTab = ["opening", "starting", "awaiting_autoplay", "awaiting_retry", "recording", "saving", "download_queued", "downloading"].includes(job.state);
       const tab = needsTab && Number.isInteger(job.tabId)
         ? await browser.tabs.get(job.tabId).catch(() => null)
         : null;
@@ -60,7 +60,7 @@ async function ensureCaptureStateRestored() {
         job.state = "queued";
         job.phase = tab ? "Resuming queued capture in its existing inactive tab" : "Restored from the saved recording queue";
         if (!tab) { job.tabId = null; job.ownedTab = false; }
-      } else if (job.state === "awaiting_autoplay") {
+      } else if (["awaiting_autoplay", "awaiting_retry"].includes(job.state)) {
         if (tab) job.slot = true;
         else {
           job.state = "queued";
@@ -324,10 +324,11 @@ async function runCaptureCommand(tabId, command, payload) {
   const target={tabId};
   const readiness=await browser.scripting.executeScript({
     target,world:"MAIN",
-    func:function(){return {core:!!globalThis.__standalonePlaybackCoreV1,runtime:!!globalThis.__standalonePlaybackDownloadV1};}
+    func:function(){return {core:!!globalThis.__standalonePlaybackCoreV1,playerApi:!!globalThis.__standaloneYouTubePlayerApiV1,runtime:!!globalThis.__standalonePlaybackDownloadV1};}
   });
   const ready=readiness&&readiness[0]&&readiness[0].result||{};
   if(!ready.core) await browser.scripting.executeScript({target,world:"MAIN",files:["capture_core.js"]});
+  if(!ready.playerApi) await browser.scripting.executeScript({target,world:"MAIN",files:["youtube_player_api.js"]});
   if(!ready.runtime) await browser.scripting.executeScript({target,world:"MAIN",files:["video_download.js"]});
   const results=await browser.scripting.executeScript({
     target,world:"MAIN",
@@ -394,17 +395,45 @@ async function launchCaptureJob(job) {
       job.updatedAt=Date.now();
       await persistCaptureState();
 
-      const startup = runCaptureCommand(job.tabId,"record-video",{videoId:job.videoId,title:job.title});
-      const result = await Promise.race([
-        startup,
-        new Promise((_,reject)=>setTimeout(()=>reject(new Error(
-          "Startup timed out after 90 seconds. YouTube did not begin playback or MediaRecorder did not initialize."
-        )),90000))
-      ]);
+      let result = null;
+      let startupError = null;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        let timeoutId = null;
+        try {
+          const startup = runCaptureCommand(job.tabId,"record-video",{videoId:job.videoId,title:job.title});
+          result = await Promise.race([
+            startup,
+            new Promise((_,reject) => {
+              timeoutId = setTimeout(() => reject(new Error(
+                "Startup timed out after 150 seconds. YouTube did not begin playback or MediaRecorder did not initialize."
+              )),150000);
+            })
+          ]);
+          startupError = null;
+          break;
+        } catch (error) {
+          startupError = error;
+          const detail = String(error && error.message || error || "");
+          const autoplayBlocked = /NotAllowedError|autoplay permission|autoplay is blocked/i.test(detail);
+          if (attempt >= 2 || autoplayBlocked) break;
+          job.phase = "YouTube player is still initializing; retrying in the same helper tab (attempt 2 of 2)";
+          job.error = detail;
+          job.updatedAt = Date.now();
+          await persistCaptureState();
+          await new Promise(resolve => setTimeout(resolve, 1200));
+          const stillOpen = await browser.tabs.get(job.tabId).catch(()=>null);
+          if (!stillOpen) throw error;
+          if (!stillOpen.active) await browser.tabs.update(job.tabId,{active:true});
+        } finally {
+          if (timeoutId !== null) clearTimeout(timeoutId);
+        }
+      }
+      if (startupError) throw startupError;
       job.captureId=result&&result.capture_id||null;
       job.startedAt=Date.now();
       job.state="recording";
       job.phase="Recording confirmed; helper tab will return to the background";
+      job.error=null;
       job.updatedAt=Date.now();
       await persistCaptureState();
       if(job.stopRequested) await stopCaptureJob({job_id:job.id});
@@ -420,21 +449,32 @@ async function launchCaptureJob(job) {
   } catch(error) {
     job.error=String(error&&error.message||error||"Could not start this capture.");
     job.updatedAt=Date.now();
-    const autoplayBlocked = /NotAllowedError|background playback|autoplay permission/i.test(job.error);
-    if(autoplayBlocked && job.ownedTab && Number.isInteger(job.tabId)) {
-      job.state="awaiting_autoplay";
-      job.phase="Firefox blocked background playback; allow YouTube autoplay and click REC to retry";
-      // Keep the sole worker reserved until this selection is retried or cancelled.
+    const autoplayBlocked = /NotAllowedError|background playback|autoplay permission|autoplay is blocked/i.test(job.error);
+    const helperTab = job.ownedTab && Number.isInteger(job.tabId)
+      ? await browser.tabs.get(job.tabId).catch(()=>null) : null;
+    if (job.stopRequested) {
+      job.state="cancelled";
+      job.phase="Cancelled while playback was starting";
+      job.completedAt=Date.now();
+      job.slot=false;
+      if (helperTab) await browser.tabs.remove(job.tabId).catch(()=>{});
+    } else if (helperTab) {
+      // Preserve the warmed YouTube player after a transient startup failure.
+      // The REC button can retry against this same tab instead of opening a new one.
+      job.state=autoplayBlocked ? "awaiting_autoplay" : "awaiting_retry";
+      job.phase=autoplayBlocked
+        ? "Firefox blocked autoplay; enable Allow Audio and Video for youtube.com, then click ALLOW PLAY"
+        : "Startup did not complete; helper tab retained. Click RETRY to resume this same selection";
       job.slot=true;
     } else {
       job.state="failed";
       job.phase="Startup failed";
       job.completedAt=Date.now();
       job.slot=false;
-      if(Number.isInteger(job.tabId)) {
-        if(job.ownedTab) await browser.tabs.remove(job.tabId).catch(()=>{});
-        else await runCaptureCommand(job.tabId,"stop",null).catch(()=>{});
+      if(Number.isInteger(job.tabId) && !job.ownedTab) {
+        await runCaptureCommand(job.tabId,"stop",null).catch(()=>{});
       }
+      job.tabId=null;
     }
     await persistCaptureState();
     void pumpCaptureQueue();
@@ -472,13 +512,17 @@ async function startInlineCapture(message,sender) {
   if(!trusted) throw new Error("Per-video recording is available only from a top-level www.youtube.com page.");
   if(!/^[A-Za-z0-9_-]{1,24}$/.test(videoId)) throw new Error("The selected YouTube video ID is invalid.");
   const blocked=Array.from(captureJobs.values()).find(job =>
-    job.videoId===videoId && job.state==="awaiting_autoplay" && job.ownedTab && Number.isInteger(job.tabId)
+    job.videoId===videoId && ["awaiting_autoplay","awaiting_retry"].includes(job.state)
+      && job.ownedTab && Number.isInteger(job.tabId)
   );
   if(blocked) {
     const tab=await browser.tabs.get(blocked.tabId).catch(()=>null);
     if(tab) {
+      const retryingAutoplayBlock = blocked.state === "awaiting_autoplay";
       blocked.state="queued";
-      blocked.phase="Retrying playback in the existing inactive YouTube tab";
+      blocked.phase=retryingAutoplayBlock
+        ? "Retrying after YouTube autoplay permission was changed"
+        : "Retrying playback in the retained YouTube helper tab";
       blocked.error=null;
       blocked.slot=false;
       blocked.updatedAt=Date.now();
@@ -527,7 +571,7 @@ async function stopCaptureJob(message) {
   await ensureCaptureStateRestored();
   const job=captureJobs.get(String(message&&message.job_id||""));
   if(!job) throw new Error("The selected capture job no longer exists.");
-  if(job.state==="queued" || job.state==="awaiting_autoplay") {
+  if(job.state==="queued" || job.state==="awaiting_autoplay" || job.state==="awaiting_retry") {
     job.state="cancelled";job.completedAt=Date.now();job.updatedAt=Date.now();job.slot=false;
     const index=captureQueue.indexOf(job.id);
     if(index>=0) captureQueue.splice(index,1);
@@ -560,7 +604,7 @@ browser.tabs.onRemoved.addListener(tabId=>{
   void ensureCaptureStateRestored().then(async()=>{
     const job=Array.from(captureJobs.values()).find(item=>item.tabId===tabId);
     if(!job) return;
-    if(!job.slot && job.state!=="awaiting_autoplay") return;
+    if(!job.slot && job.state!=="awaiting_autoplay" && job.state!=="awaiting_retry") return;
     if(!["completed","failed","cancelled"].includes(job.state)) {
       job.state="interrupted";
       job.error="The background recording tab was closed before the download completed.";
@@ -611,6 +655,7 @@ browser.action.onClicked.addListener(async tab => {
       func: function() {
         return {
           core: !!globalThis.__standalonePlaybackCoreV1,
+          playerApi: !!globalThis.__standaloneYouTubePlayerApiV1,
           runtime: !!globalThis.__standalonePlaybackDownloadV1
         };
       }
@@ -621,6 +666,13 @@ browser.action.onClicked.addListener(async tab => {
         target,
         world: "MAIN",
         files: ["capture_core.js"]
+      });
+    }
+    if (!ready.playerApi) {
+      await browser.scripting.executeScript({
+        target,
+        world: "MAIN",
+        files: ["youtube_player_api.js"]
       });
     }
     if (!ready.runtime) {
