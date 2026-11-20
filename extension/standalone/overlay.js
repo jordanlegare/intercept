@@ -61,6 +61,7 @@
     ".job-title{color:#edf3e8;font-size:9px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
     ".job-state{margin-top:3px;color:#a3af98;font:7px ui-monospace,SFMono-Regular,monospace;text-transform:uppercase}",
     ".job-stop{border:1px solid #70483e;background:#301916;color:#ffb6aa;border-radius:3px;padding:5px 7px;font:700 7px ui-monospace,SFMono-Regular,monospace;cursor:pointer}",
+    ".job-allow{border:1px solid #688b4b;background:#26391c;color:#d3ffae;border-radius:3px;padding:5px 7px;font:700 7px ui-monospace,SFMono-Regular,monospace;cursor:pointer}",
     ".record{padding:8px 0;border-bottom:1px solid #283124}",
     ".record:last-child{border-bottom:0}",
     ".record-top{display:flex;justify-content:space-between;gap:8px;align-items:start}",
@@ -250,6 +251,26 @@
         main.append(origin);
       }
       row.append(main);
+      if(job.state==="awaiting_autoplay") {
+        const allow=document.createElement("button");
+        allow.className="job-allow";
+        allow.textContent=job.autoplayPermissionHelpOpened?"RETRY":"SET AUTOPLAY";
+        allow.title=job.autoplayPermissionHelpOpened
+          ? "Retry after allowing Audio and Video for www.youtube.com in Firefox"
+          : "Open the helper tab so Firefox's autoplay-blocked permission control is visible";
+        allow.addEventListener("click",async()=>{
+          const response=await browser.runtime.sendMessage({
+            type:"playback-capture:inline-start",
+            video_id:job.videoId,
+            title:job.title,
+            video_url:job.selectedUrl||job.url
+          });
+          if(!response||!response.ok) setNotice(response&&response.error||"Could not open the autoplay permission helper.",true);
+          else setNotice(response.job.phase||"Autoplay permission step opened.");
+          await renderJobs();
+        });
+        row.append(allow);
+      }
       if(["recording","queued","opening","starting","awaiting_autoplay","awaiting_retry"].includes(job.state)) {
         const stop=document.createElement("button");stop.className="job-stop";stop.textContent=job.state==="recording"?"STOP":"CANCEL";
         stop.addEventListener("click",async()=>{
