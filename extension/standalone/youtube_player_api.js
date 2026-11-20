@@ -83,7 +83,7 @@
       if (api) return api;
       await delay(100);
     }
-    // No startup deadline: keep waiting for YouTube's SPA/player to finish initializing.
+    // Keep waiting for YouTube's SPA/player to finish initializing, regardless of delay.
   }
 
   function subscribeToState(player, methods, callback) {
