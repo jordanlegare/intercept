@@ -192,7 +192,7 @@ browser.runtime.onConnect.addListener(port => {
         captureJob.state = "download_queued";
         captureJob.phase = "Waiting for the previous WebM download to finish";
         captureJob.updatedAt = Date.now();
-        void persistCaptureState();
+        await persistCaptureState();
       }
       pendingDownloadQueue.push({
         blob,
@@ -248,7 +248,7 @@ async function pumpDownloadQueue() {
       captureJob.phase = "Firefox is downloading this WebM";
       captureJob.downloadId = downloadId;
       captureJob.updatedAt = Date.now();
-      void persistCaptureState();
+      await persistCaptureState();
     }
     // Once Firefox returns a download ID, keep the single-download lock until
     // downloads.onChanged reports completion or interruption. A disconnected page
