@@ -178,6 +178,14 @@
             }
           } catch (error) {
             mediaError = error;
+            if (error && (error.name === "NotAllowedError"
+                || /not allowed|autoplay/i.test(String(error.message || error)))) {
+              throw new Error(
+                "Firefox blocked automatic YouTube playback (NotAllowedError). " +
+                "Allow Audio and Video for youtube.com in Firefox Settings > Privacy & Security > Permissions > Autoplay. " +
+                String(error.message || error)
+              );
+            }
           }
         }
       }
