@@ -3,11 +3,15 @@
 const downloadJobs = new Map();
 const captureJobs = new Map();
 const captureQueue = [];
-const MAX_PARALLEL_CAPTURE_JOBS = 3;
-const ACTIVE_CAPTURE_STATES = new Set(["opening", "starting", "recording", "saving", "download_queued", "downloading"]);
+const MAX_PARALLEL_CAPTURE_JOBS = 1;
+const ACTIVE_CAPTURE_STATES = new Set(["opening", "starting", "awaiting_autoplay", "recording", "saving", "download_queued", "downloading"]);
 const pendingDownloadQueue = [];
 let activeDownloadId = null;
 let downloadQueueStarting = false;
+const CAPTURE_STATE_STORAGE_KEY = "playbackCaptureQueueV1";
+let captureRestorePromise = null;
+let capturePersistChain = Promise.resolve();
+let capturePumpRunning = false;
 
 function safeFilename(value) {
   let filename = String(value || "youtube-playback.webm");
@@ -19,15 +23,112 @@ function safeFilename(value) {
   return filename.toLowerCase().endsWith(".webm") ? filename : filename + ".webm";
 }
 
+function persistCaptureState() {
+  if (!browser.storage || !browser.storage.local) return Promise.resolve();
+  capturePersistChain = capturePersistChain.catch(() => {}).then(() => {
+    const snapshot = {
+      version: 1,
+      queue: captureQueue.slice(),
+      jobs: Array.from(captureJobs.values()).map(job => ({...job}))
+    };
+    return browser.storage.local.set({[CAPTURE_STATE_STORAGE_KEY]: snapshot});
+  }).catch(error => {
+    console.error("[Playback Capture] Could not persist the recording queue:", error);
+  });
+  return capturePersistChain;
+}
+
+async function ensureCaptureStateRestored() {
+  if (captureRestorePromise) return captureRestorePromise;
+  captureRestorePromise = (async () => {
+    if (!browser.storage || !browser.storage.local) return;
+    const saved = await browser.storage.local.get(CAPTURE_STATE_STORAGE_KEY).catch(() => ({}));
+    const stored = saved && saved[CAPTURE_STATE_STORAGE_KEY];
+    if (!stored || stored.version !== 1 || !Array.isArray(stored.jobs)) return;
+
+    captureJobs.clear();
+    captureQueue.length = 0;
+    for (const raw of stored.jobs) {
+      if (!raw || typeof raw.id !== "string" || typeof raw.videoId !== "string") continue;
+      const job = {...raw, slot: false};
+      const needsTab = ["opening", "starting", "awaiting_autoplay", "recording", "saving", "download_queued", "downloading"].includes(job.state);
+      const tab = needsTab && Number.isInteger(job.tabId)
+        ? await browser.tabs.get(job.tabId).catch(() => null)
+        : null;
+
+      if (["opening", "starting"].includes(job.state)) {
+        job.state = "queued";
+        job.phase = tab ? "Resuming queued capture in its existing inactive tab" : "Restored from the saved recording queue";
+        if (!tab) { job.tabId = null; job.ownedTab = false; }
+      } else if (job.state === "awaiting_autoplay") {
+        if (tab) job.slot = true;
+        else {
+          job.state = "queued";
+          job.phase = "Reopening capture tab after it was closed";
+          job.tabId = null;
+          job.ownedTab = false;
+        }
+      } else if (["recording", "saving", "download_queued", "downloading"].includes(job.state)) {
+        if (tab) job.slot = true;
+        else {
+          job.state = "interrupted";
+          job.phase = "Helper tab closed while capture was in progress";
+          job.error = "The helper tab closed before this queued capture finished. Its temporary file may be recoverable from capture history.";
+          job.completedAt = Date.now();
+        }
+      }
+      captureJobs.set(job.id, job);
+    }
+
+    const queuedIds = Array.isArray(stored.queue) ? stored.queue : [];
+    const queuedSet = new Set();
+    for (const id of queuedIds) {
+      const job = captureJobs.get(id);
+      if (job && job.state === "queued" && !queuedSet.has(id)) {
+        captureQueue.push(id);
+        queuedSet.add(id);
+      }
+    }
+    for (const job of Array.from(captureJobs.values()).sort((a,b) => a.createdAt-b.createdAt)) {
+      if (job.state === "queued" && !queuedSet.has(job.id)) {
+        captureQueue.push(job.id);
+        queuedSet.add(job.id);
+      }
+    }
+
+    // Reconcile a download that was already handed to Firefox before the
+    // background context was restarted. It remains the only active download.
+    for (const job of captureJobs.values()) {
+      if (job.state !== "downloading" || !Number.isInteger(job.downloadId)) continue;
+      const found = await browser.downloads.search({id: job.downloadId}).catch(() => []);
+      const download = found && found[0];
+      if (download && ["in_progress", "queued"].includes(download.state)) {
+        activeDownloadId = job.downloadId;
+      } else if (download && ["complete", "interrupted"].includes(download.state)) {
+        finishJob(job.downloadId, download.state);
+      } else if (job.tabId && job.captureId) {
+        job.state = "download_queued";
+        job.phase = "Rebuilding the download handoff from the saved WebM";
+      }
+    }
+    await persistCaptureState();
+  })().catch(error => {
+    console.error("[Playback Capture] Could not restore the recording queue:", error);
+  });
+  return captureRestorePromise;
+}
+
 function finishJob(downloadId, state) {
-  const job = downloadJobs.get(downloadId);
-  if (!job) return;
-  downloadJobs.delete(downloadId);
-  try { URL.revokeObjectURL(job.objectUrl); } catch (_) {}
-  try { job.port.postMessage({type: "playback-download:finished", state, download_id: downloadId, capture_id: job.captureId, request_id: job.requestId}); } catch (_) {}
-  try { job.port.disconnect(); } catch (_) {}
+  const downloadJob = downloadJobs.get(downloadId) || null;
+  if (downloadJob) {
+    downloadJobs.delete(downloadId);
+    try { URL.revokeObjectURL(downloadJob.objectUrl); } catch (_) {}
+    try { downloadJob.port.postMessage({type: "playback-download:finished", state, download_id: downloadId, capture_id: downloadJob.captureId, request_id: downloadJob.requestId}); } catch (_) {}
+    try { downloadJob.port.disconnect(); } catch (_) {}
+  }
   const captureJob = Array.from(captureJobs.values()).find(item =>
-    item.tabId === job.captureTabId && (!item.captureId || item.captureId === job.captureId)
+    item.downloadId === downloadId || (downloadJob && item.tabId === downloadJob.captureTabId
+      && (!item.captureId || item.captureId === downloadJob.captureId))
   );
   if (activeDownloadId === downloadId) activeDownloadId = null;
   if (captureJob) {
@@ -40,6 +141,7 @@ function finishJob(downloadId, state) {
     if (captureJob.ownedTab && Number.isInteger(captureJob.tabId)) {
       setTimeout(() => { void browser.tabs.remove(captureJob.tabId).catch(() => {}); }, 1200);
     }
+    void persistCaptureState();
     void pumpCaptureQueue();
   }
   void pumpDownloadQueue();
@@ -48,7 +150,7 @@ function finishJob(downloadId, state) {
 browser.downloads.onChanged.addListener(delta => {
   if (!delta || !delta.state) return;
   if (delta.state.current === "complete" || delta.state.current === "interrupted") {
-    finishJob(delta.id, delta.state.current);
+    void ensureCaptureStateRestored().then(() => finishJob(delta.id, delta.state.current));
   }
 });
 
@@ -70,6 +172,7 @@ browser.runtime.onConnect.addListener(port => {
     if (accepted || !message || message.type !== "start") return;
     accepted = true;
     try {
+      await ensureCaptureStateRestored();
       if (!trustedSender) {
         throw new Error("Downloads are accepted only from a top-level HTTPS YouTube page.");
       }
@@ -89,6 +192,7 @@ browser.runtime.onConnect.addListener(port => {
         captureJob.state = "download_queued";
         captureJob.phase = "Waiting for the previous WebM download to finish";
         captureJob.updatedAt = Date.now();
+        void persistCaptureState();
       }
       pendingDownloadQueue.push({
         blob,
@@ -186,13 +290,14 @@ function makeJobId() {
 }
 
 function publicCaptureJob(job) {
-  return {id:job.id,videoId:job.videoId,title:job.title,url:job.url,state:job.state,phase:job.phase||null,
+  return {id:job.id,videoId:job.videoId,title:job.title,url:job.url,sourceUrl:job.sourceUrl||null,sourcePath:job.sourcePath||null,
+    state:job.state,phase:job.phase||null,queuePosition:job.queuePosition||null,
     createdAt:job.createdAt,updatedAt:job.updatedAt,startedAt:job.startedAt||null,
     completedAt:job.completedAt||null,downloadId:job.downloadId||null,error:job.error||null};
 }
 
 function captureJobSnapshot() {
-  return Array.from(captureJobs.values()).sort((a,b)=>b.createdAt-a.createdAt).slice(0,30).map(publicCaptureJob);
+  return Array.from(captureJobs.values()).sort((a,b)=>a.createdAt-b.createdAt).slice(-100).map(publicCaptureJob);
 }
 
 function activeCaptureSlots() {
@@ -239,6 +344,7 @@ async function launchCaptureJob(job) {
   job.state="opening";
   job.phase="Opening the inactive YouTube tab";
   job.updatedAt=Date.now();
+  void persistCaptureState();
   try {
     if(job.currentTab) {
       job.tabId=job.sourceTabId;
@@ -275,40 +381,54 @@ async function launchCaptureJob(job) {
     job.state="recording";
     job.phase="Capturing decoded playback to the temporary WebM file";
     job.updatedAt=Date.now();
+    await persistCaptureState();
     if(job.stopRequested) await stopCaptureJob({job_id:job.id});
   } catch(error) {
     job.error=String(error&&error.message||error||"Could not start this capture.");
     job.updatedAt=Date.now();
-    job.slot=false;
     const autoplayBlocked = /NotAllowedError|background playback|autoplay permission/i.test(job.error);
     if(autoplayBlocked && job.ownedTab && Number.isInteger(job.tabId)) {
       job.state="awaiting_autoplay";
       job.phase="Firefox blocked background playback; allow YouTube autoplay and click REC to retry";
-      // Keep the inactive helper tab so a retry can reuse the loaded player instead of
-      // repeatedly opening and closing tabs at STARTING.
+      // Keep the sole worker reserved until this selection is retried or cancelled.
+      job.slot=true;
     } else {
       job.state="failed";
       job.phase="Startup failed";
       job.completedAt=Date.now();
+      job.slot=false;
       if(Number.isInteger(job.tabId)) {
         if(job.ownedTab) await browser.tabs.remove(job.tabId).catch(()=>{});
         else await runCaptureCommand(job.tabId,"stop",null).catch(()=>{});
       }
     }
+    await persistCaptureState();
     void pumpCaptureQueue();
   }
 }
 
 async function pumpCaptureQueue() {
-  while(activeCaptureSlots()<MAX_PARALLEL_CAPTURE_JOBS&&captureQueue.length) {
-    const id=captureQueue.shift();
-    const job=captureJobs.get(id);
-    if(!job||job.state!=="queued") continue;
-    void launchCaptureJob(job);
+  await ensureCaptureStateRestored();
+  if (capturePumpRunning) return;
+  capturePumpRunning = true;
+  try {
+    while(activeCaptureSlots()<MAX_PARALLEL_CAPTURE_JOBS&&captureQueue.length) {
+      const id=captureQueue.shift();
+      const job=captureJobs.get(id);
+      if(!job||job.state!=="queued") continue;
+      void persistCaptureState();
+      // launchCaptureJob claims the sole worker slot synchronously before its
+      // first await, so browsing clicks can safely append while this runs.
+      void launchCaptureJob(job);
+      break;
+    }
+  } finally {
+    capturePumpRunning = false;
   }
 }
 
 async function startInlineCapture(message,sender) {
+  await ensureCaptureStateRestored();
   const senderUrl=(()=>{try{return new URL(sender&&sender.url||"");}catch(_){return null;}})();
   const trusted=!!senderUrl&&senderUrl.protocol==="https:"
     &&senderUrl.hostname.toLowerCase()==="www.youtube.com"
@@ -324,10 +444,12 @@ async function startInlineCapture(message,sender) {
     const tab=await browser.tabs.get(blocked.tabId).catch(()=>null);
     if(tab) {
       blocked.state="queued";
-      blocked.phase="Retrying playback in the existing YouTube tab";
+      blocked.phase="Retrying playback in the existing inactive YouTube tab";
       blocked.error=null;
+      blocked.slot=false;
       blocked.updatedAt=Date.now();
-      captureQueue.push(blocked.id);
+      if(!captureQueue.includes(blocked.id)) captureQueue.push(blocked.id);
+      await persistCaptureState();
       void pumpCaptureQueue();
       return publicCaptureJob(blocked);
     }
@@ -342,22 +464,17 @@ async function startInlineCapture(message,sender) {
     job.videoId===videoId&&!["completed","failed","cancelled","interrupted"].includes(job.state)
   );
   if(existing) return publicCaptureJob(existing);
-  const currentUrlId=(()=>{
-    try {
-      const url=new URL(sender.url);
-      const path=url.pathname.match(/^\/(?:shorts|live)\/([A-Za-z0-9_-]{1,24})/);
-      return url.searchParams.get("v")||(path&&path[1])||"";
-    } catch(_){return "";}
-  })();
-  const currentTab=message.mode==="current"&&currentUrlId===videoId;
   const title=String(message.title||"YouTube video").replace(/\s+/g," ").trim().slice(0,180)||"YouTube video";
+  const sourceUrl=senderUrl.href;
+  const sourcePath=senderUrl.pathname+(senderUrl.search||"");
   const job={
     id:makeJobId(),videoId,title,url:"https://www.youtube.com/watch?v="+videoId,
-    currentTab,sourceTabId:currentTab?sender.tab.id:null,tabId:null,ownedTab:false,slot:false,
+    sourceUrl,sourcePath,sourceTabId:sender.tab.id,tabId:null,ownedTab:false,slot:false,
     state:"queued",createdAt:Date.now(),updatedAt:Date.now(),stopRequested:false,error:null
   };
   captureJobs.set(job.id,job);
   captureQueue.push(job.id);
+  await persistCaptureState();
   if(captureJobs.size>100) {
     for(const [id,item] of captureJobs) {
       if(captureJobs.size<=80) break;
@@ -371,21 +488,29 @@ async function startInlineCapture(message,sender) {
 async function stopCaptureJob(message) {
   const job=captureJobs.get(String(message&&message.job_id||""));
   if(!job) throw new Error("The selected capture job no longer exists.");
-  if(job.state==="queued") {
-    job.state="cancelled";job.completedAt=Date.now();job.updatedAt=Date.now();
+  if(job.state==="queued" || job.state==="awaiting_autoplay") {
+    job.state="cancelled";job.completedAt=Date.now();job.updatedAt=Date.now();job.slot=false;
+    const index=captureQueue.indexOf(job.id);
+    if(index>=0) captureQueue.splice(index,1);
+    if(job.ownedTab && Number.isInteger(job.tabId)) await browser.tabs.remove(job.tabId).catch(()=>{});
+    await persistCaptureState();
+    void pumpCaptureQueue();
     return publicCaptureJob(job);
   }
   if(["completed","failed","cancelled","interrupted","downloading"].includes(job.state)) return publicCaptureJob(job);
   if(job.state==="opening"||job.state==="starting") {
     job.stopRequested=true;job.updatedAt=Date.now();
+    await persistCaptureState();
     return publicCaptureJob(job);
   }
   if(!Number.isInteger(job.tabId)) throw new Error("The capture tab is not available.");
   job.state="saving";job.phase="Finalizing the WebM file";job.updatedAt=Date.now();
+  await persistCaptureState();
   try { await runCaptureCommand(job.tabId,"stop",null); }
   catch(error) {
     job.error=String(error&&error.message||error||"Could not stop the recording.");
     job.state="failed";job.completedAt=Date.now();job.slot=false;
+    await persistCaptureState();
     void pumpCaptureQueue();
     throw error;
   }
@@ -393,25 +518,20 @@ async function stopCaptureJob(message) {
 }
 
 browser.tabs.onRemoved.addListener(tabId=>{
-  const job=Array.from(captureJobs.values()).find(item=>item.tabId===tabId);
-  if(!job) return;
-  if(job.state==="awaiting_autoplay") {
-    job.state="failed";
-    job.phase="The helper tab was closed";
-    job.error="The inactive YouTube helper tab was closed. Click REC to open a fresh one.";
-    job.completedAt=Date.now();
-    job.updatedAt=Date.now();
+  void ensureCaptureStateRestored().then(async()=>{
+    const job=Array.from(captureJobs.values()).find(item=>item.tabId===tabId);
+    if(!job) return;
+    if(!job.slot && job.state!=="awaiting_autoplay") return;
+    if(!["completed","failed","cancelled"].includes(job.state)) {
+      job.state="interrupted";
+      job.error="The background recording tab was closed before the download completed.";
+      job.completedAt=Date.now();job.updatedAt=Date.now();
+    }
+    job.slot=false;
     job.tabId=null;
-    return;
-  }
-  if(!job.slot) return;
-  if(!["completed","failed","cancelled"].includes(job.state)) {
-    job.state="interrupted";
-    job.error="The background recording tab was closed before the download completed.";
-    job.completedAt=Date.now();job.updatedAt=Date.now();
-  }
-  job.slot=false;
-  void pumpCaptureQueue();
+    await persistCaptureState();
+    void pumpCaptureQueue();
+  });
 });
 
 function isSupportedOverlayTab(tab) {
@@ -551,3 +671,6 @@ browser.runtime.onMessage.addListener((message, sender) => {
     error: String(error && error.message || error || "Could not communicate with the YouTube capture runtime.")
   }));
 });
+
+
+void ensureCaptureStateRestored().then(() => pumpCaptureQueue());
