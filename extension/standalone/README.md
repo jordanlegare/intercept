@@ -3,8 +3,8 @@
 ## 1.4.1 — Firefox autoplay permission handoff
 
 - When Firefox blocks playback, the helper tab stays foregrounded so Firefox's native autoplay-blocked address-bar control is visible.
-- The REC control changes to **SET AUTOPLAY**. Click it to focus the retained helper tab, use Firefox's blocked-autoplay control to allow **Audio and Video** for `www.youtube.com`, then return and click **RETRY**.
-- The dashboard queue has the same **SET AUTOPLAY / RETRY** action. The extension does not change Firefox preferences or grant autoplay itself; Firefox requires the user to approve the site exception.
+- The helper tab stays in front after Firefox blocks playback, exposing Firefox's native autoplay-blocked address-bar control. Click it and allow **Audio and Video** for `www.youtube.com`, then return to the source tab and click **RETRY**.
+- The dashboard queue exposes the same **RETRY** action. The extension does not change Firefox preferences or grant autoplay itself; Firefox requires the user to approve the site exception.
 
 ## 1.3.9 — Standby timer visibility
 
@@ -40,7 +40,7 @@ Recommended site-specific setup:
 
 You can instead set **Default for all websites → Allow Audio and Video** in the Autoplay settings. That is a broader permission and affects other sites too; a specific YouTube site permission takes precedence over the default.
 
-When this permission is blocked, a queued job enters `SET AUTOPLAY`. Click it once to bring the retained helper tab forward. Firefox shows its native autoplay-blocked control beside the address bar; open it and select **Allow Audio and Video** for `www.youtube.com`. Return to the original YouTube tab and click `RETRY` to resume the same queued selection. The extension cannot open or accept Firefox's native permission panel on the user's behalf. Other transient startup failures show `RETRY`, also reusing the same helper tab. Pre-roll advertisements are allowed to finish before recording begins.
+When this permission is blocked, the helper tab remains foregrounded so Firefox's native autoplay-blocked control is visible beside the address bar. Open it and select **Allow Audio and Video** for `www.youtube.com`. Return to the original YouTube tab and click `RETRY` to resume the same queued selection. The extension cannot open or accept Firefox's native permission panel on the user's behalf. Other transient startup failures show `RETRY`, also reusing the same helper tab. Pre-roll advertisements are allowed to finish before recording begins.
 
 ## Use
 
