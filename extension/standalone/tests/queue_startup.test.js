@@ -77,3 +77,10 @@ test("Firefox autoplay rejection exposes the native permission control and retri
   assert.ok(overlay.includes("job-allow"));
   assert.ok(overlay.includes("SET AUTOPLAY"));
 });
+
+test("Firefox manifest declares no data collection outside the add-on or local browser", () => {
+  assert.deepEqual(
+    manifest.browser_specific_settings.gecko.data_collection_permissions,
+    {required: ["none"]}
+  );
+});
