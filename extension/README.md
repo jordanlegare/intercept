@@ -4,7 +4,7 @@ This directory contains the Firefox add-ons maintained with Intercept.
 
 ## Playback Capture — standalone YouTube recorder
 
-**Current package:** [Playback Capture 1.3.7](./youtube-playback-download-1.3.7.xpi)
+**Current package:** [Playback Capture 1.3.8](./youtube-playback-download-1.3.8.xpi)
 
 Playback Capture adds per-video `REC` controls to YouTube, queues selected videos, starts playback through YouTube's exposed player API, records decoded playback output as WebM, and downloads completed captures. It runs independently of the Intercept Rust server.
 
@@ -17,7 +17,7 @@ For the capture queue to start playback automatically without an `ALLOW PLAY` re
 3. Set `youtube.com` to **Allow Audio and Video**. You can set the site's permission specifically, or use **Default for all websites → Allow Audio and Video** (which applies more broadly).
 4. Click **Save Changes**, then reload YouTube.
 
-A site-specific block can override the global default. When Firefox rejects startup, the REC control displays **ALLOW PLAY**. This is a retry prompt, not a permission grant: change the Firefox autoplay permission first, then click it to retry the waiting capture. With the site permission enabled, the extension can start new queued captures automatically, subject to player and network readiness. The helper tab is temporarily foregrounded during startup because Firefox may defer autoplay in background tabs.
+A site-specific block can override the global default. When Firefox rejects startup, the REC control displays **ALLOW PLAY**. This is a retry prompt, not a permission grant: change the Firefox autoplay permission first, then click it to retry the waiting capture. With the site permission enabled, the extension can start new queued captures automatically, subject to player, ad, and network readiness. The helper tab is temporarily foregrounded during startup because Firefox may defer autoplay in background tabs. Transient startup failures now retain the helper tab and display RETRY instead of closing it immediately; retry resumes the same queue item.
 
 ### Install the development XPI
 
