@@ -398,25 +398,17 @@ async function launchCaptureJob(job) {
       let result = null;
       let startupError = null;
       for (let attempt = 1; attempt <= 2; attempt++) {
-        let timeoutId = null;
         try {
-          const startup = runCaptureCommand(job.tabId,"record-video",{videoId:job.videoId,title:job.title});
-          result = await Promise.race([
-            startup,
-            new Promise((_,reject) => {
-              timeoutId = setTimeout(() => reject(new Error(
-                "Startup timed out after 150 seconds. YouTube did not begin playback or MediaRecorder did not initialize."
-              )),150000);
-            })
-          ]);
+          // Deliberately wait without a startup deadline. Slow player initialization,
+          // preroll ads, and MediaRecorder setup must not expire a valid queue item.
+          result = await runCaptureCommand(job.tabId,"record-video",{videoId:job.videoId,title:job.title});
           startupError = null;
           break;
         } catch (error) {
           startupError = error;
           const detail = String(error && error.message || error || "");
           const autoplayBlocked = /NotAllowedError|autoplay permission|autoplay is blocked/i.test(detail);
-          const startupTimedOut = /Startup timed out after 150 seconds/i.test(detail);
-          if (attempt >= 2 || autoplayBlocked || startupTimedOut) break;
+          if (attempt >= 2 || autoplayBlocked) break;
           job.phase = "YouTube player is still initializing; retrying in the same helper tab (attempt 2 of 2)";
           job.error = detail;
           job.updatedAt = Date.now();
@@ -425,8 +417,6 @@ async function launchCaptureJob(job) {
           const stillOpen = await browser.tabs.get(job.tabId).catch(()=>null);
           if (!stillOpen) throw error;
           if (!stillOpen.active) await browser.tabs.update(job.tabId,{active:true});
-        } finally {
-          if (timeoutId !== null) clearTimeout(timeoutId);
         }
       }
       if (startupError) throw startupError;
