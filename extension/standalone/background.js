@@ -373,23 +373,50 @@ async function launchCaptureJob(job) {
       }
     }
     job.state="starting";
-    job.phase="Initializing YouTube playback and MediaRecorder in the inactive tab";
+    job.phase="Activating helper tab and waiting for YouTube's Play control";
     job.updatedAt=Date.now();
     await persistCaptureState();
-    const startup = runCaptureCommand(job.tabId,"record-video",{videoId:job.videoId,title:job.title});
-    const result = await Promise.race([
-      startup,
-      new Promise((_,reject)=>setTimeout(()=>reject(new Error(
-        "Startup timed out after 45 seconds. YouTube did not begin playback or MediaRecorder did not initialize. Check Firefox's autoplay permission for youtube.com."
-      )),45000))
-    ]);
-    job.captureId=result&&result.capture_id||null;
-    job.startedAt=Date.now();
-    job.state="recording";
-    job.phase="Capturing decoded playback to the temporary WebM file";
-    job.updatedAt=Date.now();
-    await persistCaptureState();
-    if(job.stopRequested) await stopCaptureJob({job_id:job.id});
+
+    // Firefox blocks background-tab autoplay by default. Briefly activate the
+    // helper so the player can initialize and its Play control can be targeted.
+    // Restore the user's active tab immediately after the recorder is confirmed.
+    const activeBefore = await browser.tabs.query({active:true,lastFocusedWindow:true}).catch(()=>[]);
+    const returnTabId = activeBefore[0] && activeBefore[0].id !== job.tabId
+      ? activeBefore[0].id : null;
+    let helperActivated = false;
+    try {
+      const helper = await browser.tabs.get(job.tabId);
+      if (!helper.active) {
+        await browser.tabs.update(job.tabId,{active:true});
+        helperActivated = true;
+      }
+      job.phase="Waiting for YouTube Play button and real playback progress";
+      job.updatedAt=Date.now();
+      await persistCaptureState();
+
+      const startup = runCaptureCommand(job.tabId,"record-video",{videoId:job.videoId,title:job.title});
+      const result = await Promise.race([
+        startup,
+        new Promise((_,reject)=>setTimeout(()=>reject(new Error(
+          "Startup timed out after 45 seconds. YouTube did not begin playback or MediaRecorder did not initialize."
+        )),45000))
+      ]);
+      job.captureId=result&&result.capture_id||null;
+      job.startedAt=Date.now();
+      job.state="recording";
+      job.phase="Recording confirmed; helper tab will return to the background";
+      job.updatedAt=Date.now();
+      await persistCaptureState();
+      if(job.stopRequested) await stopCaptureJob({job_id:job.id});
+    } finally {
+      if (helperActivated && Number.isInteger(returnTabId)) {
+        const activeNow = await browser.tabs.query({active:true,lastFocusedWindow:true}).catch(()=>[]);
+        // Do not override a user's own tab switch made while the player was starting.
+        if (activeNow[0] && activeNow[0].id === job.tabId) {
+          await browser.tabs.update(returnTabId,{active:true}).catch(()=>{});
+        }
+      }
+    }
   } catch(error) {
     job.error=String(error&&error.message||error||"Could not start this capture.");
     job.updatedAt=Date.now();
