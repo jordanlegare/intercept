@@ -463,7 +463,7 @@ async function launchCaptureJob(job) {
       // The REC button can retry against this same tab instead of opening a new one.
       job.state=autoplayBlocked ? "awaiting_autoplay" : "awaiting_retry";
       job.phase=autoplayBlocked
-        ? "Firefox blocked autoplay; enable Allow Audio and Video for youtube.com, then click ALLOW PLAY"
+        ? "Firefox blocked background playback; enable Allow Audio and Video for youtube.com, then click ALLOW PLAY"
         : "Startup did not complete; helper tab retained. Click RETRY to resume this same selection";
       job.slot=true;
     } else {
