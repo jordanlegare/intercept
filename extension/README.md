@@ -21,7 +21,7 @@ A site-specific block can override the global default. When Firefox rejects star
 
 ### Firefox data collection declaration
 
-Playback Capture declares `personallyIdentifyingInfo`, `websiteContent`, and `websiteActivity` in Firefox's built-in data consent manifest field because it captures website video/audio and saves WebM recordings through Firefox Downloads. The files and queue/history remain on the user's device; the extension does not upload them to an external analytics or storage service.
+Playback Capture declares `personallyIdentifyingInfo`, `websiteContent`, and `websiteActivity` in Firefox's built-in data consent manifest field because it captures website video/audio and saves WebM recordings through Firefox Downloads. The files and queue/history remain on the user's device; the extension does not upload them to an external analytics or storage service. Firefox 140 or later is required for the built-in data consent experience.
 
 ### Install the development XPI
 
