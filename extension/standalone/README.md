@@ -1,81 +1,100 @@
-# Playback Capture for Firefox 1.3.1
+# Playback Capture for Firefox 1.3.7
 
-An independent Firefox add-on that captures decoded playback output from YouTube and saves it as WebM files. It has its own capture session manager, local capture library, recovery flow, toolbar dashboard, and download bridge. It does not connect to the Intercept Rust server.
+Playback Capture is a standalone Firefox add-on that queues selected YouTube videos, starts playback through YouTube's exposed player API, and records the decoded player output to WebM files. It has its own background queue, capture session manager, temporary file library, recovery flow, toolbar dashboard, and Firefox download bridge. It does not connect to the Intercept Rust server.
 
-## What changed in 1.3.1
+## 1.3.7 — Native YouTube player API
 
-- Startup recovery: background capture tabs simulate a click on YouTube's main play control on the page `load` event (and retry the click when the recorder is asked to start). This can help YouTube initialize the player, but scripted clicks do not override Firefox autoplay policy.
-- No stuck STARTING state: player startup, playback requests and recorder initialization now have bounded timeouts and actionable failure messages; the queue advances when a startup fails.
-- Serialized downloads: finalized WebM files enter a single FIFO download queue. Firefox starts only one file download at a time; queued download jobs remain visible in the dashboard.
+- Player startup now uses the exposed `#movie_player` API. The extension waits for the selected video ID and the required methods, calls `wakeUpControls()` when available, then calls `playVideo()`.
+- Startup listens for the YouTube `onStateChange` event and verifies both the `PLAYING` state and advancing playback time before initializing MediaRecorder. A visible Play button is no longer the primary startup mechanism.
+- The helper tab is temporarily brought to the foreground during startup and returned to the background after recording is confirmed. The user's own tab switch is respected.
+- Startup and player readiness have bounded timeouts and actionable errors. The one-at-a-time capture queue and serialized Firefox download queue are retained.
 
-## Earlier 1.3.0 changes
+### Required Firefox autoplay permission
 
-- Per-video record buttons: red `REC` controls appear on video thumbnails across YouTube browse/search/channel surfaces, and immediately before the like controls on a watch page.
-- Background recording queue: selecting a thumbnail opens an inactive YouTube player tab, starts ordinary playback, streams the decoded player output through MediaRecorder into extension-managed OPFS storage, then asks Firefox Downloads to save the WebM. The helper tab closes after the download finishes.
-- Concurrent jobs: the background scheduler runs up to three capture tabs concurrently and queues additional selections. Each capture has an independent page recorder and file writer; the dark overlay shows active jobs and allows stop/cancel.
-- Autoplay handling: background playback depends on Firefox and YouTube autoplay permissions. When autoplay is blocked, the job is marked failed with an explanation; the extension does not report a recording as active.
+**For unattended queue processing, allow autoplay for YouTube before selecting videos.** Calling YouTube's `playVideo()` method is still an autoplay request; the player API cannot override Firefox's autoplay policy. Firefox normally blocks media with sound by default, and it can also defer autoplay in a background tab until that tab is brought to the foreground.
 
-- In-page controls: click the toolbar icon on a regular HTTPS `www.youtube.com` page to bootstrap the capture runtime if the tab predates installation, then inject a video-adjacent overlay. It exposes arm/disarm, pause, resume, split, stop/save, discard, history, recovery and deletion without a toolbar popup.
-- Dark mode: the overlay uses a fixed dark palette in an isolated Shadow DOM, so YouTube's theme and page styles do not leak into its controls.
-- Live page synchronization: the isolated overlay communicates through the extension background to the capture API in the page's main world. It refreshes on player events, YouTube SPA navigation and DOM changes, with a 1.2-second polling fallback. Overlay messages are accepted only from a top-level `www.youtube.com` tab.
+Recommended site-specific setup:
 
-## Earlier 1.2.0 improvements
+1. Open `https://www.youtube.com` in Firefox.
+2. Open Firefox **Settings → Privacy & Security → Permissions → Autoplay → Settings…**.
+3. Find `youtube.com` in the site list and set its permission to **Allow Audio and Video**. If it is not listed yet, use the autoplay permission control in the address bar while YouTube is open, or open Page Info → Permissions → Autoplay and change the site from its default.
+4. Click **Save Changes**, then reload YouTube.
 
-- On-demand dark overlay, Shadow DOM isolation, SPA refresh synchronization and toolbar bootstrap for tabs open before installation.
+You can instead set **Default for all websites → Allow Audio and Video** in the Autoplay settings. That is a broader permission and affects other sites too; a specific YouTube site permission takes precedence over the default.
 
-## Earlier 1.1.0 improvements
-
-- Video-aware sessions: every capture is bound to a stable YouTube video identity (watch, Shorts, Live and embed paths). YouTube SPA navigation, back/forward navigation, and player replacement split sessions at the video boundary. Outgoing recordings retain their original title and ID.
-- Capture history and recovery: metadata and a timestamped event timeline are stored in IndexedDB. Closed WebM files remain in Firefox origin-private storage until a successful download has aged out. Interrupted or failed downloads can be retried from the popup for up to seven days. A tab close during recording is reconciled on the next visit; any retained partial file is clearly marked as potentially incomplete.
-- Expanded controls: arm/disarm, manual pause/resume, split into a second WebM, stop and save, and discard.
-- Capture dashboard: current title and video ID, elapsed recording time, bytes written, codec, live state, and a recent capture timeline with recovery/delete actions.
-- Automated tests: Node's test runner covers video identity extraction, SPA video transitions, filename isolation, session pause/resume accounting, split/stop/discard save policy, and rapid consecutive video changes.
+When this permission is blocked, a queued job may stop in the `ALLOW PLAY` state. That label means the first automatic playback attempt was rejected and the job is waiting for a retry. Clicking it requeues the job and retries startup with the helper tab foregrounded; it does **not** grant Firefox autoplay permission. Change the permission first, then click `ALLOW PLAY` to retry the waiting job. New queue selections should then start automatically, subject to YouTube/player readiness and network conditions.
 
 ## Use
 
-1. Open YouTube in Firefox. Red `REC` controls appear on supported video cards; on a watch page, the control sits immediately before the like button.
-2. Click a card's `REC` control to queue that video without changing the active tab. The extension opens an inactive player tab, simulates a click on the player at window load, and attempts to start playback. Firefox autoplay policy can still reject scripted playback.
-3. While recording, the button pulses red. Click it again to stop and save; completed videos also finalize automatically when playback ends.
-4. Use the toolbar action to open the dark dashboard and view the background job queue, capture history and recovery actions.
-5. On a watch page, the `REC` button records the video already open.
-4. Playback pauses suspend recording; use the popup controls to pause, resume, split, stop and save, or discard.
-5. When a video changes, the outgoing capture is finalized as its own WebM and a new capture starts for the selected video when playback is active.
-7. Use the overlay's Capture Timeline to retry interrupted/failed downloads or remove history entries.
+1. Install the XPI (see **Install for testing** below), set YouTube's autoplay permission as described above, and reload any YouTube tabs that were already open.
+2. Browse YouTube normally. Red `REC` controls appear on supported video cards and beside the like controls on a watch page.
+3. Click a card's `REC` control to add that video to the persistent FIFO capture queue without navigating the browsing tab. The extension opens a dedicated YouTube helper tab, briefly activates it for playback startup, starts the recording when playback is confirmed, and restores the previously active tab.
+4. Capture jobs run one at a time. Finalized WebM files enter a separate FIFO download queue, with only one Firefox download started at a time.
+5. While a video is recording, its button pulses red. Click it again to stop and save. A completed video is finalized automatically when playback ends.
+6. Use the Playback Capture toolbar action to open the dark dashboard and view the queue, capture history, timeline, and recovery actions. On a watch page, the `REC` control records the video already open.
 
-## Independent operation and permissions
+If a job remains at `ALLOW PLAY`, verify the site-specific autoplay permission first. If playback still does not start, inspect the job's error/phase in the dashboard; a player error, ad, unavailable video, or network issue can also prevent startup.
 
-The extension does not connect to Intercept, create an Intercept session, inspect media network requests, rewrite traffic, or depend on the original Intercept extension. It requests activeTab, scripting, and downloads; content scripts are restricted to HTTPS YouTube domains.
+## Earlier changes
 
-Capture files use the browser's origin-private file system (OPFS); their history records use IndexedDB. A downloaded temporary copy is retained for up to 24 hours to support recovery. Failed and interrupted files are retained for up to seven days. If a tab closes before MediaRecorder writes its finalization data, a retained partial recording is offered for best-effort recovery and may not play correctly. Deleting a history item also deletes its temporary file.
+### 1.3.6 — Automated startup attempt
 
-## Technical limits
+- Added player readiness checks, a foreground helper-tab startup phase, playback-progress verification, and an explicit Firefox autoplay error.
+- The helper tab is returned to the previous tab after recording is confirmed, provided the user has not switched tabs in the meantime.
 
-This records decoded playback output, not YouTube's original media file or Firefox's internal HTTP cache. Output is re-encoded as WebM and may differ from the source in quality, size, timing, or codec. It has a 2 GiB safety limit, also bounded by available origin-private storage.
+### 1.3.5 — Persistent ordered queue
 
-DRM/EME-protected playback may not expose capturable media tracks. This add-on does not bypass DRM, decrypt protected media, retrieve source segments, or defeat access controls. Firefox/player behavior and available storage can also affect capture.
+- Added persistent ordered REC selections and retained source-path tracking.
+- Capture workers and Firefox downloads run sequentially.
+
+### 1.3.4 — Thumbnail REC placement
+
+- Moved the REC control into the thumbnail link as a top overlay. Clicking REC cancels the thumbnail navigation; clicking elsewhere on the thumbnail still opens the video normally.
+
+### 1.3.3 — Thumbnail control placement
+
+- Moved the thumbnail REC control to the left side.
+
+### 1.3.0 — Initial background queue
+
+- Added per-video REC controls, helper YouTube tabs, WebM capture, a dark queue overlay, and serialized download handling.
 
 ## Install for testing
 
-1. Download youtube-playback-download.xpi.
-2. Open about:debugging#/runtime/this-firefox.
-3. Choose Load Temporary Add-on and select the XPI.
+1. Download [youtube-playback-download-1.3.7.xpi](../youtube-playback-download-1.3.7.xpi).
+2. Open `about:debugging#/runtime/this-firefox`.
+3. Choose **Load Temporary Add-on** and select the downloaded XPI.
 4. Reload any YouTube tab that was already open.
 5. Pin Playback Capture from Firefox's Extensions menu.
 
-Temporary installations are removed when Firefox restarts. Standard Firefox release builds require Mozilla-signed add-ons for normal, persistent installation. This repository XPI is an unsigned development package and must be submitted for Mozilla signing before normal end-user distribution.
+Temporary installations are removed when Firefox restarts. This repository XPI is an unsigned development package. Standard Firefox release builds require a Mozilla-signed add-on for normal, persistent installation.
+
+## Independent operation and permissions
+
+The extension does not connect to Intercept, create an Intercept session, inspect media network requests, rewrite traffic, or depend on the original Intercept extension. It requests `activeTab`, `scripting`, `downloads`, `storage`, and `unlimitedStorage`; content scripts are restricted to HTTPS YouTube domains.
+
+Capture files use the browser's origin-private file system (OPFS), and history records use IndexedDB. A downloaded temporary copy is retained for up to 24 hours to support recovery. Failed and interrupted files are retained for up to seven days. If a tab closes before MediaRecorder writes its finalization data, a retained partial recording is offered for best-effort recovery and may not play correctly. Deleting a history item also deletes its temporary file.
+
+## Technical limits
+
+- **Autoplay is browser-controlled.** The native YouTube player API does not bypass Firefox autoplay permissions or browser user-activation requirements. Allow Audio and Video for YouTube for automatic queued startup. The extension temporarily foregrounds the helper tab because Firefox may defer background-tab autoplay.
+- **This is a decoded playback capture.** It records the rendered player output through `captureStream()` and `MediaRecorder`, re-encoded as WebM. It is not YouTube's original media file, a dump of Firefox's HTTP cache, or a copy of the original network segments. Quality, size, timing, and codec may differ from the source.
+- **DRM/EME-protected playback may not expose capturable tracks.** The add-on does not bypass DRM, decrypt protected media, retrieve source segments, or defeat access controls.
+- YouTube can change its internal player interface. If the exposed player methods or event behavior changes, startup may need an adapter update. Player errors, advertisements, network conditions, Firefox settings, and available storage can also affect capture.
+- Captures have a 2 GiB safety limit and are also bounded by available origin-private storage.
 
 ## Source layout
 
-- manifest.json — minimal Manifest V3 permissions and YouTube-only content-script scope.
-- capture_core.js — deterministic identity, filename and session-state primitives shared by runtime and automated tests.
-- video_download.js — media-element capture, OPFS file lifecycle, session state, IndexedDB history and recovery API.
-- download_bridge.js — isolated-world bridge for Firefox download lifecycle messages.
-- background.js — validates the source tab and saves WebM blobs through Firefox Downloads.
-- overlay.js — on-demand in-page dark dashboard, background capture queue, mount lifecycle and player/SPA refresh handling.
-- inline_record.js — per-video red `REC` buttons, card discovery, watch-page like-row placement and job-state synchronization.
-- popup.html, popup.css, popup.js — retained extension-page dashboard assets; the toolbar action now activates the in-page overlay.
-- tests/capture_core.test.js — Node unit tests for the session manager and identity rules.
+- `manifest.json` — Firefox Manifest V3 permissions and YouTube-only content-script scope.
+- `capture_core.js` — deterministic identity, filename, and session-state primitives shared by runtime and tests.
+- `youtube_player_api.js` — readiness checks and adapter for YouTube's exposed player API, player-state events, and playback confirmation.
+- `video_download.js` — media-element capture, OPFS file lifecycle, session state, IndexedDB history, and recovery API.
+- `download_bridge.js` — isolated-world bridge for Firefox download lifecycle messages.
+- `background.js` — validates source tabs, schedules one capture job at a time, foregrounds helper tabs for startup, and serializes Firefox downloads.
+- `overlay.js` — dark dashboard, background capture queue, mount lifecycle, and player/SPA refresh handling.
+- `inline_record.js` — per-video red `REC` buttons, card discovery, watch-page placement, and job-state synchronization.
+- `popup.html`, `popup.css`, `popup.js` — retained extension-page dashboard assets; the toolbar action activates the in-page overlay.
+- `tests/capture_core.test.js` — capture-session and identity tests.
+- `tests/youtube_player_api.test.js` — player readiness, API startup, playback confirmation, and autoplay-rejection tests.
 
-Background playback requires autoplay permission for YouTube. A job that cannot autoplay is reported as failed rather than saved as an empty file. Up to three recording workers run concurrently, while finalized downloads are serialized one at a time. YouTube browse cards do not expose a reusable media stream, so each selected card is played in a separate inactive tab; the watch-page button records the existing player instead.
-
-The XPI is built from the standalone source with the manifest at the archive root.
+The XPI is built from this directory with the manifest at the archive root.
