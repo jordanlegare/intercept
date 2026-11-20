@@ -3,6 +3,7 @@
 ## 1.4.2 — Firefox built-in data collection declaration
 
 - Added Firefox's `browser_specific_settings.gecko.data_collection_permissions` declaration for `personallyIdentifyingInfo`, `websiteContent`, and `websiteActivity`.
+- Raised the minimum supported Firefox version to 140.0 so Firefox's built-in data consent experience is available.
 - These categories disclose the extension's core function: it captures website video/audio, creates WebM recordings, and saves them through Firefox Downloads. The resulting queue, history, and recordings stay local; the extension does not upload them to an external analytics or storage service.
 
 ## 1.4.1 — Firefox autoplay permission handoff
@@ -15,7 +16,7 @@
 
 - The elapsed-time tile stays hidden while capture is idle, armed, or preparing. It appears after recording starts and remains visible through pause, finalization, and download states.
 
-Playback Capture is a standalone Firefox add-on that queues selected YouTube videos, starts playback through YouTube's exposed player API, and records the decoded player output to WebM files. It has its own background queue, capture session manager, temporary file library, recovery flow, toolbar dashboard, and Firefox download bridge. It does not connect to the Intercept Rust server.
+Playback Capture requires Firefox 140 or later and is a standalone Firefox add-on that queues selected YouTube videos, starts playback through YouTube's exposed player API, and records the decoded player output to WebM files. It has its own background queue, capture session manager, temporary file library, recovery flow, toolbar dashboard, and Firefox download bridge. It does not connect to the Intercept Rust server.
 
 ## 1.3.8 — Queue startup recovery
 
