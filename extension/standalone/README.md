@@ -2,8 +2,8 @@
 
 ## 1.4.2 — Firefox built-in data collection declaration
 
-- Added Firefox's `browser_specific_settings.gecko.data_collection_permissions` declaration with `required: ["none"]`.
-- Playback Capture keeps the capture queue, video metadata, session history, and WebM data in the local browser and local download destination. It does not transmit this information to an external service.
+- Added Firefox's `browser_specific_settings.gecko.data_collection_permissions` declaration for `personallyIdentifyingInfo`, `websiteContent`, and `websiteActivity`.
+- These categories disclose the extension's core function: it captures website video/audio, creates WebM recordings, and saves them through Firefox Downloads. The resulting queue, history, and recordings stay local; the extension does not upload them to an external analytics or storage service.
 
 ## 1.4.1 — Firefox autoplay permission handoff
 
