@@ -72,8 +72,8 @@ test("Firefox autoplay rejection exposes the native permission control and retri
   assert.match(background, /keepHelperActiveForAutoplay/);
   assert.match(background, /autoplayPermissionHelpOpenedAt/);
   assert.match(background, /Firefox's autoplay-blocked address-bar icon/);
-  assert.match(background, /browser\\.tabs\\.update\\(tab\\.id,\\{active:true\\}\\)/);
-  assert.match(inline, /awaiting_autoplay:job\\.autoplayPermissionHelpOpened\\?"RETRY":"SET AUTOPLAY"/);
+  assert.match(background, /browser\.tabs\.update\\(tab\.id,\\{active:true\\}\\)/);
+  assert.match(inline, /awaiting_autoplay:job\.autoplayPermissionHelpOpened\\?"RETRY":"SET AUTOPLAY"/);
   assert.match(overlay, /job-allow/);
   assert.match(overlay, /SET AUTOPLAY/);
 });
