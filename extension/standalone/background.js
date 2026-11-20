@@ -390,7 +390,7 @@ async function launchCaptureJob(job) {
         await browser.tabs.update(job.tabId,{active:true});
         helperActivated = true;
       }
-      job.phase="Waiting for YouTube Play button and real playback progress";
+      job.phase="Starting with YouTube player API: wakeUpControls -> playVideo";
       job.updatedAt=Date.now();
       await persistCaptureState();
 
@@ -398,8 +398,8 @@ async function launchCaptureJob(job) {
       const result = await Promise.race([
         startup,
         new Promise((_,reject)=>setTimeout(()=>reject(new Error(
-          "Startup timed out after 45 seconds. YouTube did not begin playback or MediaRecorder did not initialize."
-        )),45000))
+          "Startup timed out after 90 seconds. YouTube did not begin playback or MediaRecorder did not initialize."
+        )),90000))
       ]);
       job.captureId=result&&result.capture_id||null;
       job.startedAt=Date.now();
