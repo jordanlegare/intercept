@@ -81,7 +81,7 @@
     "@media(prefers-reduced-motion:reduce){*{transition:none!important}}"
   ].join("\n");
   const markup = '<section class="panel">' +
-    '<div class="head"><span class="mark"></span><span class="brand">PLAYBACK CAPTURE</span><span class="ver">1.4.1 · DARK</span>' +
+    '<div class="head"><span class="mark"></span><span class="brand">PLAYBACK CAPTURE</span><span class="ver">1.4.2 · DARK</span>' +
     '<button class="icon" id="minimize" title="Minimize" aria-label="Minimize">−</button>' +
     '<button class="icon" id="close" title="Close overlay" aria-label="Close">×</button></div>' +
     '<div class="body">' +
