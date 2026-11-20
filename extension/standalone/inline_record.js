@@ -79,9 +79,13 @@
     if(!button) return;
     button.className="";button.disabled=false;
     if(!job) {button.textContent="● REC";button.title="Record this video in a background YouTube tab";return;}
-    const labels={queued:"QUEUED",opening:"OPENING",starting:"STARTING",awaiting_autoplay:"ALLOW PLAY",awaiting_retry:"RETRY",recording:"● REC",saving:"SAVING",downloading:"SAVING",completed:"SAVED",failed:"RETRY",interrupted:"RETRY",cancelled:"● REC"};
+    const labels={queued:"QUEUED",opening:"OPENING",starting:"STARTING",awaiting_autoplay:job.autoplayPermissionHelpOpened?"RETRY":"SET AUTOPLAY",awaiting_retry:"RETRY",recording:"● REC",saving:"SAVING",downloading:"SAVING",completed:"SAVED",failed:"RETRY",interrupted:"RETRY",cancelled:"● REC"};
     button.textContent=labels[job.state]||"● REC";
-    button.title=job.error||job.phase||(job.state==="recording"?"Recording to a WebM file. Click to stop and save.":"Capture state: "+job.state);
+    button.title=job.state==="awaiting_autoplay"
+      ? job.autoplayPermissionHelpOpened
+        ? "After allowing Audio and Video for www.youtube.com in Firefox, click to retry this queued capture."
+        : "Click to focus the helper tab. In Firefox's address bar, open the autoplay-blocked permission and allow Audio and Video for www.youtube.com."
+      : job.error||job.phase||(job.state==="recording"?"Recording to a WebM file. Click to stop and save.":"Capture state: "+job.state);
     if(job.state==="recording") button.className="recording";
     else if(["queued","opening","starting"].includes(job.state)) button.className="pending";
     else if(["saving","downloading"].includes(job.state)) button.className="saving";
