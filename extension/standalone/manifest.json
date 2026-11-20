@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Playback Capture",
-  "version": "1.3.9",
+  "version": "1.4.0",
   "description": "Queue YouTube selections, wait through ads, and retry transient player startup failures in the same helper tab.",
   "permissions": [
     "activeTab",
