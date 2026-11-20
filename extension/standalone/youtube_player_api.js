@@ -75,19 +75,15 @@
     return {player, methods, videoId, state};
   }
 
-  async function waitForPlayerApi(doc, expectedVideoId, timeoutMs = 20000) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+  async function waitForPlayerApi(doc, expectedVideoId) {
+    while (true) {
       const player = doc.getElementById("movie_player")
         || doc.querySelector("#movie_player");
       const api = inspectPlayer(player, expectedVideoId);
       if (api) return api;
       await delay(100);
     }
-    throw new Error(
-      "YouTube's native player API did not become ready for the selected video. " +
-      "The extension requires playVideo(), getPlayerState(), and getCurrentTime() from #movie_player."
-    );
+    // No startup deadline: keep waiting for YouTube's SPA/player to finish initializing.
   }
 
   function subscribeToState(player, methods, callback) {
@@ -109,10 +105,9 @@
     }
   }
 
-  async function waitForPlaybackToAdvance(api, video, initialTime, timeoutMs, lastEventState) {
+  async function waitForPlaybackToAdvance(api, video, initialTime, lastEventState) {
     const player = api.player;
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+    while (true) {
       if (!video.isConnected) {
         throw new Error("YouTube replaced the video element while playback was starting.");
       }
@@ -136,14 +131,13 @@
     return false;
   }
 
-  async function startPlayback(api, video, options = {}) {
+  async function startPlayback(api, video) {
     if (!api || !api.player || !video) {
       throw new Error("A ready YouTube player API and video element are required.");
     }
 
     const player = api.player;
     const methods = api.methods;
-    const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 15000;
     const initialState = readState(player);
     if (initialState === PLAYER_STATE.PLAYING && !video.paused && !video.ended) {
       return {state: initialState, currentTime: readTime(player)};
@@ -180,13 +174,7 @@
           try {
             const result = video.play();
             if (result && typeof result.then === "function") {
-              let timer;
-              await Promise.race([
-                Promise.resolve(result),
-                new Promise((_, reject) => {
-                  timer = setTimeout(() => reject(new Error("The native video play request timed out.")), 8000);
-                })
-              ]).finally(() => clearTimeout(timer));
+              await Promise.resolve(result);
             }
           } catch (error) {
             mediaError = error;
@@ -195,7 +183,7 @@
       }
 
       const advanced = await waitForPlaybackToAdvance(
-        api, video, baseline, timeoutMs, lastEventState
+        api, video, baseline, lastEventState
       );
       if (!advanced) {
         const failure = mediaError || commandError;
