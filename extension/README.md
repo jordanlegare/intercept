@@ -4,7 +4,7 @@ This directory contains the Firefox add-ons maintained with Intercept.
 
 ## Playback Capture — standalone YouTube recorder
 
-**Current package:** [Playback Capture 1.4.1](./youtube-playback-download-1.4.1.xpi)
+**Current package:** [Playback Capture 1.4.2](./youtube-playback-download-1.4.2.xpi)
 
 Playback Capture adds per-video `REC` controls to YouTube, queues selected videos, starts playback through YouTube's exposed player API, records decoded playback output as WebM, and downloads completed captures. It runs independently of the Intercept Rust server.
 
@@ -19,9 +19,13 @@ For the capture queue to start playback automatically without an `ALLOW PLAY` re
 
 A site-specific block can override the global default. When Firefox rejects startup, the helper tab remains foregrounded so Firefox's native autoplay-blocked address-bar control is visible. Click it and choose **Allow Audio and Video** for `www.youtube.com`. Return to the source tab and click **RETRY** to resume the same queued job. The extension cannot set the Firefox permission programmatically. With the site permission enabled, the extension can start new queued captures automatically, subject to player, ad, and network readiness. The helper tab is temporarily foregrounded during startup because Firefox may defer autoplay in background tabs. Transient startup failures retain the helper tab and display RETRY instead of closing it immediately; retry resumes the same queue item. Player startup has no timeout and waits as long as needed for initialization.
 
+### Firefox data collection declaration
+
+Playback Capture declares `required: ["none"]` in Firefox's built-in data consent manifest field. Capture selections, video metadata, queue state, session history, and recordings remain in local browser storage or the local download destination; the extension does not transmit this information to an external service.
+
 ### Install the development XPI
 
-1. Download [youtube-playback-download-1.4.1.xpi](./youtube-playback-download-1.4.1.xpi).
+1. Download [youtube-playback-download-1.4.2.xpi](./youtube-playback-download-1.4.2.xpi).
 2. Open `about:debugging#/runtime/this-firefox`.
 3. Select **Load Temporary Add-on** and choose the XPI.
 4. Reload YouTube tabs that were already open.
