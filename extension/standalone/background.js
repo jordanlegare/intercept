@@ -248,6 +248,7 @@ async function pumpDownloadQueue() {
       captureJob.phase = "Firefox is downloading this WebM";
       captureJob.downloadId = downloadId;
       captureJob.updatedAt = Date.now();
+      void persistCaptureState();
     }
     // Once Firefox returns a download ID, keep the single-download lock until
     // downloads.onChanged reports completion or interruption. A disconnected page
@@ -276,6 +277,7 @@ async function pumpDownloadQueue() {
       if (captureJob.ownedTab && Number.isInteger(captureJob.tabId)) {
         void browser.tabs.remove(captureJob.tabId).catch(() => {});
       }
+      void persistCaptureState();
       void pumpCaptureQueue();
     }
     if (downloadId !== null && activeDownloadId === downloadId) activeDownloadId = null;
@@ -673,4 +675,28 @@ browser.runtime.onMessage.addListener((message, sender) => {
 });
 
 
-void ensureCaptureStateRestored().then(() => pumpCaptureQueue());
+async function resumePersistedDownloadHandoffs() {
+  const jobs = Array.from(captureJobs.values()).filter(job =>
+    job.state === "download_queued" && Number.isInteger(job.tabId) && job.captureId
+  );
+  for (const job of jobs) {
+    try {
+      job.phase = "Restoring the queued WebM download from temporary storage";
+      job.updatedAt = Date.now();
+      await persistCaptureState();
+      await runCaptureCommand(job.tabId, "recover", job.captureId);
+    } catch (error) {
+      job.state = "failed";
+      job.slot = false;
+      job.completedAt = Date.now();
+      job.updatedAt = Date.now();
+      job.error = "Could not resume the saved WebM download after the background manager restarted: "
+        + String(error && error.message || error);
+      await persistCaptureState();
+    }
+  }
+}
+
+void ensureCaptureStateRestored().then(() => {
+  void resumePersistedDownloadHandoffs().then(() => pumpCaptureQueue());
+});
